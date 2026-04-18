@@ -1919,6 +1919,15 @@ const OwnerHomeScreen = () => {
   const sections = (live.sections && live.sections.length) ? live.sections : M.floors;
   const attendancePct = Math.round((a.present / a.total) * 100);
 
+  // Live counts for 'Needs your attention' cards
+  const { items: liveLeaves } = window.useLiveLeaves ? window.useLiveLeaves() : { items: [] };
+  const pendingLeaves = liveLeaves.filter(l => l.status === 'pending').length;
+  const { tasks: openingTasks } = window.useLiveTasks
+    ? window.useLiveTasks({ scope: 'owner' })
+    : { tasks: [] };
+  const openingDone  = openingTasks.filter(t => t.done).length;
+  const openingTotal = openingTasks.length;
+
   const hour = new Date().getHours();
   const greetKey = hour < 12 ? 'goodMorning' : 'goodAfternoon';
 
@@ -2009,20 +2018,14 @@ const OwnerHomeScreen = () => {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
           <AttentionCard
             icon="calendar" tone="info"
-            title={`${M.leaveRequests.length} ${t('leaveRequests').toLowerCase()}`}
-            subtitle="Awaiting your approval · 2 for this week"
+            title={`${pendingLeaves} ${t('leaveRequests').toLowerCase()}`}
+            subtitle={pendingLeaves ? 'Awaiting your approval' : 'All caught up'}
             onClick={() => nav.go('leaves')}
-          />
-          <AttentionCard
-            icon="alert" tone="warning"
-            title={`${M.complaints.length} ${t('complaints').toLowerCase()}`}
-            subtitle="1 marked urgent · Alteration delay"
-            onClick={() => {}}
           />
           <AttentionCard
             icon="tasks" tone="brand"
             title={t('openingTask')}
-            subtitle={`${M.openingTasks.filter(x => x.done).length} / ${M.openingTasks.length} completed`}
+            subtitle={openingTotal ? `${openingDone} / ${openingTotal} completed` : 'No items today'}
             onClick={() => nav.go('tasks')}
           />
         </div>
@@ -3356,8 +3359,14 @@ const HRHomeScreen = () => {
   const { nav, setLang, lang } = useApp();
   const T_ = window.TOKENS;
   const M = window.MOCK;
-  const live = window.useLiveAttendance ? window.useLiveAttendance() : { attendance: null };
+  const live = window.useLiveAttendance ? window.useLiveAttendance() : { attendance: null, sections: null };
   const a = live.attendance || M.attendance;
+
+  const { items: hrLeaves } = window.useLiveLeaves ? window.useLiveLeaves() : { items: [] };
+  const hrPendingLeaves = hrLeaves.filter(l => l.status === 'pending').length;
+  const { items: hrAnns } = window.useLiveAnnouncements ? window.useLiveAnnouncements() : { items: [] };
+  const hrAnnCount = hrAnns.length || M.announcements.length;
+  const hrSectionCount = live.sections ? live.sections.length : (M.floors || []).length;
 
   // "Not yet marked" — the HR pain point. Deliberately surfaced first.
   // With the live backend, unmarked = total - (present + late + absent + on_leave)
@@ -3500,15 +3509,15 @@ const HRHomeScreen = () => {
           <HRTile
             icon="calendar" tone="info"
             title="Leave requests"
-            value={M.leaveRequests.length}
-            sub="3 pending approval"
+            value={hrPendingLeaves}
+            sub={`${hrPendingLeaves} pending approval`}
             onClick={() => nav.go('leaves')}
           />
           <HRTile
             icon="people" tone="brand"
             title="Staff directory"
-            value="312"
-            sub="Across 4 sections"
+            value={a.total}
+            sub={`Across ${hrSectionCount} sections`}
             onClick={() => nav.go('attendance')}
           />
           <HRTile
@@ -3521,7 +3530,7 @@ const HRHomeScreen = () => {
           <HRTile
             icon="bell" tone="neutral"
             title="Announcements"
-            value={M.announcements.length}
+            value={hrAnnCount}
             sub="Post to all staff"
             onClick={() => nav.go('announcements')}
           />
