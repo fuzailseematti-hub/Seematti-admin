@@ -1888,6 +1888,28 @@ const LoginScreen = () => {
   const T_ = window.TOKENS;
   const M = window.MOCK;
 
+  // Pull the demo role reps from the DB so the login subtitles stay accurate
+  // even if the user renames them in the employees table.
+  const { employee: ownerEmp } = window.useLiveStaffEmployee
+    ? window.useLiveStaffEmployee('E000')
+    : { employee: null };
+  const { employee: hrEmp } = window.useLiveStaffEmployee
+    ? window.useLiveStaffEmployee('E001')
+    : { employee: null };
+  const { employee: staffEmp } = window.useLiveStaffEmployee
+    ? window.useLiveStaffEmployee('E003')
+    : { employee: null };
+
+  const subOwner = ownerEmp
+    ? `${ownerEmp.name} · ${ownerEmp.role}`
+    : `${M.owner.name} · ${M.owner.role}`;
+  const subHR = hrEmp
+    ? `${hrEmp.name} · ${hrEmp.role}`
+    : 'Revathi Krishnan · HR Manager';
+  const subStaff = staffEmp
+    ? `${staffEmp.name} · ${staffEmp.role}${staffEmp.section_id ? ' · ' + (SECTION_LABEL[staffEmp.section_id] || '') + ' Section' : ''}`
+    : `${M.staff.name} · ${M.staff.role}`;
+
   return (
     <div style={{
       height: '100%', display: 'flex', flexDirection: 'column',
@@ -1918,21 +1940,21 @@ const LoginScreen = () => {
           <RoleCard
             icon="sparkle"
             title={t('loginOwner')}
-            subtitle={M.owner.name + ' · ' + M.owner.role}
+            subtitle={subOwner}
             onClick={() => { setUser('owner'); nav.go('ownerHome'); }}
             tone="brand"
           />
           <RoleCard
             icon="people"
             title="I am HR"
-            subtitle="Revathi Krishnan · HR Manager"
+            subtitle={subHR}
             onClick={() => { setUser('hr'); nav.go('hrHome'); }}
             tone="info"
           />
           <RoleCard
             icon="user"
             title={t('loginStaff')}
-            subtitle={M.staff.name + ' · ' + M.staff.role}
+            subtitle={subStaff}
             onClick={() => { setUser('staff'); nav.go('staffHome'); }}
             tone="gold"
           />
