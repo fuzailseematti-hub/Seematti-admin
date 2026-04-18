@@ -1056,7 +1056,7 @@ const TabBar = ({ tabs, active, onChange }) => {
       backdropFilter: 'blur(20px) saturate(180%)',
       WebkitBackdropFilter: 'blur(20px) saturate(180%)',
       borderTop: `1px solid ${T.border}`,
-      padding: '10px 8px calc(env(safe-area-inset-bottom, 28px) + 10px)',
+      padding: '4px 8px calc(env(safe-area-inset-bottom, 8px) + 4px)',
       display: 'flex', justifyContent: 'space-around',
       zIndex: 30,
     }}>
@@ -1065,12 +1065,12 @@ const TabBar = ({ tabs, active, onChange }) => {
         return (
           <button key={tab.id} onClick={() => onChange(tab.id)} style={{
             flex: 1, background: 'none', border: 'none', cursor: 'pointer',
-            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3,
-            padding: 6, color: isActive ? T.maroon : T.inkMuted,
+            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
+            padding: '4px 6px', color: isActive ? T.maroon : T.inkMuted,
             fontFamily: 'inherit',
           }}>
-            <Icon name={tab.icon} size={22} strokeWidth={isActive ? 2 : 1.6} />
-            <span style={{ fontSize: 10.5, fontWeight: isActive ? 600 : 500, letterSpacing: 0.1 }}>
+            <Icon name={tab.icon} size={20} strokeWidth={isActive ? 2 : 1.6} />
+            <span style={{ fontSize: 10, fontWeight: isActive ? 600 : 500, letterSpacing: 0.1 }}>
               {tab.label}
             </span>
           </button>
