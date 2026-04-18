@@ -1092,6 +1092,87 @@ const useLiveRoster = () => {
 window.useLiveRoster = useLiveRoster;
 
 // ──────────────────────────────────────────────────────────
+// Live leave-requests hook — joined with employees for display.
+// ──────────────────────────────────────────────────────────
+const SECTION_LABEL = {
+  fancy: 'Fancy', cotton: 'Cotton', silk: 'Silk', dhoti: 'Dhoti',
+};
+
+const fmtFromDate = (iso) => {
+  if (!iso) return '—';
+  const d = new Date(iso + 'T00:00:00');
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+};
+
+const useLiveLeaves = () => {
+  const [items, setItems]     = React.useState([]);
+  const [loading, setLoading] = React.useState(true);
+
+  const fetchAll = React.useCallback(async () => {
+    if (!window.sb) return;
+    const { data } = await window.sb
+      .from('leave_requests')
+      .select('id, employee_id, type, days, from_date, reason, status, decided_at, created_at, employees(name, role, section_id)')
+      .order('created_at', { ascending: false });
+
+    const mapped = (data || []).map(r => ({
+      id:     r.id,
+      name:   r.employees?.name || r.employee_id,
+      role:   (r.employees?.role || '') +
+               (r.employees?.section_id ? ` · ${SECTION_LABEL[r.employees.section_id] || r.employees.section_id}` : ''),
+      type:   r.type,
+      days:   r.days,
+      from:   fmtFromDate(r.from_date),
+      reason: r.reason || '',
+      status: r.status,
+    }));
+    setItems(mapped);
+    setLoading(false);
+  }, []);
+
+  React.useEffect(() => {
+    if (!window.sb) return;
+    fetchAll();
+    const channel = window.sb
+      .channel('live-leaves')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'leave_requests' },
+        () => { fetchAll(); })
+      .subscribe();
+    return () => { window.sb.removeChannel(channel); };
+  }, [fetchAll]);
+
+  const decide = React.useCallback(async (id, action, deciderId) => {
+    if (!window.sb) return;
+    await window.sb
+      .from('leave_requests')
+      .update({
+        status:     action,
+        decided_by: deciderId || null,
+        decided_at: new Date().toISOString(),
+      })
+      .eq('id', id);
+  }, []);
+
+  const submit = React.useCallback(async ({ employeeId, type, days, fromDate, reason }) => {
+    if (!window.sb) return;
+    await window.sb
+      .from('leave_requests')
+      .insert({
+        employee_id: employeeId,
+        type,
+        days,
+        from_date:   fromDate,
+        reason,
+        status:      'pending',
+      });
+  }, []);
+
+  return { items, loading, decide, submit };
+};
+window.useLiveLeaves = useLiveLeaves;
+
+// ──────────────────────────────────────────────────────────
 // Icons — line-style, 24px, stroke 1.75
 // ──────────────────────────────────────────────────────────
 const Icon = ({ name, size = 20, color = 'currentColor', strokeWidth = 1.75 }) => {
@@ -2286,13 +2367,17 @@ const LeavesScreen = () => {
   const { nav, toast } = useApp();
   const t = useT();
   const T_ = window.TOKENS;
-  const M = window.MOCK;
-  const [items, setItems] = React.useState(M.leaveRequests.map(x => ({ ...x, status: 'pending' })));
+  const { items, loading, decide } = window.useLiveLeaves
+    ? window.useLiveLeaves()
+    : { items: [], loading: false, decide: async () => {} };
   const [active, setActive] = React.useState(null);
 
-  const handleAction = (id, action) => {
-    setItems(items.map(x => x.id === id ? { ...x, status: action } : x));
-    toast(action === 'approved' ? `Leave approved for ${items.find(x=>x.id===id).name}` : 'Leave rejected');
+  const handleAction = async (id, action) => {
+    const target = items.find(x => x.id === id);
+    await decide(id, action, 'E000'); // Sundaresan (owner) deciding
+    toast(action === 'approved'
+      ? `Leave approved for ${target?.name || 'employee'}`
+      : 'Leave rejected');
     setActive(null);
   };
 
@@ -2437,13 +2522,34 @@ const MiniStat = ({ label, value, tone }) => {
 const ApplyLeaveScreen = () => {
   const { nav, toast } = useApp();
   const T_ = window.TOKENS;
+  const { submit: persistLeave } = window.useLiveLeaves
+    ? window.useLiveLeaves()
+    : { submit: async () => {} };
   const [type, setType] = React.useState('Casual');
   const [days, setDays] = React.useState(1);
   const [reason, setReason] = React.useState('');
+  const [submitting, setSubmitting] = React.useState(false);
 
-  const submit = () => {
-    toast('Leave request submitted for approval');
-    setTimeout(() => nav.back(), 500);
+  const submit = async () => {
+    if (submitting || !reason.trim()) return;
+    setSubmitting(true);
+    const fromDate = new Date();
+    fromDate.setDate(fromDate.getDate() + 2); // default: from day after tomorrow
+    try {
+      await persistLeave({
+        employeeId: 'E003',  // Priya Lakshmi — the demo staff account
+        type,
+        days,
+        fromDate: fromDate.toISOString().slice(0, 10),
+        reason: reason.trim(),
+      });
+      toast('Leave request submitted for approval');
+      setTimeout(() => nav.back(), 500);
+    } catch (err) {
+      toast('Could not submit — try again');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
