@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Seemaatti · Admin Dashboard</title>
+<link rel="icon" type="image/png" href="assets/seemaatti-logo.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600;700&family=Noto+Sans+Tamil:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; }
+  :root {
+    --bg:        #F7F7F2;
+    --surface:   #FFFFFF;
+    --surfaceAlt:#EFEFE8;
+    --border:    #E3E3D9;
+    --borderSoft:#ECECE3;
+    --ink:       #15221A;
+    --inkSoft:   #3C4A40;
+    --inkMuted:  #77857C;
+    --inkFaint:  #AEB8B1;
+    --brand:     #0E7C3A;
+    --brandDeep: #0A5A29;
+    --brandSoft: #DCEFE1;
+    --gold:      #8A6A00;
+    --goldSoft:  #FFF0A8;
+    --success:   #0E7C3A;
+    --warning:   #B2780A;
+    --warningSoft:#FBECC3;
+    --danger:    #B3261E;
+    --dangerSoft:#FADBD8;
+    --info:      #1C4A7C;
+    --infoSoft:  #DDE6F1;
+  }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    font-family: 'Inter', 'Noto Sans Tamil', -apple-system, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    background: var(--bg);
+    color: var(--ink);
+  }
+  *::-webkit-scrollbar { width: 10px; height: 10px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  *::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.12); border-radius: 5px; }
+  *::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.2); }
+  button { font-family: inherit; }
+  input, select, textarea { font-family: inherit; outline: none; }
+
+  /* Password gate */
+  .gate {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(180deg, #F7F7F2 0%, #E8E1D3 100%);
+    z-index: 100;
+  }
+  .gate-card {
+    width: min(380px, 90vw);
+    background: var(--surface);
+    border-radius: 24px;
+    padding: 36px 32px;
+    box-shadow: 0 30px 60px rgba(0,0,0,0.08), 0 0 0 1px var(--border);
+    text-align: center;
+  }
+  .gate-card img { height: 56px; width: auto; margin: 0 auto 20px; display: block; }
+  .gate-card h1 {
+    font-family: 'Fraunces', Georgia, serif;
+    font-size: 26px; font-weight: 500; margin: 0 0 6px;
+    letter-spacing: -0.6px;
+  }
+  .gate-card p {
+    margin: 0 0 24px; font-size: 13.5px; color: var(--inkMuted);
+  }
+  .gate-card input {
+    width: 100%; padding: 14px 16px; border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    font-size: 15px; color: var(--ink);
+    margin-bottom: 12px; box-sizing: border-box;
+  }
+  .gate-card input:focus { border-color: var(--brand); }
+  .gate-card .err {
+    color: var(--danger); font-size: 12.5px; margin-bottom: 10px;
+    display: none;
+  }
+  .gate-card .err.on { display: block; }
+  .gate-card button {
+    width: 100%; padding: 14px;
+    background: var(--brand); color: #fff;
+    border: none; border-radius: 12px;
+    font-size: 14.5px; font-weight: 600; cursor: pointer;
+  }
+  .gate-card button:hover { background: var(--brandDeep); }
+  .gate-card .hint {
+    margin-top: 18px; font-size: 11.5px; color: var(--inkFaint);
+    letter-spacing: 0.3px;
+  }
+
+  /* App shell */
+  .shell {
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    height: 100vh;
+  }
+  .sidebar {
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    overflow-y: auto;
+  }
+  .sidebar-brand {
+    padding: 20px 20px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px;
+  }
+  .sidebar-brand img { height: 30px; width: auto; }
+  .sidebar-brand .label {
+    font-family: 'Fraunces', Georgia, serif;
+    font-size: 14px; font-weight: 500;
+    letter-spacing: -0.3px; line-height: 1.2;
+  }
+  .sidebar-brand .label small {
+    display: block; font-family: Inter, sans-serif; font-size: 9.5px;
+    color: var(--inkMuted); font-weight: 600;
+    letter-spacing: 0.5px; text-transform: uppercase; margin-top: 2px;
+  }
+  .nav {
+    padding: 12px 8px; flex: 1;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .nav-section {
+    font-size: 10px; font-weight: 700; color: var(--inkFaint);
+    letter-spacing: 0.6px; text-transform: uppercase;
+    padding: 14px 12px 6px;
+  }
+  .nav button {
+    background: none; border: none;
+    text-align: left; padding: 9px 12px; border-radius: 8px;
+    font-size: 13.5px; color: var(--inkSoft); font-weight: 500;
+    cursor: pointer;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .nav button:hover { background: var(--surfaceAlt); }
+  .nav button.active {
+    background: var(--brandSoft); color: var(--brand); font-weight: 600;
+  }
+  .nav button:disabled {
+    color: var(--inkFaint); cursor: not-allowed;
+    opacity: 0.6;
+  }
+  .nav button:disabled:hover { background: none; }
+
+  .sidebar-footer {
+    padding: 12px 14px;
+    border-top: 1px solid var(--border);
+    font-size: 11.5px; color: var(--inkMuted);
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  }
+  .role-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 10px; border-radius: 999px;
+    background: var(--brandSoft); color: var(--brand);
+    font-size: 11px; font-weight: 700;
+    letter-spacing: 0.4px; text-transform: uppercase;
+  }
+  .role-pill.hr { background: var(--infoSoft); color: var(--info); }
+  .role-pill.owner { background: var(--brandSoft); color: var(--brand); }
+  .role-switch {
+    background: var(--surfaceAlt); border: none; padding: 4px 10px;
+    font-size: 11px; font-weight: 600; color: var(--inkSoft);
+    border-radius: 999px; cursor: pointer;
+  }
+  .signout-btn {
+    background: none; border: none;
+    color: var(--inkMuted); font-size: 11.5px; font-weight: 600;
+    cursor: pointer; padding: 4px 6px;
+  }
+  .signout-btn:hover { color: var(--danger); }
+
+  /* Main content */
+  .main {
+    overflow-y: auto;
+    background: var(--bg);
+  }
+  .topbar {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 28px;
+    display: flex; align-items: center; justify-content: space-between;
+    position: sticky; top: 0; z-index: 10;
+  }
+  .topbar h1 {
+    font-family: 'Fraunces', Georgia, serif;
+    font-size: 22px; font-weight: 500; margin: 0;
+    letter-spacing: -0.5px;
+  }
+  .topbar .crumb {
+    font-size: 11px; font-weight: 600; color: var(--inkMuted);
+    letter-spacing: 0.5px; text-transform: uppercase;
+    margin-bottom: 2px;
+  }
+  .content {
+    padding: 28px;
+  }
+
+  .empty {
+    background: var(--surface); border: 1px dashed var(--border);
+    border-radius: 16px; padding: 60px 20px;
+    text-align: center; color: var(--inkMuted);
+  }
+  .empty h3 {
+    font-family: 'Fraunces', Georgia, serif; font-weight: 500;
+    color: var(--ink); font-size: 20px; margin: 0 0 6px;
+    letter-spacing: -0.3px;
+  }
+  .empty p { margin: 0; font-size: 13.5px; }
+
+  /* Mobile fallback */
+  @media (max-width: 720px) {
+    .shell { grid-template-columns: 1fr; }
+    .sidebar {
+      border-right: none; border-bottom: 1px solid var(--border);
+      max-height: 60vh;
+    }
+  }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+  // ──────────────────────────────────────────────────────────
+  // Supabase client (same project as the mobile app).
+  // ──────────────────────────────────────────────────────────
+  window.SB_URL = 'https://hixhbznbejqfnasvgyid.supabase.co';
+  window.SB_KEY = 'sb_publishable__Pit2dNHnYZ5oGLsJsn6lg_ojxAPfT8';
+  if (window.supabase && window.supabase.createClient) {
+    window.sb = window.supabase.createClient(window.SB_URL, window.SB_KEY, {
+      realtime: { params: { eventsPerSecond: 5 } },
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────
+  // Shared admin password (change on first deploy).
+  // SHA-256 hash of the plaintext, computed via crypto.subtle.
+  // Default plaintext: "Seemaatti@2026"
+  // ──────────────────────────────────────────────────────────
+  window.ADMIN_PASSWORD_SHA256 =
+    '1f10e37751cd8216675de6b9962f58654b60e05ad61ec317a2fb62d44aa9f04c';
+
+  window.sha256 = async (text) => {
+    const enc = new TextEncoder().encode(text);
+    const buf = await crypto.subtle.digest('SHA-256', enc);
+    return Array.from(new Uint8Array(buf))
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+  };
+</script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useCallback, createContext, useContext } = React;
+
+// ──────────────────────────────────────────────────────────
+// Password gate
+// ──────────────────────────────────────────────────────────
+const Gate = ({ onPass }) => {
+  const [pwd, setPwd] = useState('');
+  const [err, setErr] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    setBusy(true); setErr(false);
+    const hash = await window.sha256(pwd);
+    if (hash === window.ADMIN_PASSWORD_SHA256) {
+      sessionStorage.setItem('seematti_admin_unlock', '1');
+      onPass();
+    } else {
+      setErr(true);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="gate">
+      <form className="gate-card" onSubmit={submit}>
+        <img src="assets/seemaatti-logo.png" alt="Seemaatti" />
+        <h1>Admin Console</h1>
+        <p>Enter the shared admin password to continue.</p>
+        <input
+          type="password"
+          autoFocus
+          placeholder="Password"
+          value={pwd}
+          onChange={e => setPwd(e.target.value)}
+        />
+        <div className={`err ${err ? 'on' : ''}`}>Incorrect password — try again</div>
+        <button type="submit" disabled={busy}>{busy ? 'Checking…' : 'Unlock'}</button>
+        <div className="hint">SEEMAATTI · INTERNAL · v0.1</div>
+      </form>
+    </div>
+  );
+};
+
+// ──────────────────────────────────────────────────────────
+// App context
+// ──────────────────────────────────────────────────────────
+const AppCtx = createContext(null);
+
+// Permission map — Owner can do everything; HR is restricted from
+// payroll, sections, and employee deletion (per the user's choice).
+const PERMS = {
+  owner: { all: true },
+  hr: {
+    employees:    { read: true, edit: true, delete: false, create: true },
+    sections:     { read: true, edit: false, delete: false, create: false },
+    attendance:   { read: true, edit: true,  delete: true,  create: true },
+    leaves:       { read: true, edit: true,  delete: true,  create: true },
+    tasks:        { read: true, edit: true,  delete: true,  create: true },
+    announcements:{ read: true, edit: true,  delete: true,  create: true },
+    visitors:     { read: true, edit: true,  delete: true,  create: true },
+    payslips:     { read: true, edit: false, delete: false, create: false },
+    reports:      { read: true },
+  },
+};
+const can = (role, area, action='read') => {
+  const p = PERMS[role];
+  if (!p) return false;
+  if (p.all) return true;
+  return !!(p[area] && p[area][action]);
+};
+
+// ──────────────────────────────────────────────────────────
+// Nav definition
+// ──────────────────────────────────────────────────────────
+const NAV = [
+  { section: 'Operations', items: [
+    { id: 'attendance',    label: 'Attendance',    area: 'attendance' },
+    { id: 'leaves',        label: 'Leave requests',area: 'leaves' },
+    { id: 'tasks',         label: 'Tasks',         area: 'tasks' },
+    { id: 'announcements', label: 'Announcements', area: 'announcements' },
+    { id: 'visitors',      label: 'Visitor log',   area: 'visitors' },
+  ]},
+  { section: 'People', items: [
+    { id: 'employees', label: 'Employees', area: 'employees' },
+    { id: 'sections',  label: 'Sections',  area: 'sections' },
+  ]},
+  { section: 'Payroll', items: [
+    { id: 'payslips', label: 'Payslips', area: 'payslips' },
+  ]},
+  { section: 'Insights', items: [
+    { id: 'reports', label: 'Reports & exports', area: 'reports' },
+  ]},
+];
+
+// ──────────────────────────────────────────────────────────
+// App shell
+// ──────────────────────────────────────────────────────────
+const App = () => {
+  const [page, setPage] = useState('attendance');
+  const [role, setRole] = useState(() =>
+    localStorage.getItem('seematti_admin_role') || 'owner'
+  );
+  useEffect(() => {
+    localStorage.setItem('seematti_admin_role', role);
+  }, [role]);
+
+  const signOut = () => {
+    sessionStorage.removeItem('seematti_admin_unlock');
+    location.reload();
+  };
+
+  const flatNav = NAV.flatMap(s => s.items);
+  const currentNav = flatNav.find(i => i.id === page) || flatNav[0];
+  const allowed = can(role, currentNav.area);
+  const visiblePage = allowed ? currentNav : flatNav.find(i => can(role, i.area)) || flatNav[0];
+
+  useEffect(() => {
+    if (!allowed) setPage(visiblePage.id);
+  }, [allowed, visiblePage.id]);
+
+  return (
+    <AppCtx.Provider value={{ role, setRole, page, setPage, can: (a, ac) => can(role, a, ac) }}>
+      <div className="shell">
+        <aside className="sidebar">
+          <div className="sidebar-brand">
+            <img src="assets/seemaatti-logo.png" alt="Seemaatti" />
+            <div className="label">
+              Admin
+              <small>Console</small>
+            </div>
+          </div>
+          <nav className="nav">
+            {NAV.map(group => (
+              <React.Fragment key={group.section}>
+                <div className="nav-section">{group.section}</div>
+                {group.items.map(item => {
+                  const enabled = can(role, item.area);
+                  return (
+                    <button
+                      key={item.id}
+                      className={page === item.id ? 'active' : ''}
+                      disabled={!enabled}
+                      onClick={() => setPage(item.id)}
+                      title={enabled ? '' : 'No access for this role'}
+                    >
+                      {item.label}
+                    </button>
+                  );
+                })}
+              </React.Fragment>
+            ))}
+          </nav>
+          <div className="sidebar-footer">
+            <span className={`role-pill ${role}`}>{role}</span>
+            <button className="role-switch"
+              onClick={() => setRole(role === 'owner' ? 'hr' : 'owner')}
+              title="Switch role">
+              Switch
+            </button>
+            <button className="signout-btn" onClick={signOut}>Sign out</button>
+          </div>
+        </aside>
+
+        <main className="main">
+          <div className="topbar">
+            <div>
+              <div className="crumb">{NAV.find(g => g.items.find(i => i.id === visiblePage.id))?.section || ''}</div>
+              <h1>{visiblePage.label}</h1>
+            </div>
+          </div>
+          <div className="content">
+            <Page name={visiblePage.id} />
+          </div>
+        </main>
+      </div>
+    </AppCtx.Provider>
+  );
+};
+
+// ──────────────────────────────────────────────────────────
+// Page router — slice 1 ships only the shell.
+// ──────────────────────────────────────────────────────────
+const Page = ({ name }) => {
+  return (
+    <div className="empty">
+      <h3>Coming soon</h3>
+      <p>The <strong>{name}</strong> module will land in the next slice.</p>
+    </div>
+  );
+};
+
+// ──────────────────────────────────────────────────────────
+// Root
+// ──────────────────────────────────────────────────────────
+const Root = () => {
+  const [unlocked, setUnlocked] = useState(
+    () => sessionStorage.getItem('seematti_admin_unlock') === '1'
+  );
+  if (!unlocked) return <Gate onPass={() => setUnlocked(true)} />;
+  return <App />;
+};
+
+const mount = (attempts = 0) => {
+  if (window.React && window.ReactDOM && window.supabase) {
+    ReactDOM.createRoot(document.getElementById('root')).render(<Root />);
+  } else if (attempts < 100) {
+    setTimeout(() => mount(attempts + 1), 30);
+  }
+};
+mount();
+</script>
+</body>
+</html>
