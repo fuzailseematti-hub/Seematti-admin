@@ -374,6 +374,79 @@
     to   { opacity: 1; transform: translate(-50%, 0); }
   }
 
+  /* Modal */
+  .modal-back {
+    position: fixed; inset: 0;
+    background: rgba(10, 15, 12, 0.45);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 60;
+    animation: fadeIn 160ms ease-out;
+  }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  .modal {
+    width: min(560px, 92vw);
+    background: var(--surface);
+    border-radius: 18px;
+    box-shadow: 0 30px 60px rgba(0,0,0,0.25);
+    max-height: 90vh; overflow-y: auto;
+    animation: modalIn 180ms ease-out;
+  }
+  @keyframes modalIn {
+    from { transform: translateY(10px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+  .modal-head {
+    padding: 20px 24px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .modal-head h2 {
+    font-family: 'Fraunces', Georgia, serif;
+    font-size: 20px; font-weight: 500; margin: 0;
+    letter-spacing: -0.3px;
+  }
+  .modal-head button.close {
+    background: none; border: none; cursor: pointer;
+    font-size: 20px; color: var(--inkMuted);
+    width: 32px; height: 32px; border-radius: 8px;
+  }
+  .modal-head button.close:hover { background: var(--surfaceAlt); color: var(--ink); }
+  .modal-body { padding: 20px 24px; }
+  .modal-body .field-row { margin-bottom: 14px; }
+  .modal-body label {
+    display: block;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.5px;
+    text-transform: uppercase; color: var(--inkMuted);
+    margin-bottom: 6px;
+  }
+  .modal-body input, .modal-body textarea, .modal-body select {
+    width: 100%;
+    padding: 10px 12px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--surface);
+    font-size: 14px; color: var(--ink);
+    box-sizing: border-box; font-family: inherit;
+  }
+  .modal-body textarea { min-height: 90px; resize: vertical; }
+  .modal-body input:focus, .modal-body textarea:focus { border-color: var(--brand); }
+  .modal-body .checkbox-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 12px; background: var(--bg);
+    border-radius: 10px; border: 1px solid var(--border);
+    cursor: pointer;
+  }
+  .modal-body .checkbox-row input { width: 16px; height: 16px; }
+  .modal-body .checkbox-row .label-text {
+    font-size: 13.5px; color: var(--ink); font-weight: 500;
+  }
+  .modal-body .checkbox-row .sub {
+    font-size: 11.5px; color: var(--inkMuted); margin-top: 2px;
+  }
+  .modal-foot {
+    padding: 14px 24px;
+    border-top: 1px solid var(--border);
+    display: flex; gap: 8px; justify-content: flex-end;
+  }
+
   /* Mobile fallback */
   @media (max-width: 720px) {
     .shell { grid-template-columns: 1fr; }
@@ -1404,12 +1477,295 @@ const LeavesPage = () => {
 };
 
 // ──────────────────────────────────────────────────────────
+// Simple modal primitive (used by Announcements and later CRUD modules)
+// ──────────────────────────────────────────────────────────
+const Modal = ({ open, title, onClose, children, footer }) => {
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [open, onClose]);
+  if (!open) return null;
+  return (
+    <div className="modal-back" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-head">
+          <h2>{title}</h2>
+          <button className="close" onClick={onClose} aria-label="Close">×</button>
+        </div>
+        <div className="modal-body">{children}</div>
+        {footer && <div className="modal-foot">{footer}</div>}
+      </div>
+    </div>
+  );
+};
+
+// ──────────────────────────────────────────────────────────
+// Announcements management — list, create, edit, pin, delete.
+// ──────────────────────────────────────────────────────────
+const AnnouncementsPage = () => {
+  const toast = useToast();
+  const { can, role } = useContext(AppCtx);
+
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [pinFilter, setPinFilter] = useState('all');
+  const [search, setSearch] = useState('');
+
+  const [editing, setEditing] = useState(null); // null | 'new' | row
+
+  const fetchAll = useCallback(async () => {
+    if (!window.sb) return;
+    const { data } = await window.sb
+      .from('announcements')
+      .select('*')
+      .order('pinned', { ascending: false })
+      .order('created_at', { ascending: false });
+    setItems(data || []);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (!window.sb) return;
+    fetchAll();
+    const ch = window.sb.channel('dash-announcements')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'announcements' },
+        () => fetchAll())
+      .subscribe();
+    return () => { window.sb.removeChannel(ch); };
+  }, [fetchAll]);
+
+  const rows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return items.filter(a => {
+      if (pinFilter === 'pinned' && !a.pinned) return false;
+      if (pinFilter === 'unpinned' && a.pinned) return false;
+      if (q && !a.title.toLowerCase().includes(q) && !(a.body || '').toLowerCase().includes(q)
+           && !(a.posted_by || '').toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [items, pinFilter, search]);
+
+  const counts = useMemo(() => {
+    const weekAgo = Date.now() - 7 * 24 * 3600 * 1000;
+    return {
+      total:  items.length,
+      pinned: items.filter(i => i.pinned).length,
+      week:   items.filter(i => new Date(i.created_at).getTime() > weekAgo).length,
+    };
+  }, [items]);
+
+  const togglePin = async (row) => {
+    if (!can('announcements', 'edit')) return;
+    await window.sb.from('announcements')
+      .update({ pinned: !row.pinned }).eq('id', row.id);
+  };
+  const del = async (id) => {
+    if (!can('announcements', 'delete')) return;
+    if (!window.confirm('Delete this announcement?')) return;
+    await window.sb.from('announcements').delete().eq('id', id);
+    toast('Deleted');
+  };
+
+  const startNew = () => setEditing({
+    id: null, title: '', body: '', posted_by: role === 'owner' ? 'Owner' : 'HR', pinned: false,
+  });
+  const startEdit = (row) => setEditing({ ...row });
+  const close = () => setEditing(null);
+
+  const save = async () => {
+    if (!editing) return;
+    const payload = {
+      title: (editing.title || '').trim(),
+      body:  (editing.body || '').trim() || null,
+      posted_by: editing.posted_by || 'HR',
+      pinned: !!editing.pinned,
+    };
+    if (!payload.title) { toast('Title is required'); return; }
+    if (editing.id) {
+      await window.sb.from('announcements').update(payload).eq('id', editing.id);
+      toast('Updated');
+    } else {
+      await window.sb.from('announcements').insert(payload);
+      toast('Posted');
+    }
+    close();
+  };
+
+  return (
+    <div>
+      <div className="stat-strip">
+        <div className="stat"><div className="k">Total</div><div className="v">{counts.total}</div></div>
+        <div className="stat late"><div className="k">Pinned</div><div className="v">{counts.pinned}</div></div>
+        <div className="stat present"><div className="k">This week</div><div className="v">{counts.week}</div></div>
+        <div className="stat"><div className="k">Authors</div><div className="v">{new Set(items.map(i => i.posted_by)).size}</div></div>
+        <div className="stat leave"><div className="k">Showing</div><div className="v">{rows.length}</div></div>
+      </div>
+
+      <div className="toolbar">
+        <div className="seg">
+          {[
+            { id: 'all',      label: `All · ${counts.total}` },
+            { id: 'pinned',   label: `Pinned · ${counts.pinned}` },
+            { id: 'unpinned', label: `Unpinned · ${counts.total - counts.pinned}` },
+          ].map(s => (
+            <button key={s.id}
+              className={pinFilter === s.id ? 'active' : ''}
+              onClick={() => setPinFilter(s.id)}>
+              {s.label}
+            </button>
+          ))}
+        </div>
+        <input type="search" placeholder="Search title, body, or author…"
+          value={search} onChange={e => setSearch(e.target.value)} />
+        {can('announcements', 'create') && (
+          <button className="btn primary" onClick={startNew}
+            style={{ marginLeft: 'auto' }}>
+            + New announcement
+          </button>
+        )}
+      </div>
+
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th style={{ width: 70 }}>Pin</th>
+              <th>Title</th>
+              <th style={{ width: 120 }}>Posted by</th>
+              <th style={{ width: 180 }}>Posted</th>
+              <th style={{ width: 200 }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={5} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                  {loading ? 'Loading…' : 'No announcements.'}
+                </td>
+              </tr>
+            )}
+            {rows.map(row => (
+              <tr key={row.id}>
+                <td>
+                  <button
+                    className="btn"
+                    disabled={!can('announcements', 'edit')}
+                    onClick={() => togglePin(row)}
+                    style={{
+                      height: 28, padding: '0 10px',
+                      background: row.pinned ? 'var(--goldSoft)' : 'var(--surfaceAlt)',
+                      borderColor: row.pinned ? 'var(--goldSoft)' : 'var(--border)',
+                      color: row.pinned ? 'var(--gold)' : 'var(--inkMuted)',
+                    }}
+                    title={row.pinned ? 'Unpin' : 'Pin to top'}>
+                    {row.pinned ? '★ Pinned' : '☆ Pin'}
+                  </button>
+                </td>
+                <td className="name">
+                  {row.title}
+                  {row.body && (
+                    <div style={{ fontSize: 12, color: 'var(--inkMuted)', fontWeight: 400, marginTop: 3, maxWidth: 540, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {row.body}
+                    </div>
+                  )}
+                </td>
+                <td>
+                  <span className="status-pill" style={{
+                    background: row.posted_by === 'Owner' ? 'var(--brandSoft)' : 'var(--infoSoft)',
+                    color:      row.posted_by === 'Owner' ? 'var(--brand)' : 'var(--info)',
+                  }}>{row.posted_by}</span>
+                </td>
+                <td className="muted" style={{ fontSize: 12 }}>
+                  {fmtDateTime(row.created_at)}
+                </td>
+                <td>
+                  {can('announcements', 'edit') && (
+                    <button className="btn" style={{ height: 28, padding: '0 10px', marginRight: 6 }}
+                      onClick={() => startEdit(row)}>Edit</button>
+                  )}
+                  {can('announcements', 'delete') && (
+                    <button className="btn danger" style={{ height: 28, padding: '0 10px' }}
+                      onClick={() => del(row.id)}>Delete</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <Modal
+        open={!!editing}
+        title={editing?.id ? 'Edit announcement' : 'New announcement'}
+        onClose={close}
+        footer={
+          <>
+            <button className="btn" onClick={close}>Cancel</button>
+            <button className="btn primary" onClick={save}>
+              {editing?.id ? 'Save changes' : 'Post announcement'}
+            </button>
+          </>
+        }
+      >
+        {editing && (
+          <>
+            <div className="field-row">
+              <label>Title</label>
+              <input
+                autoFocus
+                value={editing.title}
+                onChange={e => setEditing({ ...editing, title: e.target.value })}
+                placeholder="e.g. Tamil New Year holiday — 14 April, showroom closed"
+              />
+            </div>
+            <div className="field-row">
+              <label>Body (optional)</label>
+              <textarea
+                value={editing.body || ''}
+                onChange={e => setEditing({ ...editing, body: e.target.value })}
+                placeholder="Longer details, instructions, what staff should do…"
+              />
+            </div>
+            <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
+                <label>Posted by</label>
+                <select
+                  value={editing.posted_by}
+                  onChange={e => setEditing({ ...editing, posted_by: e.target.value })}>
+                  <option value="Owner">Owner</option>
+                  <option value="HR">HR</option>
+                </select>
+              </div>
+              <div>
+                <label>Pin to top</label>
+                <label className="checkbox-row" style={{ cursor: 'pointer' }}>
+                  <input type="checkbox"
+                    checked={!!editing.pinned}
+                    onChange={e => setEditing({ ...editing, pinned: e.target.checked })} />
+                  <div>
+                    <div className="label-text">{editing.pinned ? 'Pinned' : 'Normal'}</div>
+                    <div className="sub">Pinned notices appear first everywhere.</div>
+                  </div>
+                </label>
+              </div>
+            </div>
+          </>
+        )}
+      </Modal>
+    </div>
+  );
+};
+
+// ──────────────────────────────────────────────────────────
 // Page router
 // ──────────────────────────────────────────────────────────
 const Page = ({ name }) => {
-  if (name === 'attendance') return <AttendancePage />;
-  if (name === 'employees')  return <EmployeesPage />;
-  if (name === 'leaves')     return <LeavesPage />;
+  if (name === 'attendance')    return <AttendancePage />;
+  if (name === 'employees')     return <EmployeesPage />;
+  if (name === 'leaves')        return <LeavesPage />;
+  if (name === 'announcements') return <AnnouncementsPage />;
   return (
     <div className="empty">
       <h3>Coming soon</h3>
