@@ -5587,6 +5587,7 @@ const MarkAttendanceScreen = () => {
 
   const [section, setSection] = React.useState('all');
   const [filter, setFilter] = React.useState('unmarked'); // unmarked | all
+  const [search, setSearch] = React.useState('');
 
   const sectionMeta = {
     fancy:  'Fancy',  cotton: 'Cotton',
@@ -5603,9 +5604,11 @@ const MarkAttendanceScreen = () => {
     await persistStatus(id, status, userId || 'E001');
   };
 
+  const q = search.trim().toLowerCase();
   const visible = roster.filter(p =>
     (section === 'all' || p.section === section) &&
-    (filter === 'all' || p.status === null)
+    (filter === 'all' || p.status === null) &&
+    (!q || p.name.toLowerCase().includes(q) || (p.id || '').toLowerCase().includes(q) || (p.role || '').toLowerCase().includes(q))
   );
 
   const markedCount = roster.filter(p => p.status !== null).length;
@@ -5642,6 +5645,36 @@ const MarkAttendanceScreen = () => {
           </button>
         }
       />
+
+      {/* Search */}
+      <div style={{ padding: '0 16px 10px' }}>
+        <div style={{ position: 'relative' }}>
+          <input
+            type="search"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search name, ID or role…"
+            style={{
+              width: '100%', padding: '10px 12px 10px 36px', borderRadius: 12,
+              background: T_.surface, border: `1px solid ${T_.border}`,
+              fontSize: 13.5, color: T_.ink, fontFamily: 'inherit',
+              boxSizing: 'border-box', outline: 'none',
+            }} />
+          <div style={{
+            position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)',
+            color: T_.inkFaint, pointerEvents: 'none',
+          }}>
+            <Icon name="search" size={16} />
+          </div>
+          {search && (
+            <button onClick={() => setSearch('')} style={{
+              position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)',
+              background: 'none', border: 'none', cursor: 'pointer', padding: 6,
+              color: T_.inkMuted,
+            }}><Icon name="close" size={14} /></button>
+          )}
+        </div>
+      </div>
 
       {/* Section tabs */}
       <div style={{ padding: '0 16px' }}>
