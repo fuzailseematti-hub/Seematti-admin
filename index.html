@@ -1168,8 +1168,10 @@ const useLiveLeaves = () => {
       .order('created_at', { ascending: false });
 
     const mapped = (data || []).map(r => ({
-      id:     r.id,
-      name:   r.employees?.name || r.employee_id,
+      id:         r.id,
+      employee_id:r.employee_id,
+      name:       r.employees?.name || r.employee_id,
+      section_id: r.employees?.section_id || null,
       role:   (r.employees?.role || '') +
                (r.employees?.section_id ? ` · ${SECTION_LABEL[r.employees.section_id] || r.employees.section_id}` : ''),
       type:   r.type,
@@ -2798,6 +2800,7 @@ const AttendanceScreen = () => {
   const t = useT();
   const T_ = window.TOKENS;
   const M = window.MOCK;
+  const { user, userAccess } = useApp();
   const [section, setSection] = React.useState('all');
 
   const { roster: liveRoster, loading } = window.useLiveRoster
@@ -2806,15 +2809,23 @@ const AttendanceScreen = () => {
   const live = window.useLiveAttendance ? window.useLiveAttendance() : { attendance: null };
   const a = live.attendance || M.attendance;
 
+  // Section scoping — owner/hr/all_sections see everyone; manager/supervisor
+  // see only their assigned sections.
+  const isAdmin = user === 'owner' || user === 'hr';
+  const hasAll = isAdmin || !!(userAccess && userAccess.all_sections);
+  const allowed = hasAll ? null : (userAccess?.section_ids || []);
+
   // Map DB rows (status/inTime) onto the shape RosterRow expects.
-  const roster = liveRoster.map(r => ({
-    name:    r.name,
-    role:    r.role,
-    section: r.section,
-    status:  r.status || 'absent',
-    in:      r.inTime || '—',
-    out:     '—',
-  }));
+  const roster = liveRoster
+    .filter(r => hasAll || allowed.includes(r.section))
+    .map(r => ({
+      name:    r.name,
+      role:    r.role,
+      section: r.section,
+      status:  r.status || 'absent',
+      in:      r.inTime || '—',
+      out:     '—',
+    }));
 
   const sectionMeta = {
     fancy:  { label: 'Fancy',   full: 'Fancy Section' },
@@ -2822,6 +2833,11 @@ const AttendanceScreen = () => {
     silk:   { label: 'Silk',    full: 'Silk Section' },
     dhoti:  { label: 'Dhoti',   full: 'Dhoties & Shirting' },
   };
+
+  // Section tabs: 'All' + the user's allowed sections.
+  const availableSections = hasAll
+    ? ['fancy', 'cotton', 'silk', 'dhoti']
+    : (allowed || []);
 
   const filtered = section === 'all' ? roster : roster.filter(r => r.section === section);
 
@@ -2846,11 +2862,8 @@ const AttendanceScreen = () => {
           background: T_.surfaceAlt, padding: 4, borderRadius: 12,
         }}>
           {[
-            { id: 'all',    label: 'All' },
-            { id: 'fancy',  label: 'Fancy' },
-            { id: 'cotton', label: 'Cotton' },
-            { id: 'silk',   label: 'Silk' },
-            { id: 'dhoti',  label: 'Dhoti' },
+            { id: 'all', label: 'All' },
+            ...availableSections.map(sid => ({ id: sid, label: sectionMeta[sid]?.label || sid })),
           ].map(f => (
             <button key={f.id} onClick={() => setSection(f.id)} style={{
               flex: 1, padding: '8px 4px', borderRadius: 8,
@@ -2937,17 +2950,25 @@ window.AttendanceScreen = AttendanceScreen;
 // Leaves screen — owner approval flow + staff apply leave
 
 const LeavesScreen = () => {
-  const { nav, toast } = useApp();
+  const { nav, toast, user, userId, userAccess } = useApp();
   const t = useT();
   const T_ = window.TOKENS;
-  const { items, loading, decide } = window.useLiveLeaves
+  const { items: allItems, loading, decide } = window.useLiveLeaves
     ? window.useLiveLeaves()
     : { items: [], loading: false, decide: async () => {} };
   const [active, setActive] = React.useState(null);
 
+  const isAdmin = user === 'owner' || user === 'hr';
+  const hasAll = isAdmin || !!(userAccess && userAccess.all_sections);
+  const allowed = hasAll ? null : (userAccess?.section_ids || []);
+  const canApprove = hasAll || !!(userAccess && userAccess.can_approve_leaves);
+
+  const items = allItems.filter(r => hasAll || (r.section_id && allowed.includes(r.section_id)));
+
   const handleAction = async (id, action) => {
+    if (!canApprove) { toast('You don\u2019t have leave approval rights'); return; }
     const target = items.find(x => x.id === id);
-    await decide(id, action, 'E000'); // Sundaresan (owner) deciding
+    await decide(id, action, userId || 'E000');
     toast(action === 'approved'
       ? `Leave approved for ${target?.name || 'employee'}`
       : 'Leave rejected');
@@ -3030,8 +3051,20 @@ const LeavesScreen = () => {
               Balance: 8 casual · 12 earned · 3 sick days remaining this year
             </div>
             <div style={{ display: 'flex', gap: 10 }}>
-              <Button variant="danger" full onClick={() => handleAction(active.id, 'rejected')}>{t('reject')}</Button>
-              <Button variant="success" full onClick={() => handleAction(active.id, 'approved')}>{t('approve')}</Button>
+              {canApprove ? (
+                <>
+                  <Button variant="danger"  full onClick={() => handleAction(active.id, 'rejected')}>{t('reject')}</Button>
+                  <Button variant="success" full onClick={() => handleAction(active.id, 'approved')}>{t('approve')}</Button>
+                </>
+              ) : (
+                <div style={{
+                  flex: 1, padding: 12, borderRadius: 12,
+                  background: T_.surfaceAlt, color: T_.inkMuted,
+                  fontSize: 12.5, textAlign: 'center',
+                }}>
+                  You don't have leave-approval rights. Ask an Owner/HR.
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -3448,14 +3481,15 @@ window.PayslipScreen = PayslipScreen;
 // Announcements & Visitor log
 
 const AnnouncementsScreen = () => {
-  const { user, toast } = useApp();
+  const { user, userAccess, toast } = useApp();
   const T_ = window.TOKENS;
   const M = window.MOCK;
   const { items, loading } = window.useLiveAnnouncements
     ? window.useLiveAnnouncements()
     : { items: [], loading: false };
   const rows = items.length ? items : M.announcements;
-  const canPost = user === 'hr' || user === 'owner';
+  const canPost = user === 'owner' || user === 'hr' ||
+    (userAccess && userAccess.can_post_announcements);
 
   const post = async () => {
     const title = window.prompt('Announcement title?');
@@ -3987,17 +4021,25 @@ window.HRHomeScreen = HRHomeScreen;
 // sets each person's status. Because most staff don't have phones.
 
 const MarkAttendanceScreen = () => {
-  const { nav, toast } = useApp();
+  const { nav, toast, user, userId, userAccess } = useApp();
   const T_ = window.TOKENS;
 
   const {
-    roster,
+    roster: fullRoster,
     loading,
     setStatus: persistStatus,
     markAllPresent: persistMarkAll,
   } = window.useLiveRoster
     ? window.useLiveRoster()
     : { roster: [], loading: false, setStatus: async () => {}, markAllPresent: async () => 0 };
+
+  const isAdmin = user === 'owner' || user === 'hr';
+  const hasAll  = isAdmin || !!(userAccess && userAccess.all_sections);
+  const allowed = hasAll ? null : (userAccess?.section_ids || []);
+  const canEdit = hasAll || !!(userAccess && userAccess.can_edit_attendance);
+
+  // Scope the roster down to the user's sections.
+  const roster = fullRoster.filter(r => hasAll || allowed.includes(r.section));
 
   const [section, setSection] = React.useState('all');
   const [filter, setFilter] = React.useState('unmarked'); // unmarked | all
@@ -4007,9 +4049,14 @@ const MarkAttendanceScreen = () => {
     silk:   'Silk',   dhoti:  'Dhoti',
   };
 
+  const availableSections = hasAll
+    ? ['fancy', 'cotton', 'silk', 'dhoti']
+    : (allowed || []);
+
   const setStatus = async (id, status) => {
+    if (!canEdit) { toast('You don\u2019t have attendance edit rights'); return; }
     // Realtime subscription updates the UI after the upsert lands.
-    await persistStatus(id, status, 'E001'); // marked by Revathi (HR)
+    await persistStatus(id, status, userId || 'E001');
   };
 
   const visible = roster.filter(p =>
@@ -4021,9 +4068,10 @@ const MarkAttendanceScreen = () => {
   const unmarkedCount = roster.length - markedCount;
 
   const markAllPresent = async () => {
+    if (!canEdit) { toast('You don\u2019t have attendance edit rights'); return; }
     const n = await persistMarkAll(
-      p => section === 'all' || p.section === section,
-      'E001'
+      p => (section === 'all' || p.section === section) && (hasAll || allowed.includes(p.section)),
+      userId || 'E001'
     );
     toast(n ? `Marked ${n} staff as present` : 'Nothing pending');
   };
@@ -4058,11 +4106,8 @@ const MarkAttendanceScreen = () => {
           background: T_.surfaceAlt, padding: 4, borderRadius: 12,
         }}>
           {[
-            { id: 'all',    label: 'All' },
-            { id: 'fancy',  label: 'Fancy' },
-            { id: 'cotton', label: 'Cotton' },
-            { id: 'silk',   label: 'Silk' },
-            { id: 'dhoti',  label: 'Dhoti' },
+            { id: 'all', label: 'All' },
+            ...availableSections.map(sid => ({ id: sid, label: sectionMeta[sid] || sid })),
           ].map(f => (
             <button key={f.id} onClick={() => setSection(f.id)} style={{
               flex: 1, padding: '8px 4px', borderRadius: 8,
