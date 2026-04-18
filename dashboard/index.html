@@ -2350,6 +2350,308 @@ const TasksPage = () => {
 };
 
 // ──────────────────────────────────────────────────────────
+// Visitors management — log, check-in/out, edit, delete.
+// ──────────────────────────────────────────────────────────
+const VisitorsPage = () => {
+  const toast = useToast();
+  const { can } = useContext(AppCtx);
+
+  const [from, setFrom]   = useState(() => fmtDateISO(new Date()));
+  const [to, setTo]       = useState(() => fmtDateISO(new Date()));
+  const [status, setStatus] = useState('all');
+  const [search, setSearch] = useState('');
+
+  const [list, setList]   = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const [editing, setEditing] = useState(null);
+  const [saving, setSaving]   = useState(false);
+
+  const fetchAll = useCallback(async () => {
+    if (!window.sb) return;
+    const fromDT = new Date(from + 'T00:00:00').toISOString();
+    const toDT   = new Date(to   + 'T23:59:59').toISOString();
+    const { data } = await window.sb
+      .from('visitors')
+      .select('*')
+      .gte('in_at', fromDT)
+      .lte('in_at', toDT)
+      .order('in_at', { ascending: false });
+    setList(data || []);
+    setLoading(false);
+  }, [from, to]);
+
+  useEffect(() => {
+    if (!window.sb) return;
+    setLoading(true);
+    fetchAll();
+    const ch = window.sb.channel(`dash-visitors-${from}-${to}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'visitors' },
+        () => fetchAll())
+      .subscribe();
+    return () => { window.sb.removeChannel(ch); };
+  }, [fetchAll, from, to]);
+
+  const rows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return list.filter(v => {
+      if (status === 'in' && v.status !== 'in') return false;
+      if (status === 'out' && v.status !== 'out') return false;
+      if (q && !v.name.toLowerCase().includes(q) &&
+              !(v.purpose || '').toLowerCase().includes(q) &&
+              !(v.location || '').toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [list, status, search]);
+
+  const counts = useMemo(() => {
+    const today = fmtDateISO(new Date());
+    const weekAgo = Date.now() - 7 * 24 * 3600 * 1000;
+    const nowIn = list.filter(v => v.status === 'in').length;
+    const todayCount = list.filter(v => fmtDateISO(new Date(v.in_at)) === today).length;
+    const weekCount  = list.filter(v => new Date(v.in_at).getTime() > weekAgo).length;
+    return { nowIn, todayCount, weekCount, total: list.length };
+  }, [list]);
+
+  const startNew = () => setEditing({
+    id: null, name: '', purpose: '', location: 'Reception',
+    status: 'in', in_at: new Date().toISOString(), out_at: null,
+    _new: true,
+  });
+  const startEdit = (row) => setEditing({ ...row, _new: false });
+  const close = () => setEditing(null);
+
+  const save = async () => {
+    if (!editing || saving) return;
+    if (!editing.name.trim()) { toast('Name is required'); return; }
+    setSaving(true);
+    try {
+      const payload = {
+        name: editing.name.trim(),
+        purpose: (editing.purpose || '').trim() || null,
+        location: (editing.location || '').trim() || null,
+        status: editing.status,
+        in_at: editing.in_at,
+        out_at: editing.status === 'out' ? (editing.out_at || new Date().toISOString()) : null,
+      };
+      if (editing._new) {
+        await window.sb.from('visitors').insert(payload);
+        toast(`${payload.name} logged in`);
+      } else {
+        await window.sb.from('visitors').update(payload).eq('id', editing.id);
+        toast('Updated');
+      }
+      close();
+    } finally { setSaving(false); }
+  };
+
+  const checkOut = async (row) => {
+    if (!can('visitors', 'edit')) return;
+    await window.sb.from('visitors')
+      .update({ status: 'out', out_at: new Date().toISOString() })
+      .eq('id', row.id);
+    toast(`${row.name} checked out`);
+  };
+
+  const checkIn = async (row) => {
+    if (!can('visitors', 'edit')) return;
+    await window.sb.from('visitors')
+      .update({ status: 'in', out_at: null })
+      .eq('id', row.id);
+  };
+
+  const del = async (row) => {
+    if (!can('visitors', 'delete')) return;
+    if (!window.confirm(`Delete visit log for ${row.name}?`)) return;
+    await window.sb.from('visitors').delete().eq('id', row.id);
+    toast('Deleted');
+  };
+
+  // Convert ISO to `datetime-local` input format (YYYY-MM-DDTHH:MM)
+  const toLocalInput = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+  const fromLocalInput = (val) => val ? new Date(val).toISOString() : null;
+
+  return (
+    <div>
+      <div className="stat-strip">
+        <div className="stat present"><div className="k">Currently in</div><div className="v">{counts.nowIn}</div></div>
+        <div className="stat"><div className="k">Today</div><div className="v">{counts.todayCount}</div></div>
+        <div className="stat leave"><div className="k">Last 7 days</div><div className="v">{counts.weekCount}</div></div>
+        <div className="stat"><div className="k">In range</div><div className="v">{counts.total}</div></div>
+        <div className="stat"><div className="k">Showing</div><div className="v">{rows.length}</div></div>
+      </div>
+
+      <div className="toolbar">
+        <span style={{ fontSize: 12, color: 'var(--inkMuted)' }}>From</span>
+        <input type="date" value={from} onChange={e => setFrom(e.target.value)} />
+        <span style={{ fontSize: 12, color: 'var(--inkMuted)' }}>to</span>
+        <input type="date" value={to} onChange={e => setTo(e.target.value)} />
+        <button className="btn" onClick={() => {
+          const today = fmtDateISO(new Date());
+          setFrom(today); setTo(today);
+        }}>Today</button>
+        <button className="btn" onClick={() => {
+          const today = new Date();
+          const weekAgo = new Date(today.getTime() - 6 * 24 * 3600 * 1000);
+          setFrom(fmtDateISO(weekAgo)); setTo(fmtDateISO(today));
+        }}>Last 7 days</button>
+
+        <div className="seg">
+          {[
+            { id: 'all', label: 'All' },
+            { id: 'in',  label: `In · ${list.filter(v => v.status === 'in').length}` },
+            { id: 'out', label: `Out · ${list.filter(v => v.status === 'out').length}` },
+          ].map(s => (
+            <button key={s.id} className={status === s.id ? 'active' : ''} onClick={() => setStatus(s.id)}>
+              {s.label}
+            </button>
+          ))}
+        </div>
+
+        <input type="search" placeholder="Search name, purpose, location…"
+          value={search} onChange={e => setSearch(e.target.value)} />
+
+        {can('visitors', 'create') && (
+          <button className="btn primary" onClick={startNew} style={{ marginLeft: 'auto' }}>
+            + Log visitor
+          </button>
+        )}
+      </div>
+
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Purpose</th>
+              <th style={{ width: 140 }}>Location</th>
+              <th style={{ width: 130 }}>In at</th>
+              <th style={{ width: 130 }}>Out at</th>
+              <th style={{ width: 90 }}>Status</th>
+              <th style={{ width: 240 }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={7} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                  {loading ? 'Loading…' : 'No visitors in this range.'}
+                </td>
+              </tr>
+            )}
+            {rows.map(r => (
+              <tr key={r.id}>
+                <td className="name">{r.name}</td>
+                <td>{r.purpose || <span className="muted">—</span>}</td>
+                <td>{r.location || <span className="muted">—</span>}</td>
+                <td className="muted" style={{ fontSize: 12 }}>{fmtDateTime(r.in_at)}</td>
+                <td className="muted" style={{ fontSize: 12 }}>{fmtDateTime(r.out_at)}</td>
+                <td>
+                  <span className={`status-pill ${r.status === 'in' ? 'present' : 'unmarked'}`}>
+                    {r.status === 'in' ? 'Inside' : 'Out'}
+                  </span>
+                </td>
+                <td>
+                  {r.status === 'in' && can('visitors', 'edit') && (
+                    <button className="btn primary" style={{ height: 28, padding: '0 10px', marginRight: 6 }}
+                      onClick={() => checkOut(r)}>Check out</button>
+                  )}
+                  {r.status === 'out' && can('visitors', 'edit') && (
+                    <button className="btn" style={{ height: 28, padding: '0 10px', marginRight: 6 }}
+                      onClick={() => checkIn(r)}>Check back in</button>
+                  )}
+                  {can('visitors', 'edit') && (
+                    <button className="btn" style={{ height: 28, padding: '0 10px', marginRight: 6 }}
+                      onClick={() => startEdit(r)}>Edit</button>
+                  )}
+                  {can('visitors', 'delete') && (
+                    <button className="btn danger" style={{ height: 28, padding: '0 10px' }}
+                      onClick={() => del(r)}>Delete</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <Modal
+        open={!!editing}
+        title={editing?._new ? 'Log visitor' : `Edit ${editing?.name || ''}`}
+        onClose={close}
+        footer={
+          <>
+            <button className="btn" onClick={close} disabled={saving}>Cancel</button>
+            <button className="btn primary" onClick={save} disabled={saving}>
+              {saving ? 'Saving…' : editing?._new ? 'Log visitor' : 'Save'}
+            </button>
+          </>
+        }
+      >
+        {editing && (
+          <>
+            <div className="field-row">
+              <label>Name</label>
+              <input autoFocus
+                value={editing.name}
+                onChange={e => setEditing({ ...editing, name: e.target.value })}
+                placeholder="e.g. Murugan Textiles" />
+            </div>
+            <div className="field-row">
+              <label>Purpose</label>
+              <input
+                value={editing.purpose || ''}
+                onChange={e => setEditing({ ...editing, purpose: e.target.value })}
+                placeholder="Silk yardage delivery" />
+            </div>
+            <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
+                <label>Location</label>
+                <input
+                  value={editing.location || ''}
+                  onChange={e => setEditing({ ...editing, location: e.target.value })}
+                  placeholder="Reception · Loading bay · Admin office…" />
+              </div>
+              <div>
+                <label>Status</label>
+                <select value={editing.status}
+                  onChange={e => setEditing({
+                    ...editing, status: e.target.value,
+                    out_at: e.target.value === 'out' ? (editing.out_at || new Date().toISOString()) : null,
+                  })}>
+                  <option value="in">Inside</option>
+                  <option value="out">Checked out</option>
+                </select>
+              </div>
+            </div>
+            <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
+                <label>In at</label>
+                <input type="datetime-local"
+                  value={toLocalInput(editing.in_at)}
+                  onChange={e => setEditing({ ...editing, in_at: fromLocalInput(e.target.value) })} />
+              </div>
+              <div>
+                <label>Out at</label>
+                <input type="datetime-local"
+                  value={toLocalInput(editing.out_at)}
+                  disabled={editing.status !== 'out'}
+                  onChange={e => setEditing({ ...editing, out_at: fromLocalInput(e.target.value) })} />
+              </div>
+            </div>
+          </>
+        )}
+      </Modal>
+    </div>
+  );
+};
+
+// ──────────────────────────────────────────────────────────
 // Page router
 // ──────────────────────────────────────────────────────────
 const Page = ({ name }) => {
@@ -2358,6 +2660,7 @@ const Page = ({ name }) => {
   if (name === 'leaves')        return <LeavesPage />;
   if (name === 'announcements') return <AnnouncementsPage />;
   if (name === 'tasks')         return <TasksPage />;
+  if (name === 'visitors')      return <VisitorsPage />;
   return (
     <div className="empty">
       <h3>Coming soon</h3>
