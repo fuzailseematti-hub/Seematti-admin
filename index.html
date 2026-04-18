@@ -6559,7 +6559,9 @@ const ChecklistScreen = () => {
               fontWeight: 500, color: T_.ink, marginBottom: 6,
             }}>No checklist items</div>
             <div style={{ fontSize: 12.5, color: T_.inkMuted }}>
-              Tap "New item" to add one.
+              {canAssignOthers
+                ? 'Tap "New item" to add one.'
+                : 'Your checklist will be set up by Owner or HR.'}
             </div>
           </div>
         )}
@@ -6604,7 +6606,7 @@ const ChecklistScreen = () => {
                       padding: '3px 7px', borderRadius: 999, whiteSpace: 'nowrap',
                     }}>Priority</span>
                   )}
-                  {(canAssignOthers || isMine) && (
+                  {canAssignOthers && (
                     <button onClick={() => startEdit(row)} style={{
                       background: 'none', border: 'none', cursor: 'pointer', padding: 4,
                       color: T_.inkFaint, flexShrink: 0,
@@ -6619,20 +6621,21 @@ const ChecklistScreen = () => {
         )}
       </div>
 
-      {/* Add button — everyone can add to their own checklist */}
-      <div style={{ padding: '14px 16px 20px' }}>
-        <button onClick={startNew} style={{
-          width: '100%', padding: 14, borderRadius: 14,
-          background: T_.maroon, color: '#fff', border: 'none',
-          fontSize: 14, fontWeight: 600, cursor: 'pointer',
-          fontFamily: 'inherit',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-          boxShadow: '0 6px 16px -6px rgba(14, 124, 58, 0.45)',
-        }}>
-          <Icon name="plus" size={16} />
-          {canAssignOthers ? 'New checklist item' : 'Add to my checklist'}
-        </button>
-      </div>
+      {/* Add button — only Owner/HR can create checklist items */}
+      {canAssignOthers && (
+        <div style={{ padding: '14px 16px 20px' }}>
+          <button onClick={startNew} style={{
+            width: '100%', padding: 14, borderRadius: 14,
+            background: T_.maroon, color: '#fff', border: 'none',
+            fontSize: 14, fontWeight: 600, cursor: 'pointer',
+            fontFamily: 'inherit',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+            boxShadow: '0 6px 16px -6px rgba(14, 124, 58, 0.45)',
+          }}>
+            <Icon name="plus" size={16} /> New checklist item
+          </button>
+        </div>
+      )}
 
       {/* Edit sheet */}
       {editing && (
