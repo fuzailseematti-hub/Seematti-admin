@@ -1982,6 +1982,374 @@ const AnnouncementsPage = () => {
 };
 
 // ──────────────────────────────────────────────────────────
+// Tasks management — Owner checklist + per-staff tasks per day.
+// ──────────────────────────────────────────────────────────
+const TasksPage = () => {
+  const toast = useToast();
+  const { can } = useContext(AppCtx);
+
+  const [date, setDate]     = useState(() => fmtDateISO(new Date()));
+  const [scope, setScope]   = useState('owner'); // 'owner' | 'staff'
+  const [assignee, setAssignee] = useState('all');
+  const [search, setSearch] = useState('');
+
+  const [tasks, setTasks]   = useState([]);
+  const [loading, setLoading] = useState(true);
+  const { rows: employees } = useEmployees();
+
+  const [editing, setEditing] = useState(null);
+  const [saving, setSaving]   = useState(false);
+  const [copying, setCopying] = useState(false);
+
+  const fetchAll = useCallback(async () => {
+    if (!window.sb) return;
+    const { data } = await window.sb
+      .from('tasks')
+      .select('id, scope, assignee_id, label, owner_label, done, priority, sort_order, due_date')
+      .eq('due_date', date)
+      .order('sort_order');
+    setTasks(data || []);
+    setLoading(false);
+  }, [date]);
+
+  useEffect(() => {
+    if (!window.sb) return;
+    setLoading(true);
+    fetchAll();
+    const ch = window.sb.channel(`dash-tasks-${date}`)
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'tasks', filter: `due_date=eq.${date}` },
+        () => fetchAll())
+      .subscribe();
+    return () => { window.sb.removeChannel(ch); };
+  }, [fetchAll, date]);
+
+  const rows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return tasks.filter(t => {
+      if (t.scope !== scope) return false;
+      if (scope === 'staff' && assignee !== 'all' && t.assignee_id !== assignee) return false;
+      if (q && !t.label.toLowerCase().includes(q) &&
+              !(t.owner_label || '').toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [tasks, scope, assignee, search]);
+
+  const counts = useMemo(() => {
+    const inScope = tasks.filter(t => t.scope === scope);
+    const done = inScope.filter(t => t.done).length;
+    return {
+      total:  inScope.length,
+      done,
+      pending: inScope.length - done,
+      pct: inScope.length ? Math.round((done / inScope.length) * 100) : 0,
+      priority: inScope.filter(t => t.priority && !t.done).length,
+    };
+  }, [tasks, scope]);
+
+  const empById = useMemo(() => {
+    const m = {};
+    employees.forEach(e => { m[e.id] = e; });
+    return m;
+  }, [employees]);
+
+  const staffEmployees = useMemo(() =>
+    employees.filter(e => e.user_type === 'staff' && e.is_active)
+      .sort((a, b) => a.name.localeCompare(b.name))
+  , [employees]);
+
+  const toggleDone = async (row) => {
+    if (!can('tasks', 'edit')) return;
+    await window.sb.from('tasks').update({ done: !row.done }).eq('id', row.id);
+  };
+
+  const startNew = () => {
+    const maxOrder = Math.max(0, ...tasks.filter(t => t.scope === scope).map(t => t.sort_order || 0));
+    setEditing({
+      id: null, scope, assignee_id: scope === 'staff' ? (assignee !== 'all' ? assignee : 'E003') : null,
+      label: '', owner_label: '', priority: false, sort_order: maxOrder + 1,
+      due_date: date, done: false, _new: true,
+    });
+  };
+  const startEdit = (row) => setEditing({ ...row, _new: false });
+  const close = () => setEditing(null);
+
+  const save = async () => {
+    if (!editing || saving) return;
+    if (!editing.label.trim()) { toast('Label is required'); return; }
+    if (editing.scope === 'staff' && !editing.assignee_id) { toast('Assignee is required for staff tasks'); return; }
+    setSaving(true);
+    try {
+      const payload = {
+        scope: editing.scope,
+        assignee_id: editing.scope === 'staff' ? editing.assignee_id : null,
+        label: editing.label.trim(),
+        owner_label: editing.scope === 'owner' ? (editing.owner_label || '').trim() || null : null,
+        priority: !!editing.priority,
+        sort_order: parseInt(editing.sort_order, 10) || 0,
+        due_date: editing.due_date,
+      };
+      if (editing._new) {
+        await window.sb.from('tasks').insert(payload);
+        toast('Task added');
+      } else {
+        await window.sb.from('tasks').update(payload).eq('id', editing.id);
+        toast('Task updated');
+      }
+      close();
+    } finally { setSaving(false); }
+  };
+
+  const del = async (row) => {
+    if (!can('tasks', 'delete')) return;
+    if (!window.confirm(`Delete task “${row.label}”?`)) return;
+    await window.sb.from('tasks').delete().eq('id', row.id);
+    toast('Deleted');
+  };
+
+  const copyToDate = async () => {
+    if (copying) return;
+    const target = window.prompt(
+      'Copy all of today\u2019s tasks (for the current scope) to which date?\n\nYYYY-MM-DD',
+      fmtDateISO(new Date(new Date(date + 'T00:00:00').getTime() + 24 * 3600 * 1000))
+    );
+    if (!target) return;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(target)) { toast('Invalid date format'); return; }
+    const sourceTasks = tasks.filter(t => t.scope === scope);
+    if (!sourceTasks.length) { toast('Nothing to copy'); return; }
+    setCopying(true);
+    try {
+      const payload = sourceTasks.map(t => ({
+        scope: t.scope,
+        assignee_id: t.assignee_id,
+        label: t.label,
+        owner_label: t.owner_label,
+        priority: t.priority,
+        sort_order: t.sort_order,
+        due_date: target,
+        done: false,
+      }));
+      await window.sb.from('tasks').insert(payload);
+      toast(`Copied ${payload.length} tasks to ${target}`);
+    } finally { setCopying(false); }
+  };
+
+  const dateObj = new Date(date + 'T00:00:00');
+  const isToday = date === fmtDateISO(new Date());
+
+  return (
+    <div>
+      <div className="stat-strip">
+        <div className="stat"><div className="k">Total</div><div className="v">{counts.total}</div></div>
+        <div className="stat present"><div className="k">Done</div><div className="v">{counts.done}</div></div>
+        <div className="stat late"><div className="k">Pending</div><div className="v">{counts.pending}</div></div>
+        <div className="stat absent"><div className="k">Priority</div><div className="v">{counts.priority}</div></div>
+        <div className="stat leave"><div className="k">Complete</div><div className="v">{counts.pct}%</div></div>
+      </div>
+
+      <div className="toolbar">
+        <input type="date" value={date} onChange={e => setDate(e.target.value)}
+          style={{ fontWeight: 600 }} />
+        <button className="btn" onClick={() => setDate(fmtDateISO(new Date()))}
+          disabled={isToday}>Today</button>
+
+        <div className="seg">
+          {[{ id: 'owner', label: 'Owner checklist' }, { id: 'staff', label: 'Staff tasks' }].map(s => (
+            <button key={s.id}
+              className={scope === s.id ? 'active' : ''}
+              onClick={() => setScope(s.id)}>
+              {s.label}
+            </button>
+          ))}
+        </div>
+
+        {scope === 'staff' && (
+          <select value={assignee} onChange={e => setAssignee(e.target.value)}>
+            <option value="all">All staff</option>
+            {staffEmployees.map(e => (
+              <option key={e.id} value={e.id}>{e.name} · {e.id}</option>
+            ))}
+          </select>
+        )}
+
+        <input type="search" placeholder="Search task…"
+          value={search} onChange={e => setSearch(e.target.value)} />
+
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          <button className="btn" onClick={copyToDate} disabled={!tasks.length || copying}
+            title="Copy all tasks in this scope to another date">
+            {copying ? 'Copying…' : 'Copy to date…'}
+          </button>
+          {can('tasks', 'create') && (
+            <button className="btn primary" onClick={startNew}>+ New task</button>
+          )}
+        </div>
+      </div>
+
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th style={{ width: 60 }}>Done</th>
+              <th style={{ width: 60 }}>Order</th>
+              <th>Task</th>
+              {scope === 'owner'
+                ? <th style={{ width: 220 }}>Owner (label)</th>
+                : <th style={{ width: 220 }}>Assigned to</th>}
+              <th style={{ width: 80 }}>Priority</th>
+              <th style={{ width: 190 }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={6} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                  {loading ? 'Loading…' : 'No tasks for this date / scope.'}
+                </td>
+              </tr>
+            )}
+            {rows.map(r => (
+              <tr key={r.id} style={r.done ? { opacity: 0.55 } : null}>
+                <td>
+                  <input type="checkbox"
+                    checked={r.done}
+                    onChange={() => toggleDone(r)}
+                    disabled={!can('tasks', 'edit')} />
+                </td>
+                <td className="muted">{r.sort_order}</td>
+                <td className="name" style={{
+                  textDecoration: r.done ? 'line-through' : 'none',
+                }}>{r.label}</td>
+                <td className="muted">
+                  {scope === 'owner'
+                    ? (r.owner_label || '—')
+                    : (empById[r.assignee_id]
+                        ? `${empById[r.assignee_id].name} · ${r.assignee_id}`
+                        : r.assignee_id)}
+                </td>
+                <td>
+                  {r.priority
+                    ? <span className="status-pill late">Priority</span>
+                    : <span className="muted">—</span>}
+                </td>
+                <td>
+                  {can('tasks', 'edit') && (
+                    <button className="btn" style={{ height: 28, padding: '0 10px', marginRight: 6 }}
+                      onClick={() => startEdit(r)}>Edit</button>
+                  )}
+                  {can('tasks', 'delete') && (
+                    <button className="btn danger" style={{ height: 28, padding: '0 10px' }}
+                      onClick={() => del(r)}>Delete</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div style={{ marginTop: 10, fontSize: 11.5, color: 'var(--inkFaint)' }}>
+        {dateObj.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+        {` · ${counts.total} tasks · ${counts.pct}% complete`}
+      </div>
+
+      <Modal
+        open={!!editing}
+        title={editing?._new
+          ? `Add ${editing?.scope === 'owner' ? 'owner-checklist' : 'staff'} task`
+          : 'Edit task'}
+        onClose={close}
+        footer={
+          <>
+            <button className="btn" onClick={close} disabled={saving}>Cancel</button>
+            <button className="btn primary" onClick={save} disabled={saving}>
+              {saving ? 'Saving…' : editing?._new ? 'Add task' : 'Save'}
+            </button>
+          </>
+        }
+      >
+        {editing && (
+          <>
+            <div className="field-row">
+              <label>Scope</label>
+              <div className="seg" style={{ width: 'fit-content' }}>
+                {[{ id: 'owner', label: 'Owner checklist' }, { id: 'staff', label: 'Staff task' }].map(s => (
+                  <button key={s.id}
+                    type="button"
+                    className={editing.scope === s.id ? 'active' : ''}
+                    onClick={() => setEditing({ ...editing, scope: s.id })}>
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="field-row">
+              <label>Task label</label>
+              <input autoFocus
+                value={editing.label}
+                onChange={e => setEditing({ ...editing, label: e.target.value })}
+                placeholder={editing.scope === 'owner'
+                  ? 'e.g. Cash float verified at 6 counters'
+                  : 'e.g. Greet bridal appointment — 11:30 AM'} />
+            </div>
+
+            {editing.scope === 'owner' ? (
+              <div className="field-row">
+                <label>Who's responsible? (optional)</label>
+                <input
+                  value={editing.owner_label || ''}
+                  onChange={e => setEditing({ ...editing, owner_label: e.target.value })}
+                  placeholder="e.g. Saranya (Cashier Lead)" />
+              </div>
+            ) : (
+              <div className="field-row">
+                <label>Assigned to</label>
+                <select
+                  value={editing.assignee_id || ''}
+                  onChange={e => setEditing({ ...editing, assignee_id: e.target.value })}>
+                  <option value="">— select employee —</option>
+                  {staffEmployees.map(emp => (
+                    <option key={emp.id} value={emp.id}>{emp.name} · {emp.id}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+              <div>
+                <label>Due date</label>
+                <input type="date"
+                  value={editing.due_date || ''}
+                  onChange={e => setEditing({ ...editing, due_date: e.target.value })} />
+              </div>
+              <div>
+                <label>Sort order</label>
+                <input type="number"
+                  value={editing.sort_order}
+                  onChange={e => setEditing({ ...editing, sort_order: e.target.value })} />
+              </div>
+              <div>
+                <label>Priority</label>
+                <label className="checkbox-row" style={{ cursor: 'pointer' }}>
+                  <input type="checkbox"
+                    checked={!!editing.priority}
+                    onChange={e => setEditing({ ...editing, priority: e.target.checked })} />
+                  <div>
+                    <div className="label-text">{editing.priority ? 'Priority' : 'Normal'}</div>
+                    <div className="sub">Shown with a pill on the mobile app.</div>
+                  </div>
+                </label>
+              </div>
+            </div>
+          </>
+        )}
+      </Modal>
+    </div>
+  );
+};
+
+// ──────────────────────────────────────────────────────────
 // Page router
 // ──────────────────────────────────────────────────────────
 const Page = ({ name }) => {
@@ -1989,6 +2357,7 @@ const Page = ({ name }) => {
   if (name === 'employees')     return <EmployeesPage />;
   if (name === 'leaves')        return <LeavesPage />;
   if (name === 'announcements') return <AnnouncementsPage />;
+  if (name === 'tasks')         return <TasksPage />;
   return (
     <div className="empty">
       <h3>Coming soon</h3>
