@@ -3402,7 +3402,7 @@ const MiniStat = ({ label, value, tone }) => {
 
 // ─── Apply Leave — anyone signed in submits a request for themselves ──
 const ApplyLeaveScreen = () => {
-  const { nav, toast, userId } = useApp();
+  const { nav, toast, user, userId, userAccess } = useApp();
   const T_ = window.TOKENS;
   const { submit: persistLeave } = window.useLiveLeaves
     ? window.useLiveLeaves()
@@ -3410,23 +3410,61 @@ const ApplyLeaveScreen = () => {
   const [type, setType] = React.useState('Casual');
   const [days, setDays] = React.useState(1);
   const [reason, setReason] = React.useState('');
+  const [employeeId, setEmployeeId] = React.useState(userId || '');
   const [submitting, setSubmitting] = React.useState(false);
+
+  // Keep the picker in sync with the signed-in user when it changes.
+  React.useEffect(() => {
+    if (userId && !employeeId) setEmployeeId(userId);
+  }, [userId, employeeId]);
+
+  // Pool of employees the user can file a leave for.
+  const isAdmin = user === 'owner' || user === 'hr';
+  const hasAll  = isAdmin || !!(userAccess && userAccess.all_sections);
+  const allowed = hasAll ? null : (userAccess?.section_ids || []);
+
+  const [people, setPeople] = React.useState([]);
+  React.useEffect(() => {
+    if (!window.sb) return;
+    let cancelled = false;
+    (async () => {
+      let q = window.sb.from('employees')
+        .select('id, name, role, section_id, user_type')
+        .eq('is_active', true)
+        .order('name');
+      const { data } = await q;
+      if (cancelled) return;
+      const rows = (data || []).filter(e => {
+        if (e.id === userId) return true;                    // always allow self
+        if (hasAll) return true;                             // owner / hr / all_sections
+        if (!e.section_id) return false;                     // other admins without a section
+        return allowed.includes(e.section_id);               // staff in my sections
+      });
+      setPeople(rows);
+    })();
+    return () => { cancelled = true; };
+  }, [hasAll, allowed ? allowed.join(',') : '', userId]);
+
+  const pickedName = React.useMemo(() =>
+    people.find(p => p.id === employeeId)?.name || '', [people, employeeId]);
 
   const submit = async () => {
     if (submitting || !reason.trim()) return;
-    if (!userId) { toast('Sign in first'); return; }
+    if (!employeeId) { toast('Pick a person'); return; }
     setSubmitting(true);
     const fromDate = new Date();
     fromDate.setDate(fromDate.getDate() + 2); // default: from day after tomorrow
     try {
       await persistLeave({
-        employeeId: userId,
+        employeeId,
         type,
         days,
         fromDate: fromDate.toISOString().slice(0, 10),
         reason: reason.trim(),
       });
-      toast('Leave request submitted for approval');
+      toast(employeeId === userId
+        ? 'Leave request submitted for approval'
+        : `Leave request filed for ${pickedName}`);
       setTimeout(() => nav.back(), 500);
     } catch (err) {
       toast('Could not submit — try again');
@@ -3435,10 +3473,37 @@ const ApplyLeaveScreen = () => {
     }
   };
 
+  const subtitle = employeeId === userId
+    ? 'Your request will be reviewed by HR / Owner'
+    : 'Filing on behalf of a team member';
+
   return (
     <div style={{ background: T_.bg, minHeight: '100%' }}>
-      <ScreenHeader back title="Apply leave" subtitle="Your manager will review within 1 business day" />
+      <ScreenHeader back title="Apply leave" subtitle={subtitle} />
       <div style={{ padding: '0 20px' }}>
+        <FieldLabel>For whom</FieldLabel>
+        <select
+          value={employeeId}
+          onChange={e => setEmployeeId(e.target.value)}
+          style={{
+            width: '100%', padding: '12px 14px', borderRadius: 12,
+            background: T_.surface, border: `1px solid ${T_.border}`,
+            fontSize: 14, color: T_.ink, fontFamily: 'inherit',
+            boxSizing: 'border-box', outline: 'none', cursor: 'pointer',
+            marginBottom: 20,
+          }}>
+          {userId && !people.find(p => p.id === userId) && (
+            <option value={userId}>Myself</option>
+          )}
+          {people.map(p => (
+            <option key={p.id} value={p.id}>
+              {p.name}{p.id === userId ? ' (me)' : ''}
+              {p.role ? ` · ${p.role}` : ''}
+              {p.section_id ? ` · ${SECTION_LABEL[p.section_id] || p.section_id}` : ''}
+            </option>
+          ))}
+        </select>
+
         <FieldLabel>Leave type</FieldLabel>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 20 }}>
           {['Casual', 'Sick', 'Earned'].map(t => (
