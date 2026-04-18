@@ -1273,6 +1273,122 @@ const useLiveAnnouncements = () => {
 window.useLiveAnnouncements = useLiveAnnouncements;
 
 // ──────────────────────────────────────────────────────────
+// Live visitors hook — today's log (in + out) + check-out writes.
+// ──────────────────────────────────────────────────────────
+const fmtVisitTime = (iso) => {
+  if (!iso) return null;
+  const d = new Date(iso);
+  let h = d.getHours();
+  const m = String(d.getMinutes()).padStart(2, '0');
+  const ap = h >= 12 ? 'PM' : 'AM';
+  h = h % 12 || 12;
+  return `${h}:${m} ${ap}`;
+};
+
+const useLiveVisitors = () => {
+  const [list, setList]       = React.useState([]);
+  const [loading, setLoading] = React.useState(true);
+
+  const fetchAll = React.useCallback(async () => {
+    if (!window.sb) return;
+    const startOfDay = new Date(); startOfDay.setHours(0,0,0,0);
+    const { data } = await window.sb
+      .from('visitors')
+      .select('*')
+      .gte('in_at', startOfDay.toISOString())
+      .order('in_at', { ascending: false });
+    setList((data || []).map(v => ({
+      id:     v.id,
+      name:   v.name,
+      purpose:v.purpose,
+      floor:  v.location,
+      inAt:   fmtVisitTime(v.in_at),
+      outAt:  fmtVisitTime(v.out_at),
+      status: v.status,
+    })));
+    setLoading(false);
+  }, []);
+
+  React.useEffect(() => {
+    if (!window.sb) return;
+    fetchAll();
+    const channel = window.sb
+      .channel('live-visitors')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'visitors' },
+        () => { fetchAll(); })
+      .subscribe();
+    return () => { window.sb.removeChannel(channel); };
+  }, [fetchAll]);
+
+  const checkOut = React.useCallback(async (id) => {
+    if (!window.sb) return;
+    await window.sb
+      .from('visitors')
+      .update({ status: 'out', out_at: new Date().toISOString() })
+      .eq('id', id);
+  }, []);
+
+  const addVisitor = React.useCallback(async ({ name, purpose, location }) => {
+    if (!window.sb) return;
+    await window.sb
+      .from('visitors')
+      .insert({ name, purpose, location, status: 'in' });
+  }, []);
+
+  return { list, loading, checkOut, addVisitor };
+};
+window.useLiveVisitors = useLiveVisitors;
+
+// ──────────────────────────────────────────────────────────
+// Live payslip hook — latest payslip for a given employee.
+// ──────────────────────────────────────────────────────────
+const useLivePayslip = (employeeId) => {
+  const [payslip, setPayslip] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+
+  const fetchLatest = React.useCallback(async () => {
+    if (!window.sb || !employeeId) return;
+    const { data } = await window.sb
+      .from('payslips')
+      .select('*')
+      .eq('employee_id', employeeId)
+      .order('month', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (data) {
+      const monthDate = new Date(data.month + 'T00:00:00');
+      setPayslip({
+        month: monthDate.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' }),
+        gross: data.gross,
+        deductions: data.deductions,
+        net: data.net,
+        breakdown: data.earnings || [],
+        deduct: data.deduct_items || [],
+        paidAt: data.paid_at,
+        bankLast4: data.bank_last4,
+      });
+    }
+    setLoading(false);
+  }, [employeeId]);
+
+  React.useEffect(() => {
+    fetchLatest();
+    if (!window.sb) return;
+    const channel = window.sb
+      .channel('live-payslips')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'payslips' },
+        () => { fetchLatest(); })
+      .subscribe();
+    return () => { window.sb.removeChannel(channel); };
+  }, [fetchLatest]);
+
+  return { payslip, loading };
+};
+window.useLivePayslip = useLivePayslip;
+
+// ──────────────────────────────────────────────────────────
 // Icons — line-style, 24px, stroke 1.75
 // ──────────────────────────────────────────────────────────
 const Icon = ({ name, size = 20, color = 'currentColor', strokeWidth = 1.75 }) => {
@@ -2854,7 +2970,10 @@ const PayslipScreen = () => {
   const { toast } = useApp();
   const T_ = window.TOKENS;
   const M = window.MOCK;
-  const p = M.payslip;
+  const { payslip, loading } = window.useLivePayslip
+    ? window.useLivePayslip('E003') // Priya — demo staff account
+    : { payslip: null, loading: false };
+  const p = payslip || M.payslip;
 
   return (
     <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 40 }}>
@@ -3024,12 +3143,26 @@ const AnnouncementsScreen = () => {
 const VisitorsScreen = () => {
   const { toast } = useApp();
   const T_ = window.TOKENS;
-  const M = window.MOCK;
-  const [list, setList] = React.useState(M.visitors);
+  const {
+    list, loading,
+    checkOut: persistCheckOut,
+    addVisitor: persistAdd,
+  } = window.useLiveVisitors
+    ? window.useLiveVisitors()
+    : { list: [], loading: false, checkOut: async () => {}, addVisitor: async () => {} };
 
-  const checkOut = (id) => {
-    setList(list.map(v => v.id === id ? { ...v, status: 'out', outAt: 'Just now' } : v));
+  const checkOut = async (id) => {
+    await persistCheckOut(id);
     toast('Visitor checked out');
+  };
+
+  const logNewVisitor = async () => {
+    const name = window.prompt('Visitor name?');
+    if (!name) return;
+    const purpose = window.prompt('Purpose of visit?') || '';
+    const location = window.prompt('Location / floor?') || 'Reception';
+    await persistAdd({ name, purpose, location });
+    toast(`${name} logged in`);
   };
 
   const inside = list.filter(v => v.status === 'in');
@@ -3037,9 +3170,9 @@ const VisitorsScreen = () => {
 
   return (
     <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 40 }}>
-      <ScreenHeader back title="Visitor log" subtitle={`${inside.length} currently in showroom`}
+      <ScreenHeader back title="Visitor log" subtitle={loading ? 'Loading…' : `${inside.length} currently in showroom`}
         trailing={
-          <button onClick={() => toast('Add visitor — coming soon')} style={{
+          <button onClick={logNewVisitor} style={{
             height: 36, padding: '0 12px', borderRadius: 10,
             background: T_.maroon, color: '#fff', border: 'none',
             fontSize: 12.5, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
