@@ -982,7 +982,7 @@ const Button = ({ children, variant = 'primary', size = 'md', icon, onClick, sty
 const ScreenHeader = ({ back, title, subtitle, trailing }) => {
   const { nav } = useApp();
   return (
-    <div style={{ padding: '60px 20px 16px', background: T.bg }}>
+    <div style={{ padding: 'calc(max(env(safe-area-inset-top), 46px) + 14px) 20px 16px', background: T.bg }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: back ? 14 : 0 }}>
         {back && (
           <button onClick={() => nav.back()} style={{
@@ -1179,7 +1179,7 @@ const LoginScreen = () => {
     <div style={{
       height: '100%', display: 'flex', flexDirection: 'column',
       background: `linear-gradient(180deg, ${T_.bg} 0%, ${T_.surfaceAlt} 100%)`,
-      padding: '80px 28px 40px', boxSizing: 'border-box',
+      padding: 'calc(max(env(safe-area-inset-top), 46px) + 34px) 28px 40px', boxSizing: 'border-box',
     }}>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
         {/* Brand — real logo lockup */}
@@ -1288,7 +1288,7 @@ const OwnerHomeScreen = () => {
   return (
     <div style={{ background: T_.bg, paddingBottom: 90 }}>
       {/* Header strip */}
-      <div style={{ padding: '58px 20px 0' }}>
+      <div style={{ padding: 'calc(max(env(safe-area-inset-top), 46px) + 12px) 20px 0' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <img src={LOGO_SRC} alt="Seemaatti" style={{ height: 34, width: 'auto', display: 'block' }} />
@@ -1625,7 +1625,7 @@ const StaffHomeScreen = () => {
   return (
     <div style={{ background: T_.bg, paddingBottom: 90 }}>
       {/* Header */}
-      <div style={{ padding: '58px 20px 0' }}>
+      <div style={{ padding: 'calc(max(env(safe-area-inset-top), 46px) + 12px) 20px 0' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <Avatar name={M.staff.name} size={38} />
@@ -2648,7 +2648,7 @@ const HRHomeScreen = () => {
   return (
     <div style={{ background: T_.bg, paddingBottom: 90 }}>
       {/* Header */}
-      <div style={{ padding: '58px 20px 0' }}>
+      <div style={{ padding: 'calc(max(env(safe-area-inset-top), 46px) + 12px) 20px 0' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <img src={LOGO_SRC} alt="Seemaatti" style={{ height: 34, width: 'auto', display: 'block' }} />
@@ -3293,7 +3293,7 @@ const KioskScannerScreen = () => {
     }}>
       {/* Top bar */}
       <div style={{
-        padding: '56px 20px 16px', display: 'flex',
+        padding: 'calc(max(env(safe-area-inset-top), 46px) + 10px) 20px 16px', display: 'flex',
         alignItems: 'flex-start', justifyContent: 'space-between',
       }}>
         <div>
