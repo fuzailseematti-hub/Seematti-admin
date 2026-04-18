@@ -3387,6 +3387,354 @@ const ItemsEditor = ({ title, items, onChange, onAdd, onRemove, total, totalColo
 );
 
 // ──────────────────────────────────────────────────────────
+// Reports & CSV exports
+// ──────────────────────────────────────────────────────────
+
+// Escape one field for a CSV; wraps in quotes if needed.
+const csvEscape = (v) => {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+};
+const toCSV = (rows, columns) => {
+  const header = columns.map(c => c.label).join(',');
+  const body = rows.map(r =>
+    columns.map(c => csvEscape(typeof c.value === 'function' ? c.value(r) : r[c.value])).join(',')
+  ).join('\n');
+  return '\uFEFF' + header + '\n' + body; // BOM for Excel UTF-8
+};
+const downloadCSV = (filename, csv) => {
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 100);
+};
+
+// Card wrapper for each report type
+const ReportCard = ({ title, description, children }) => (
+  <div style={{
+    background: 'var(--surface)', border: '1px solid var(--border)',
+    borderRadius: 16, padding: 24, marginBottom: 16,
+  }}>
+    <div style={{
+      fontFamily: 'Fraunces, Georgia, serif', fontSize: 20, fontWeight: 500,
+      letterSpacing: -0.3, color: 'var(--ink)', marginBottom: 4,
+    }}>{title}</div>
+    <div style={{ fontSize: 13, color: 'var(--inkMuted)', marginBottom: 16 }}>
+      {description}
+    </div>
+    {children}
+  </div>
+);
+
+const ReportsPage = () => {
+  const toast = useToast();
+  const { rows: employees } = useEmployees();
+  const empById = useMemo(() => {
+    const m = {};
+    employees.forEach(e => { m[e.id] = e; });
+    return m;
+  }, [employees]);
+
+  // ─ Attendance export ──────────────────────────
+  const [attFrom, setAttFrom] = useState(() => fmtDateISO(new Date()));
+  const [attTo,   setAttTo]   = useState(() => fmtDateISO(new Date()));
+  const [attSection, setAttSection] = useState('all');
+  const [attPreview, setAttPreview] = useState(null);
+  const [attBusy, setAttBusy] = useState(false);
+
+  const fetchAttendance = useCallback(async () => {
+    if (!window.sb) return [];
+    let q = window.sb.from('attendance')
+      .select('date, status, punch_in_time, punch_out_time, source, employee_id, employees(name, role, section_id)')
+      .gte('date', attFrom).lte('date', attTo)
+      .order('date').order('employee_id');
+    const { data } = await q;
+    const rows = (data || []).filter(r =>
+      attSection === 'all' || r.employees?.section_id === attSection
+    );
+    return rows;
+  }, [attFrom, attTo, attSection]);
+
+  const attPreviewRun = async () => {
+    setAttBusy(true);
+    try {
+      const rows = await fetchAttendance();
+      const counts = { present: 0, late: 0, absent: 0, on_leave: 0 };
+      rows.forEach(r => { counts[r.status] = (counts[r.status] || 0) + 1; });
+      const employeesCovered = new Set(rows.map(r => r.employee_id)).size;
+      const days = new Set(rows.map(r => r.date)).size;
+      setAttPreview({ rows, counts, employeesCovered, days });
+    } finally { setAttBusy(false); }
+  };
+  const attDownload = async () => {
+    const rows = attPreview?.rows || await fetchAttendance();
+    const csv = toCSV(rows, [
+      { label: 'Date',          value: 'date' },
+      { label: 'Employee ID',   value: 'employee_id' },
+      { label: 'Name',          value: r => r.employees?.name || '' },
+      { label: 'Role',          value: r => r.employees?.role || '' },
+      { label: 'Section',       value: r => SECTION_META[r.employees?.section_id]?.full || r.employees?.section_id || '' },
+      { label: 'Status',        value: 'status' },
+      { label: 'Punch in',      value: 'punch_in_time' },
+      { label: 'Punch out',     value: 'punch_out_time' },
+      { label: 'Source',        value: 'source' },
+    ]);
+    downloadCSV(`attendance_${attFrom}_to_${attTo}.csv`, csv);
+    toast(`Downloaded ${rows.length} attendance rows`);
+  };
+
+  // ─ Payroll export ─────────────────────────────
+  const [payMonth, setPayMonth] = useState(() => firstOfMonth(new Date()));
+  const [paySection, setPaySection] = useState('all');
+  const [payPreview, setPayPreview] = useState(null);
+  const [payBusy, setPayBusy] = useState(false);
+
+  const fetchPayroll = useCallback(async () => {
+    if (!window.sb) return [];
+    const { data } = await window.sb.from('payslips')
+      .select('*, employees(name, role, section_id)')
+      .eq('month', payMonth)
+      .order('employee_id');
+    return (data || []).filter(r =>
+      paySection === 'all' || r.employees?.section_id === paySection
+    );
+  }, [payMonth, paySection]);
+
+  const payPreviewRun = async () => {
+    setPayBusy(true);
+    try {
+      const rows = await fetchPayroll();
+      const gross = rows.reduce((s, r) => s + (r.gross || 0), 0);
+      const ded   = rows.reduce((s, r) => s + (r.deductions || 0), 0);
+      const net   = rows.reduce((s, r) => s + (r.net || 0), 0);
+      const paid  = rows.filter(r => r.paid_at).length;
+      setPayPreview({ rows, gross, ded, net, paid });
+    } finally { setPayBusy(false); }
+  };
+  const payDownload = async () => {
+    const rows = payPreview?.rows || await fetchPayroll();
+    const fmtItems = (items) => (items || [])
+      .map(i => `${i.label}: ${i.amount}`).join('; ');
+    const csv = toCSV(rows, [
+      { label: 'Employee ID',    value: 'employee_id' },
+      { label: 'Name',           value: r => r.employees?.name || '' },
+      { label: 'Role',           value: r => r.employees?.role || '' },
+      { label: 'Section',        value: r => SECTION_META[r.employees?.section_id]?.full || r.employees?.section_id || '' },
+      { label: 'Month',          value: 'month' },
+      { label: 'Earnings',       value: r => fmtItems(r.earnings) },
+      { label: 'Gross',          value: 'gross' },
+      { label: 'Deduction items',value: r => fmtItems(r.deduct_items) },
+      { label: 'Deductions',     value: 'deductions' },
+      { label: 'Net',            value: 'net' },
+      { label: 'Paid on',        value: 'paid_at' },
+      { label: 'Bank last4',     value: 'bank_last4' },
+    ]);
+    downloadCSV(`payroll_${payMonth.slice(0, 7)}.csv`, csv);
+    toast(`Downloaded ${rows.length} payslip rows`);
+  };
+
+  // ─ Leaves export ──────────────────────────────
+  const [lvFrom, setLvFrom] = useState(() => {
+    const d = new Date(); d.setMonth(d.getMonth() - 1);
+    return fmtDateISO(d);
+  });
+  const [lvTo,   setLvTo]   = useState(() => fmtDateISO(new Date()));
+  const [lvStatus, setLvStatus] = useState('all');
+  const [lvPreview, setLvPreview] = useState(null);
+  const [lvBusy, setLvBusy] = useState(false);
+
+  const fetchLeaves = useCallback(async () => {
+    if (!window.sb) return [];
+    let q = window.sb.from('leave_requests')
+      .select('id, employee_id, type, days, from_date, reason, status, decided_by, decided_at, created_at, employees(name, role, section_id)')
+      .gte('created_at', new Date(lvFrom + 'T00:00:00').toISOString())
+      .lte('created_at', new Date(lvTo + 'T23:59:59').toISOString())
+      .order('created_at', { ascending: false });
+    const { data } = await q;
+    return (data || []).filter(r => lvStatus === 'all' || r.status === lvStatus);
+  }, [lvFrom, lvTo, lvStatus]);
+
+  const lvPreviewRun = async () => {
+    setLvBusy(true);
+    try {
+      const rows = await fetchLeaves();
+      const counts = {
+        pending: rows.filter(r => r.status === 'pending').length,
+        approved: rows.filter(r => r.status === 'approved').length,
+        rejected: rows.filter(r => r.status === 'rejected').length,
+      };
+      const days = rows.filter(r => r.status === 'approved').reduce((s, r) => s + (r.days || 0), 0);
+      setLvPreview({ rows, counts, days });
+    } finally { setLvBusy(false); }
+  };
+  const lvDownload = async () => {
+    const rows = lvPreview?.rows || await fetchLeaves();
+    const csv = toCSV(rows, [
+      { label: 'Employee ID',    value: 'employee_id' },
+      { label: 'Name',           value: r => r.employees?.name || '' },
+      { label: 'Role',           value: r => r.employees?.role || '' },
+      { label: 'Section',        value: r => SECTION_META[r.employees?.section_id]?.full || r.employees?.section_id || '' },
+      { label: 'Type',           value: 'type' },
+      { label: 'Days',           value: 'days' },
+      { label: 'From',           value: 'from_date' },
+      { label: 'Reason',         value: 'reason' },
+      { label: 'Status',         value: 'status' },
+      { label: 'Decided by',     value: 'decided_by' },
+      { label: 'Decided at',     value: 'decided_at' },
+      { label: 'Requested at',   value: 'created_at' },
+    ]);
+    downloadCSV(`leaves_${lvFrom}_to_${lvTo}.csv`, csv);
+    toast(`Downloaded ${rows.length} leave rows`);
+  };
+
+  // ─ Employees export ───────────────────────────
+  const [empIncludeInactive, setEmpIncludeInactive] = useState(false);
+
+  const empDownload = () => {
+    const rows = employees.filter(e => empIncludeInactive || e.is_active);
+    const csv = toCSV(rows, [
+      { label: 'ID',          value: 'id' },
+      { label: 'Name',        value: 'name' },
+      { label: 'Role',        value: 'role' },
+      { label: 'Section',     value: r => SECTION_META[r.section_id]?.full || r.section_id || '' },
+      { label: 'User type',   value: 'user_type' },
+      { label: 'Active',      value: r => r.is_active ? 'Yes' : 'No' },
+      { label: 'Joined date', value: 'joined_date' },
+      { label: 'Phone',       value: 'phone' },
+    ]);
+    downloadCSV(`employees_${fmtDateISO(new Date())}.csv`, csv);
+    toast(`Downloaded ${rows.length} employees`);
+  };
+
+  return (
+    <div>
+      <ReportCard
+        title="Attendance export"
+        description="Daily attendance roster as CSV. One row per employee per day in the selected range."
+      >
+        <div className="toolbar" style={{ margin: 0 }}>
+          <span style={{ fontSize: 12, color: 'var(--inkMuted)' }}>From</span>
+          <input type="date" value={attFrom} onChange={e => setAttFrom(e.target.value)} />
+          <span style={{ fontSize: 12, color: 'var(--inkMuted)' }}>to</span>
+          <input type="date" value={attTo} onChange={e => setAttTo(e.target.value)} />
+          <div className="seg">
+            {[{ id: 'all', label: 'All sections' }, ...Object.entries(SECTION_META).map(([k, v]) => ({ id: k, label: v.label }))]
+              .map(s => (
+                <button key={s.id}
+                  className={attSection === s.id ? 'active' : ''}
+                  onClick={() => setAttSection(s.id)}>
+                  {s.label}
+                </button>
+              ))}
+          </div>
+          <button className="btn" onClick={attPreviewRun} disabled={attBusy}>Preview</button>
+          <button className="btn primary" onClick={attDownload} disabled={attBusy}>Download CSV</button>
+        </div>
+        {attPreview && (
+          <div style={{ marginTop: 14, fontSize: 13, color: 'var(--inkSoft)' }}>
+            <strong>{attPreview.rows.length}</strong> rows · {attPreview.employeesCovered} employees · {attPreview.days} day{attPreview.days === 1 ? '' : 's'}
+            {' · '}<span style={{ color: 'var(--success)' }}>{attPreview.counts.present || 0} present</span>
+            {' · '}<span style={{ color: 'var(--warning)' }}>{attPreview.counts.late || 0} late</span>
+            {' · '}<span style={{ color: 'var(--danger)' }}>{attPreview.counts.absent || 0} absent</span>
+            {' · '}<span style={{ color: 'var(--info)' }}>{attPreview.counts.on_leave || 0} on leave</span>
+          </div>
+        )}
+      </ReportCard>
+
+      <ReportCard
+        title="Payroll export"
+        description="One row per payslip for the selected month, with earnings and deductions serialised."
+      >
+        <div className="toolbar" style={{ margin: 0 }}>
+          <input type="month" value={payMonth.slice(0, 7)}
+            onChange={e => setPayMonth(e.target.value + '-01')} />
+          <div className="seg">
+            {[{ id: 'all', label: 'All sections' }, ...Object.entries(SECTION_META).map(([k, v]) => ({ id: k, label: v.label }))]
+              .map(s => (
+                <button key={s.id}
+                  className={paySection === s.id ? 'active' : ''}
+                  onClick={() => setPaySection(s.id)}>
+                  {s.label}
+                </button>
+              ))}
+          </div>
+          <button className="btn" onClick={payPreviewRun} disabled={payBusy}>Preview</button>
+          <button className="btn primary" onClick={payDownload} disabled={payBusy}>Download CSV</button>
+        </div>
+        {payPreview && (
+          <div style={{ marginTop: 14, fontSize: 13, color: 'var(--inkSoft)' }}>
+            <strong>{payPreview.rows.length}</strong> payslips · {payPreview.paid} paid
+            {' · Gross '}<span style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{rupees(payPreview.gross)}</span>
+            {' · Deductions '}<span style={{ color: 'var(--danger)', fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{rupees(payPreview.ded)}</span>
+            {' · Net '}<span style={{ color: 'var(--brand)', fontWeight: 700, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{rupees(payPreview.net)}</span>
+          </div>
+        )}
+      </ReportCard>
+
+      <ReportCard
+        title="Leaves export"
+        description="Leave requests in the selected range (based on when they were submitted)."
+      >
+        <div className="toolbar" style={{ margin: 0 }}>
+          <span style={{ fontSize: 12, color: 'var(--inkMuted)' }}>From</span>
+          <input type="date" value={lvFrom} onChange={e => setLvFrom(e.target.value)} />
+          <span style={{ fontSize: 12, color: 'var(--inkMuted)' }}>to</span>
+          <input type="date" value={lvTo} onChange={e => setLvTo(e.target.value)} />
+          <div className="seg">
+            {[
+              { id: 'all',     label: 'All' },
+              { id: 'pending', label: 'Pending' },
+              { id: 'approved',label: 'Approved' },
+              { id: 'rejected',label: 'Rejected' },
+            ].map(s => (
+              <button key={s.id}
+                className={lvStatus === s.id ? 'active' : ''}
+                onClick={() => setLvStatus(s.id)}>
+                {s.label}
+              </button>
+            ))}
+          </div>
+          <button className="btn" onClick={lvPreviewRun} disabled={lvBusy}>Preview</button>
+          <button className="btn primary" onClick={lvDownload} disabled={lvBusy}>Download CSV</button>
+        </div>
+        {lvPreview && (
+          <div style={{ marginTop: 14, fontSize: 13, color: 'var(--inkSoft)' }}>
+            <strong>{lvPreview.rows.length}</strong> requests · {lvPreview.days} days granted
+            {' · '}<span style={{ color: 'var(--warning)' }}>{lvPreview.counts.pending} pending</span>
+            {' · '}<span style={{ color: 'var(--success)' }}>{lvPreview.counts.approved} approved</span>
+            {' · '}<span style={{ color: 'var(--danger)' }}>{lvPreview.counts.rejected} rejected</span>
+          </div>
+        )}
+      </ReportCard>
+
+      <ReportCard
+        title="Employee directory export"
+        description="Snapshot of the employees table — useful for HR records and external systems."
+      >
+        <div className="toolbar" style={{ margin: 0 }}>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--inkSoft)', cursor: 'pointer' }}>
+            <input type="checkbox"
+              checked={empIncludeInactive}
+              onChange={e => setEmpIncludeInactive(e.target.checked)} />
+            Include inactive employees
+          </label>
+          <div style={{ flex: 1 }} />
+          <span style={{ fontSize: 13, color: 'var(--inkMuted)' }}>
+            {empIncludeInactive ? employees.length : employees.filter(e => e.is_active).length} rows ready
+          </span>
+          <button className="btn primary" onClick={empDownload}>Download CSV</button>
+        </div>
+      </ReportCard>
+    </div>
+  );
+};
+
+// ──────────────────────────────────────────────────────────
 // Page router
 // ──────────────────────────────────────────────────────────
 const Page = ({ name }) => {
@@ -3398,6 +3746,7 @@ const Page = ({ name }) => {
   if (name === 'visitors')      return <VisitorsPage />;
   if (name === 'sections')      return <SectionsPage />;
   if (name === 'payslips')      return <PayslipsPage />;
+  if (name === 'reports')       return <ReportsPage />;
   return (
     <div className="empty">
       <h3>Coming soon</h3>
