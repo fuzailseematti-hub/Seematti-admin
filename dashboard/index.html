@@ -1152,11 +1152,264 @@ const EmployeesPage = () => {
 };
 
 // ──────────────────────────────────────────────────────────
+// Leaves page — approve / reject / delete with bulk actions.
+// ──────────────────────────────────────────────────────────
+const LEAVE_STATUS_TONE = {
+  pending:  'warning',
+  approved: 'brand',
+  rejected: 'danger',
+};
+
+const fmtDate = (iso) => iso
+  ? new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+  : '—';
+const fmtDateTime = (iso) => iso
+  ? new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+  : '—';
+
+const LeavesPage = () => {
+  const toast = useToast();
+  const { can, role } = useContext(AppCtx);
+
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [statusFilter, setStatusFilter] = useState('pending');
+  const [search, setSearch] = useState('');
+  const [selected, setSelected] = useState(new Set());
+
+  const fetchAll = useCallback(async () => {
+    if (!window.sb) return;
+    const { data } = await window.sb
+      .from('leave_requests')
+      .select('id, employee_id, type, days, from_date, reason, status, decided_by, decided_at, created_at, employees(name, role, section_id)')
+      .order('created_at', { ascending: false });
+    setItems(data || []);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (!window.sb) return;
+    fetchAll();
+    const ch = window.sb.channel('dash-leaves')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'leave_requests' },
+        () => fetchAll())
+      .subscribe();
+    return () => { window.sb.removeChannel(ch); };
+  }, [fetchAll]);
+
+  const rows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return items.filter(r => {
+      if (statusFilter !== 'all' && r.status !== statusFilter) return false;
+      if (q) {
+        const name = (r.employees?.name || '').toLowerCase();
+        const reason = (r.reason || '').toLowerCase();
+        if (!name.includes(q) && !r.employee_id.toLowerCase().includes(q) && !reason.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [items, statusFilter, search]);
+
+  const counts = useMemo(() => ({
+    total:    items.length,
+    pending:  items.filter(i => i.status === 'pending').length,
+    approved: items.filter(i => i.status === 'approved').length,
+    rejected: items.filter(i => i.status === 'rejected').length,
+    totalDays:items.filter(i => i.status === 'approved').reduce((sum, i) => sum + (i.days || 0), 0),
+  }), [items]);
+
+  useEffect(() => { setSelected(new Set()); }, [statusFilter, search]);
+
+  const deciderId = role === 'owner' ? 'E000' : 'E001';
+
+  const decide = async (id, action) => {
+    if (!can('leaves', 'edit')) return;
+    await window.sb.from('leave_requests')
+      .update({ status: action, decided_by: deciderId, decided_at: new Date().toISOString() })
+      .eq('id', id);
+  };
+  const del = async (id) => {
+    if (!can('leaves', 'delete')) return;
+    await window.sb.from('leave_requests').delete().eq('id', id);
+  };
+
+  const bulkDecide = async (action) => {
+    if (!can('leaves', 'edit')) return;
+    const ids = Array.from(selected);
+    if (!ids.length) return;
+    await window.sb.from('leave_requests')
+      .update({ status: action, decided_by: deciderId, decided_at: new Date().toISOString() })
+      .in('id', ids);
+    toast(`${ids.length} leave request${ids.length === 1 ? '' : 's'} ${action}`);
+    setSelected(new Set());
+  };
+  const bulkDelete = async () => {
+    if (!can('leaves', 'delete')) return;
+    const ids = Array.from(selected);
+    if (!ids.length) return;
+    if (!window.confirm(`Delete ${ids.length} leave request${ids.length === 1 ? '' : 's'}? This cannot be undone.`)) return;
+    await window.sb.from('leave_requests').delete().in('id', ids);
+    toast(`${ids.length} deleted`);
+    setSelected(new Set());
+  };
+
+  const toggleRow = (id) => setSelected(s => {
+    const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n;
+  });
+  const toggleAll = () => setSelected(s =>
+    s.size === rows.length ? new Set() : new Set(rows.map(r => r.id)));
+
+  const decidedByName = (id) => {
+    if (id === 'E000') return 'Owner';
+    if (id === 'E001') return 'HR';
+    return id || '—';
+  };
+
+  return (
+    <div>
+      <div className="stat-strip">
+        <div className="stat"><div className="k">Total</div><div className="v">{counts.total}</div></div>
+        <div className="stat late"><div className="k">Pending</div><div className="v">{counts.pending}</div></div>
+        <div className="stat present"><div className="k">Approved</div><div className="v">{counts.approved}</div></div>
+        <div className="stat absent"><div className="k">Rejected</div><div className="v">{counts.rejected}</div></div>
+        <div className="stat leave"><div className="k">Days granted</div><div className="v">{counts.totalDays}</div></div>
+      </div>
+
+      <div className="toolbar">
+        <div className="seg">
+          {[
+            { id: 'pending',  label: `Pending · ${counts.pending}` },
+            { id: 'approved', label: `Approved · ${counts.approved}` },
+            { id: 'rejected', label: `Rejected · ${counts.rejected}` },
+            { id: 'all',      label: `All · ${counts.total}` },
+          ].map(s => (
+            <button key={s.id}
+              className={statusFilter === s.id ? 'active' : ''}
+              onClick={() => setStatusFilter(s.id)}>
+              {s.label}
+            </button>
+          ))}
+        </div>
+        <input type="search" placeholder="Search name, ID, or reason…"
+          value={search} onChange={e => setSearch(e.target.value)} />
+        <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--inkMuted)' }}>
+          {loading ? 'Loading…' : `Showing ${rows.length}`}
+        </div>
+      </div>
+
+      {selected.size > 0 && can('leaves', 'edit') && (
+        <div className="bulk">
+          <span>{selected.size} selected</span>
+          <button className="btn" onClick={() => bulkDecide('approved')}>Approve all</button>
+          <button className="btn" onClick={() => bulkDecide('rejected')}>Reject all</button>
+          {can('leaves', 'delete') && (
+            <button className="btn" onClick={bulkDelete}>Delete</button>
+          )}
+          <button className="btn" onClick={() => setSelected(new Set())} style={{ marginLeft: 'auto' }}>
+            Deselect
+          </button>
+        </div>
+      )}
+
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th style={{ width: 36 }}>
+                <input type="checkbox"
+                  checked={rows.length > 0 && selected.size === rows.length}
+                  onChange={toggleAll} />
+              </th>
+              <th style={{ width: 80 }}>ID</th>
+              <th>Employee</th>
+              <th>Section</th>
+              <th>Type</th>
+              <th style={{ width: 70 }}>Days</th>
+              <th>From</th>
+              <th>Reason</th>
+              <th style={{ width: 100 }}>Status</th>
+              <th style={{ width: 130 }}>Decided</th>
+              <th style={{ width: 200 }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={11} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                  {loading ? 'Loading…' : 'No leave requests match.'}
+                </td>
+              </tr>
+            )}
+            {rows.map(r => (
+              <tr key={r.id} className={selected.has(r.id) ? 'selected' : ''}>
+                <td>
+                  <input type="checkbox"
+                    checked={selected.has(r.id)}
+                    onChange={() => toggleRow(r.id)} />
+                </td>
+                <td className="id">{r.employee_id}</td>
+                <td className="name">
+                  {r.employees?.name || r.employee_id}
+                  <div style={{ fontSize: 11, color: 'var(--inkMuted)', fontWeight: 400, marginTop: 2 }}>
+                    {r.employees?.role || ''}
+                  </div>
+                </td>
+                <td>{SECTION_META[r.employees?.section_id]?.label || <span className="muted">—</span>}</td>
+                <td>{r.type}</td>
+                <td>{r.days}</td>
+                <td className="muted">{fmtDate(r.from_date)}</td>
+                <td style={{ maxWidth: 280 }}>
+                  <div style={{
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }} title={r.reason}>{r.reason || '—'}</div>
+                </td>
+                <td>
+                  <span className={`status-pill ${r.status === 'pending' ? 'late' : r.status === 'approved' ? 'present' : 'absent'}`}>
+                    {r.status}
+                  </span>
+                </td>
+                <td className="muted" style={{ fontSize: 11 }}>
+                  {r.decided_at
+                    ? <>{decidedByName(r.decided_by)}<br/>{fmtDateTime(r.decided_at)}</>
+                    : '—'}
+                </td>
+                <td>
+                  {r.status === 'pending' && can('leaves', 'edit') && (
+                    <>
+                      <button className="btn primary" style={{ height: 28, padding: '0 10px', marginRight: 6 }}
+                        onClick={() => decide(r.id, 'approved')}>Approve</button>
+                      <button className="btn" style={{ height: 28, padding: '0 10px', marginRight: 6 }}
+                        onClick={() => decide(r.id, 'rejected')}>Reject</button>
+                    </>
+                  )}
+                  {r.status !== 'pending' && can('leaves', 'edit') && (
+                    <button className="btn" style={{ height: 28, padding: '0 10px', marginRight: 6 }}
+                      onClick={() => decide(r.id, 'pending')}>Re-open</button>
+                  )}
+                  {can('leaves', 'delete') && (
+                    <button className="btn danger" style={{ height: 28, padding: '0 10px' }}
+                      onClick={() => {
+                        if (!window.confirm('Delete this leave request?')) return;
+                        del(r.id);
+                      }}>Delete</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+// ──────────────────────────────────────────────────────────
 // Page router
 // ──────────────────────────────────────────────────────────
 const Page = ({ name }) => {
   if (name === 'attendance') return <AttendancePage />;
   if (name === 'employees')  return <EmployeesPage />;
+  if (name === 'leaves')     return <LeavesPage />;
   return (
     <div className="empty">
       <h3>Coming soon</h3>
