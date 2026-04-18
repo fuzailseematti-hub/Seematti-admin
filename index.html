@@ -7159,6 +7159,15 @@ const ChecklistScreen = () => {
     setLoading(false);
   }, [today, mode, userId]);
 
+  // Team view should only show checklists for people in Team Access.
+  // Stale rows (no assignee or assignee not in user_access) are hidden.
+  const visibleRows = React.useMemo(() => {
+    if (mode === 'mine') return rows;
+    if (!loginUsers || loginUsers.length === 0) return rows;
+    const teamIds = new Set(loginUsers.map(u => u.id));
+    return rows.filter(r => r.assignee_id && teamIds.has(r.assignee_id));
+  }, [rows, loginUsers, mode]);
+
   React.useEffect(() => {
     if (!window.sb) return;
     setLoading(true);
@@ -7194,8 +7203,8 @@ const ChecklistScreen = () => {
     return m;
   }, [loginUsers]);
 
-  const totalCount = rows.length;
-  const doneCount  = rows.filter(r => r.done).length;
+  const totalCount = visibleRows.length;
+  const doneCount  = visibleRows.filter(r => r.done).length;
   const pct        = totalCount ? Math.round((doneCount / totalCount) * 100) : 0;
 
   const toggleDone = async (row) => {
@@ -7270,7 +7279,7 @@ const ChecklistScreen = () => {
           }}>· {pct}%</span>
         </div>
         <div style={{ fontSize: 13, color: T_.inkMuted, marginTop: 4 }}>
-          {mode === 'mine' ? 'Your daily routine' : 'Everyone\u2019s checklists'}
+          {mode === 'mine' ? 'Your daily routine' : 'Team members\u2019 checklists'}
         </div>
       </div>
 
@@ -7296,7 +7305,7 @@ const ChecklistScreen = () => {
           }}>
             {[
               { id: 'mine',     label: 'Mine' },
-              { id: 'assigned', label: 'Everyone' },
+              { id: 'assigned', label: 'Team' },
             ].map(m => (
               <button key={m.id} onClick={() => setMode(m.id)}
                 style={{
@@ -7318,7 +7327,7 @@ const ChecklistScreen = () => {
             Loading…
           </div>
         )}
-        {!loading && rows.length === 0 && (
+        {!loading && visibleRows.length === 0 && (
           <div style={{
             background: T_.surface, border: `1px dashed ${T_.border}`,
             borderRadius: 14, padding: '30px 20px', textAlign: 'center',
@@ -7334,18 +7343,18 @@ const ChecklistScreen = () => {
             </div>
           </div>
         )}
-        {!loading && rows.length > 0 && (
+        {!loading && visibleRows.length > 0 && (
           <div style={{
             background: T_.surface, border: `1px solid ${T_.border}`,
             borderRadius: 16, overflow: 'hidden',
           }}>
-            {rows.map((row, i) => {
+            {visibleRows.map((row, i) => {
               const assignee = loginUsersById[row.assignee_id];
               const isMine   = row.assignee_id === userId;
               return (
                 <div key={row.id} style={{
                   padding: '14px', display: 'flex', alignItems: 'flex-start', gap: 12,
-                  borderBottom: i === rows.length - 1 ? 'none' : `1px solid ${T_.borderSoft}`,
+                  borderBottom: i === visibleRows.length - 1 ? 'none' : `1px solid ${T_.borderSoft}`,
                   opacity: row.done ? 0.6 : 1,
                 }}>
                   <button onClick={() => toggleDone(row)} style={{
