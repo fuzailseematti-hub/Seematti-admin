@@ -173,7 +173,23 @@
 
   @media (max-width: 900px) {
     .sidePanel { display: none; }
-    .stage { gap: 0; padding: 0; }
+    /* Kill flex centering on mobile — otherwise the IOSDevice (100dvh) gets
+       centered inside a 100vh body, leaving a visible gap above the header
+       whenever the browser chrome height differs from the dynamic viewport. */
+    html, body {
+      height: 100%;
+      overflow: hidden;
+    }
+    body {
+      display: block;
+      background: #F7F7F2;
+    }
+    .stage {
+      display: block;
+      gap: 0; padding: 0;
+      width: 100%; height: 100%;
+      max-width: none; max-height: none;
+    }
   }
 </style>
 
