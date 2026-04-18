@@ -954,6 +954,144 @@ const useLiveAttendance = () => {
 window.useLiveAttendance = useLiveAttendance;
 
 // ──────────────────────────────────────────────────────────
+// Live roster hook — all active staff with today's attendance row joined.
+// Shape: { id, name, role, section, status, inTime }
+// status in the frontend uses 'leave' (matches mock); DB stores 'on_leave'.
+// ──────────────────────────────────────────────────────────
+const fmtTime = (t) => {
+  if (!t) return null;
+  // t is 'HH:MM:SS' from postgres time; convert to h:mm 12-hour format
+  const [hRaw, m] = t.split(':');
+  const h = parseInt(hRaw, 10);
+  const hh = h % 12 || 12;
+  return `${hh}:${m}`;
+};
+
+const DB_TO_UI = { present: 'present', late: 'late', absent: 'absent', on_leave: 'leave' };
+const UI_TO_DB = { present: 'present', late: 'late', absent: 'absent', leave:  'on_leave' };
+
+const useLiveRoster = () => {
+  const [roster, setRoster]   = React.useState([]);
+  const [loading, setLoading] = React.useState(true);
+
+  const fetchAll = React.useCallback(async () => {
+    if (!window.sb) return;
+    const today = new Date().toISOString().slice(0, 10);
+
+    const { data: emp } = await window.sb
+      .from('employees')
+      .select('id, name, role, section_id, user_type, is_active')
+      .eq('user_type', 'staff')
+      .eq('is_active', true)
+      .order('id');
+
+    const { data: att } = await window.sb
+      .from('attendance')
+      .select('employee_id, status, punch_in_time')
+      .eq('date', today);
+
+    const byId = {};
+    (att || []).forEach(a => { byId[a.employee_id] = a; });
+
+    const rows = (emp || []).map(e => {
+      const a = byId[e.id];
+      return {
+        id:      e.id,
+        name:    e.name,
+        role:    e.role,
+        section: e.section_id,
+        status:  a ? (DB_TO_UI[a.status] || null) : null,
+        inTime:  a ? fmtTime(a.punch_in_time) : null,
+      };
+    });
+
+    setRoster(rows);
+    setLoading(false);
+  }, []);
+
+  React.useEffect(() => {
+    if (!window.sb) return;
+    fetchAll();
+    const channel = window.sb
+      .channel('live-roster')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'attendance' },
+        () => { fetchAll(); })
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'employees' },
+        () => { fetchAll(); })
+      .subscribe();
+    return () => { window.sb.removeChannel(channel); };
+  }, [fetchAll]);
+
+  // Persist a status change to Supabase (upsert one row).
+  const setStatus = React.useCallback(async (employeeId, uiStatus, markedBy) => {
+    if (!window.sb) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const dbStatus = UI_TO_DB[uiStatus];
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const hasInTime = uiStatus === 'present' || uiStatus === 'late';
+
+    // Read existing row (if any) so we keep the existing punch_in_time
+    // rather than re-stamping every tap.
+    const { data: existing } = await window.sb
+      .from('attendance')
+      .select('punch_in_time')
+      .eq('employee_id', employeeId)
+      .eq('date', today)
+      .maybeSingle();
+
+    const punchIn = hasInTime
+      ? (existing?.punch_in_time || `${hh}:${mm}:00`)
+      : null;
+
+    await window.sb
+      .from('attendance')
+      .upsert({
+        employee_id:   employeeId,
+        date:          today,
+        status:        dbStatus,
+        punch_in_time: punchIn,
+        source:        'manual',
+        marked_by:     markedBy || null,
+      }, { onConflict: 'employee_id,date' });
+  }, []);
+
+  // Bulk mark all pending employees (no attendance row today) as present.
+  const markAllPresent = React.useCallback(async (predicate, markedBy) => {
+    if (!window.sb) return 0;
+    const today = new Date().toISOString().slice(0, 10);
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const stamp = `${hh}:${mm}:00`;
+
+    const targets = roster.filter(r => r.status === null && (!predicate || predicate(r)));
+    if (!targets.length) return 0;
+
+    await window.sb
+      .from('attendance')
+      .upsert(
+        targets.map(t => ({
+          employee_id:   t.id,
+          date:          today,
+          status:        'present',
+          punch_in_time: stamp,
+          source:        'manual',
+          marked_by:     markedBy || null,
+        })),
+        { onConflict: 'employee_id,date' }
+      );
+    return targets.length;
+  }, [roster]);
+
+  return { roster, loading, setStatus, markAllPresent };
+};
+window.useLiveRoster = useLiveRoster;
+
+// ──────────────────────────────────────────────────────────
 // Icons — line-style, 24px, stroke 1.75
 // ──────────────────────────────────────────────────────────
 const Icon = ({ name, size = 20, color = 'currentColor', strokeWidth = 1.75 }) => {
@@ -2008,21 +2146,21 @@ const AttendanceScreen = () => {
   const M = window.MOCK;
   const [section, setSection] = React.useState('all');
 
-  // section: 'fancy' | 'cotton' | 'silk' | 'dhoti'
-  const roster = [
-    { name: 'Kavitha R.',    role: 'Cashier',          section: 'cotton', status: 'present', in: '9:24', out: '—' },
-    { name: 'Meena S.',      role: 'Sales Associate',  section: 'silk',   status: 'present', in: '9:18', out: '—' },
-    { name: 'Priya Lakshmi', role: 'Sales Associate',  section: 'fancy',  status: 'present', in: '9:42', out: '—' },
-    { name: 'Deepa S.',      role: 'Sales Associate',  section: 'silk',   status: 'late',    in: '10:12',out: '—' },
-    { name: 'Ramesh K.',     role: 'Tailor',           section: 'dhoti',  status: 'leave',   in: '—',    out: '—' },
-    { name: 'Venkatesan P.', role: 'Security',         section: 'cotton', status: 'present', in: '8:55', out: '—' },
-    { name: 'Saranya M.',    role: 'Cashier Lead',     section: 'fancy',  status: 'present', in: '9:02', out: '—' },
-    { name: 'Anitha R.',     role: 'Sales Associate',  section: 'silk',   status: 'absent',  in: '—',    out: '—' },
-    { name: 'Gayathri K.',   role: 'Bridal Consult',   section: 'silk',   status: 'present', in: '9:30', out: '—' },
-    { name: 'Murali T.',     role: 'Packer',           section: 'dhoti',  status: 'present', in: '9:10', out: '—' },
-    { name: 'Lakshmi N.',    role: 'Sales Associate',  section: 'fancy',  status: 'late',    in: '10:04',out: '—' },
-    { name: 'Bhuvana P.',    role: 'Sales Associate',  section: 'cotton', status: 'present', in: '9:20', out: '—' },
-  ];
+  const { roster: liveRoster, loading } = window.useLiveRoster
+    ? window.useLiveRoster()
+    : { roster: [], loading: false };
+  const live = window.useLiveAttendance ? window.useLiveAttendance() : { attendance: null };
+  const a = live.attendance || M.attendance;
+
+  // Map DB rows (status/inTime) onto the shape RosterRow expects.
+  const roster = liveRoster.map(r => ({
+    name:    r.name,
+    role:    r.role,
+    section: r.section,
+    status:  r.status || 'absent',
+    in:      r.inTime || '—',
+    out:     '—',
+  }));
 
   const sectionMeta = {
     fancy:  { label: 'Fancy',   full: 'Fancy Section' },
@@ -2042,10 +2180,10 @@ const AttendanceScreen = () => {
         <div style={{
           display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 18,
         }}>
-          <AttStat label="Present" value={M.attendance.present} color={T_.success} />
-          <AttStat label="Late"    value={M.attendance.late}    color={T_.warning} />
-          <AttStat label="Leave"   value={M.attendance.onLeave} color={T_.info} />
-          <AttStat label="Absent"  value={M.attendance.absent}  color={T_.danger} />
+          <AttStat label="Present" value={a.present} color={T_.success} />
+          <AttStat label="Late"    value={a.late}    color={T_.warning} />
+          <AttStat label="Leave"   value={a.onLeave} color={T_.info} />
+          <AttStat label="Absent"  value={a.absent}  color={T_.danger} />
         </div>
 
         {/* Section filter tabs */}
@@ -2082,7 +2220,7 @@ const AttendanceScreen = () => {
         </div>
 
         <div style={{ fontSize: 11, color: T_.inkFaint, textAlign: 'center', marginTop: 14 }}>
-          Showing {filtered.length} of {M.attendance.total} staff · Scroll for more
+          {loading ? 'Loading…' : `Showing ${filtered.length} of ${a.total} staff · Scroll for more`}
         </div>
       </div>
     </div>
@@ -2776,11 +2914,14 @@ const HRHomeScreen = () => {
   const { nav, setLang, lang } = useApp();
   const T_ = window.TOKENS;
   const M = window.MOCK;
-  const a = M.attendance;
+  const live = window.useLiveAttendance ? window.useLiveAttendance() : { attendance: null };
+  const a = live.attendance || M.attendance;
 
   // "Not yet marked" — the HR pain point. Deliberately surfaced first.
-  const unmarked = 18;
-  const markedPct = Math.round(((a.total - unmarked) / a.total) * 100);
+  // With the live backend, unmarked = total - (present + late + absent + on_leave)
+  const marked = a.present + a.late + a.absent + a.onLeave;
+  const unmarked = Math.max(0, a.total - marked);
+  const markedPct = a.total ? Math.round((marked / a.total) * 100) : 0;
 
   const hour = new Date().getHours();
   const greet = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
@@ -3094,26 +3235,15 @@ const MarkAttendanceScreen = () => {
   const { nav, toast } = useApp();
   const T_ = window.TOKENS;
 
-  // Roster — seeded with some already marked, some pending.
-  const initial = [
-    { id: 'E01', name: 'Kavitha R.',     role: 'Cashier',         section: 'cotton', status: 'present', inTime: '9:24' },
-    { id: 'E02', name: 'Meena S.',       role: 'Sales Associate', section: 'silk',   status: 'present', inTime: '9:18' },
-    { id: 'E03', name: 'Priya Lakshmi',  role: 'Sales Associate', section: 'fancy',  status: 'present', inTime: '9:42' },
-    { id: 'E04', name: 'Deepa S.',       role: 'Sales Associate', section: 'silk',   status: 'late',    inTime: '10:12' },
-    { id: 'E05', name: 'Ramesh K.',      role: 'Tailor',          section: 'dhoti',  status: 'leave',   inTime: '—' },
-    { id: 'E06', name: 'Venkatesan P.',  role: 'Security',        section: 'cotton', status: 'present', inTime: '8:55' },
-    { id: 'E07', name: 'Saranya M.',     role: 'Cashier Lead',    section: 'fancy',  status: 'present', inTime: '9:02' },
-    { id: 'E08', name: 'Anitha R.',      role: 'Sales Associate', section: 'silk',   status: null,      inTime: null },
-    { id: 'E09', name: 'Gayathri K.',    role: 'Bridal Consult',  section: 'silk',   status: 'present', inTime: '9:30' },
-    { id: 'E10', name: 'Murali T.',      role: 'Packer',          section: 'dhoti',  status: null,      inTime: null },
-    { id: 'E11', name: 'Lakshmi N.',     role: 'Sales Associate', section: 'fancy',  status: 'late',    inTime: '10:04' },
-    { id: 'E12', name: 'Bhuvana P.',     role: 'Sales Associate', section: 'cotton', status: 'present', inTime: '9:20' },
-    { id: 'E13', name: 'Muthulakshmi V.',role: 'Sales Associate', section: 'cotton', status: null,      inTime: null },
-    { id: 'E14', name: 'Shanmugam R.',   role: 'Packer',          section: 'dhoti',  status: null,      inTime: null },
-    { id: 'E15', name: 'Divya P.',       role: 'Trainee',         section: 'cotton', status: null,      inTime: null },
-  ];
+  const {
+    roster,
+    loading,
+    setStatus: persistStatus,
+    markAllPresent: persistMarkAll,
+  } = window.useLiveRoster
+    ? window.useLiveRoster()
+    : { roster: [], loading: false, setStatus: async () => {}, markAllPresent: async () => 0 };
 
-  const [roster, setRoster] = React.useState(initial);
   const [section, setSection] = React.useState('all');
   const [filter, setFilter] = React.useState('unmarked'); // unmarked | all
 
@@ -3122,19 +3252,9 @@ const MarkAttendanceScreen = () => {
     silk:   'Silk',   dhoti:  'Dhoti',
   };
 
-  const setStatus = (id, status) => {
-    setRoster(r => r.map(p => {
-      if (p.id !== id) return p;
-      const now = new Date();
-      const hh = now.getHours() % 12 || 12;
-      const mm = String(now.getMinutes()).padStart(2, '0');
-      const stamp = `${hh}:${mm}`;
-      return {
-        ...p,
-        status,
-        inTime: status === 'present' || status === 'late' ? (p.inTime && p.inTime !== '—' ? p.inTime : stamp) : '—',
-      };
-    }));
+  const setStatus = async (id, status) => {
+    // Realtime subscription updates the UI after the upsert lands.
+    await persistStatus(id, status, 'E001'); // marked by Revathi (HR)
   };
 
   const visible = roster.filter(p =>
@@ -3145,16 +3265,12 @@ const MarkAttendanceScreen = () => {
   const markedCount = roster.filter(p => p.status !== null).length;
   const unmarkedCount = roster.length - markedCount;
 
-  const markAllPresent = () => {
-    setRoster(r => r.map(p => {
-      if (p.status !== null) return p;
-      if (section !== 'all' && p.section !== section) return p;
-      const now = new Date();
-      const hh = now.getHours() % 12 || 12;
-      const mm = String(now.getMinutes()).padStart(2, '0');
-      return { ...p, status: 'present', inTime: `${hh}:${mm}` };
-    }));
-    toast('Marked remaining staff as present');
+  const markAllPresent = async () => {
+    const n = await persistMarkAll(
+      p => section === 'all' || p.section === section,
+      'E001'
+    );
+    toast(n ? `Marked ${n} staff as present` : 'Nothing pending');
   };
 
   const save = () => {
