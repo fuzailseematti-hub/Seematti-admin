@@ -3243,8 +3243,10 @@ const TasksScreen = () => {
   const { user, userId, userAccess, toast } = useApp();
   const T_ = window.TOKENS;
 
-  const isAdmin  = user === 'owner' || user === 'hr';
-  const canManage = isAdmin || !!(userAccess && userAccess.can_manage_tasks);
+  // Only Owner + HR can assign tasks to other people. Managers / Supervisors
+  // — even ones with can_manage_tasks (which gates the Checklist tab) —
+  // can only create tasks for themselves on this screen.
+  const canManage = user === 'owner' || user === 'hr';
 
   const today = new Date().toISOString().slice(0, 10);
   const [tasks, setTasks]     = React.useState([]);
