@@ -3047,6 +3047,7 @@ const AttendanceScreen = () => {
   const M = window.MOCK;
   const { user, userAccess } = useApp();
   const [section, setSection] = React.useState('all');
+  const [detail, setDetail] = React.useState(null);  // selected employee_id
 
   const { roster: liveRoster, loading } = window.useLiveRoster
     ? window.useLiveRoster()
@@ -3064,6 +3065,7 @@ const AttendanceScreen = () => {
   const roster = liveRoster
     .filter(r => hasAll || allowed.includes(r.section))
     .map(r => ({
+      id:      r.id,
       name:    r.name,
       role:    r.role,
       section: r.section,
@@ -3137,7 +3139,9 @@ const AttendanceScreen = () => {
           overflow: 'hidden',
         }}>
           {filtered.map((r, i) => (
-            <RosterRow key={i} row={r} last={i === filtered.length - 1} sectionLabel={sectionMeta[r.section]?.label} />
+            <RosterRow key={i} row={r} last={i === filtered.length - 1}
+              sectionLabel={sectionMeta[r.section]?.label}
+              onOpen={() => r.id && setDetail(r.id)} />
           ))}
         </div>
 
@@ -3145,6 +3149,13 @@ const AttendanceScreen = () => {
           {loading ? 'Loading…' : `Showing ${filtered.length} of ${roster.length} staff${section !== 'all' ? ' in this section' : ''}`}
         </div>
       </div>
+
+      {detail && (
+        <EmployeeDetailSheet
+          employeeId={detail}
+          onClose={() => setDetail(null)}
+        />
+      )}
     </div>
   );
 };
@@ -3167,7 +3178,7 @@ const AttStat = ({ label, value, color }) => {
   );
 };
 
-const RosterRow = ({ row, last, sectionLabel }) => {
+const RosterRow = ({ row, last, sectionLabel, onOpen }) => {
   const T_ = window.TOKENS;
   const statusMap = {
     present: { tone: 'success', label: 'Present' },
@@ -3177,10 +3188,15 @@ const RosterRow = ({ row, last, sectionLabel }) => {
   };
   const s = statusMap[row.status];
   return (
-    <div style={{
-      padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 12,
-      borderBottom: last ? 'none' : `1px solid ${T_.borderSoft}`,
-    }}>
+    <button
+      onClick={onOpen}
+      style={{
+        padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 12,
+        borderBottom: last ? 'none' : `1px solid ${T_.borderSoft}`,
+        background: 'none', border: 'none', textAlign: 'left',
+        cursor: onOpen ? 'pointer' : 'default',
+        fontFamily: 'inherit', width: '100%',
+      }}>
       <Avatar name={row.name} size={34} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 13, fontWeight: 600, color: T_.ink }}>{row.name}</div>
@@ -3192,6 +3208,492 @@ const RosterRow = ({ row, last, sectionLabel }) => {
         <Pill tone={s.tone} size="sm">{s.label}</Pill>
         <div style={{ fontSize: 10.5, color: T_.inkFaint, marginTop: 3, fontFeatureSettings: '"tnum"' }}>
           {row.in !== '—' ? `In ${row.in}` : '—'}
+        </div>
+      </div>
+    </button>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
+// Employee detail sheet — opens when a manager/HR/owner taps a
+// person in the Attendance roster. Shows basic details + face
+// enrollment status, with Edit and Update-face actions for admins.
+// ─────────────────────────────────────────────────────────────
+const EmployeeDetailSheet = ({ employeeId, onClose }) => {
+  const { user, toast } = useApp();
+  const T_ = window.TOKENS;
+  const canEdit = user === 'owner' || user === 'hr';
+
+  const [emp, setEmp] = React.useState(null);
+  const [faceCount, setFaceCount] = React.useState(0);
+  const [loading, setLoading] = React.useState(true);
+  const [editing, setEditing] = React.useState(false);
+  const [reEnroll, setReEnroll] = React.useState(false);
+
+  const fetchAll = React.useCallback(async () => {
+    if (!window.sb || !employeeId) return;
+    const [empRes, faceRes] = await Promise.all([
+      window.sb.from('employees')
+        .select('id, name, role, section_id, user_type, is_active, joined_date, phone')
+        .eq('id', employeeId).maybeSingle(),
+      window.sb.from('face_embeddings').select('pose').eq('employee_id', employeeId),
+    ]);
+    setEmp(empRes.data || null);
+    setFaceCount((faceRes.data || []).length);
+    setLoading(false);
+  }, [employeeId]);
+
+  React.useEffect(() => {
+    fetchAll();
+    if (!window.sb) return;
+    const ch = window.sb.channel(`detail-${employeeId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'face_embeddings', filter: `employee_id=eq.${employeeId}` },
+        () => fetchAll())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'employees', filter: `id=eq.${employeeId}` },
+        () => fetchAll())
+      .subscribe();
+    return () => { window.sb.removeChannel(ch); };
+  }, [fetchAll, employeeId]);
+
+  const clearFace = async () => {
+    if (!window.confirm(`Delete face data for ${emp.name}?`)) return;
+    await window.sb.from('face_embeddings').delete().eq('employee_id', employeeId);
+    toast('Face data cleared');
+  };
+
+  if (reEnroll && emp) {
+    return (
+      <MobileFaceReEnrollSheet
+        employee={emp}
+        onClose={() => setReEnroll(false)}
+        onDone={() => { setReEnroll(false); toast(`Face updated for ${emp.name}`); }}
+      />
+    );
+  }
+
+  if (editing && emp) {
+    return (
+      <MobileEmployeeEditSheet
+        employee={emp}
+        onClose={() => setEditing(false)}
+        onSaved={() => { setEditing(false); toast('Saved'); }}
+      />
+    );
+  }
+
+  return (
+    <div onClick={onClose} style={{
+      position: 'absolute', inset: 0, background: 'rgba(11, 13, 14, 0.55)',
+      display: 'flex', alignItems: 'flex-end', zIndex: 150,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        width: '100%', background: T_.surface, borderRadius: '20px 20px 0 0',
+        padding: 20, maxHeight: '85%', overflowY: 'auto',
+      }}>
+        {loading ? (
+          <div style={{ textAlign: 'center', padding: 40, color: T_.inkMuted }}>Loading…</div>
+        ) : !emp ? (
+          <div style={{ textAlign: 'center', padding: 40, color: T_.inkMuted }}>Employee not found</div>
+        ) : (
+          <>
+            {/* Profile header */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 18 }}>
+              <Avatar name={emp.name} size={54} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 11, color: T_.inkFaint, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
+                  {emp.id}
+                </div>
+                <div style={{ fontSize: 17, fontWeight: 600, color: T_.ink }}>{emp.name}</div>
+                <div style={{ fontSize: 12.5, color: T_.inkMuted, marginTop: 2 }}>
+                  {emp.role || '—'}
+                  {emp.section_id && ` · ${SECTION_LABEL[emp.section_id] || emp.section_id}`}
+                </div>
+              </div>
+              <Pill tone={emp.is_active ? 'success' : 'danger'} size="sm">
+                {emp.is_active ? 'Active' : 'Inactive'}
+              </Pill>
+            </div>
+
+            {/* Quick facts */}
+            <div style={{
+              display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12,
+              padding: 14, background: T_.bg, border: `1px solid ${T_.border}`, borderRadius: 12,
+              marginBottom: 14,
+            }}>
+              <MobileDetailField label="User type" value={(emp.user_type || 'staff').toUpperCase()} />
+              <MobileDetailField label="Joined" value={emp.joined_date || '—'} />
+              <MobileDetailField label="Phone" value={emp.phone || '—'} mono />
+              <MobileDetailField label="Section" value={SECTION_LABEL[emp.section_id] || '—'} />
+            </div>
+
+            {/* Face enrollment card */}
+            <div style={{
+              padding: 14, borderRadius: 12,
+              background: faceCount >= 3 ? T_.brandSoft || T_.maroonSoft
+                : (faceCount > 0 ? T_.warningSoft : T_.surfaceAlt),
+              marginBottom: 16,
+            }}>
+              <div style={{
+                fontSize: 10.5, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase',
+                color: faceCount >= 3 ? T_.maroon : (faceCount > 0 ? T_.warning : T_.inkMuted),
+              }}>
+                Face enrollment
+              </div>
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 6,
+              }}>
+                <div>
+                  <div style={{ fontSize: 15, fontWeight: 600, color: T_.ink }}>
+                    {faceCount >= 3 ? 'Enrolled' : faceCount > 0 ? 'Partial' : 'Not enrolled'}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: T_.inkMuted, marginTop: 2 }}>
+                    {faceCount} / 3 poses captured
+                  </div>
+                </div>
+                {canEdit && (
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button onClick={() => setReEnroll(true)} style={{
+                      padding: '8px 12px', borderRadius: 10,
+                      background: T_.maroon, color: '#fff', border: 'none',
+                      fontSize: 12, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer',
+                    }}>{faceCount >= 3 ? 'Update face' : 'Enroll face'}</button>
+                    {faceCount > 0 && (
+                      <button onClick={clearFace} style={{
+                        padding: '8px 10px', borderRadius: 10,
+                        background: T_.surface, color: T_.danger,
+                        border: `1px solid ${T_.dangerSoft}`,
+                        fontSize: 12, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer',
+                      }}>Clear</button>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {!canEdit && (
+              <div style={{
+                fontSize: 12, color: T_.inkMuted, textAlign: 'center',
+                padding: 10, background: T_.surfaceAlt, borderRadius: 10, marginBottom: 14,
+              }}>
+                Only Owner / HR can edit details or update face data.
+              </div>
+            )}
+
+            {/* Action buttons */}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={onClose} style={{
+                flex: 1, padding: 12, borderRadius: 12,
+                background: T_.surface, border: `1px solid ${T_.border}`,
+                color: T_.ink, fontSize: 13, fontWeight: 600,
+                fontFamily: 'inherit', cursor: 'pointer',
+              }}>Close</button>
+              {canEdit && (
+                <button onClick={() => setEditing(true)} style={{
+                  flex: 1.2, padding: 12, borderRadius: 12,
+                  background: T_.maroon, color: '#fff', border: 'none',
+                  fontSize: 13, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer',
+                  boxShadow: '0 6px 16px -6px rgba(14, 124, 58, 0.45)',
+                }}>Edit details</button>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const MobileDetailField = ({ label, value, mono }) => {
+  const T_ = window.TOKENS;
+  return (
+    <div>
+      <div style={{
+        fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase',
+        color: T_.inkMuted, marginBottom: 3,
+      }}>{label}</div>
+      <div style={{
+        fontSize: 13, color: T_.ink,
+        fontFamily: mono ? 'JetBrains Mono, Menlo, monospace' : 'inherit',
+      }}>{value}</div>
+    </div>
+  );
+};
+
+// Small edit form sheet — basic fields only (no payroll anywhere).
+const MobileEmployeeEditSheet = ({ employee, onClose, onSaved }) => {
+  const T_ = window.TOKENS;
+  const [form, setForm] = React.useState({
+    name: employee.name || '',
+    role: employee.role || '',
+    section_id: employee.section_id || '',
+    phone: employee.phone || '',
+    is_active: !!employee.is_active,
+    joined_date: employee.joined_date || '',
+  });
+  const [saving, setSaving] = React.useState(false);
+  const [sections, setSections] = React.useState([]);
+
+  React.useEffect(() => {
+    if (!window.sb) return;
+    window.sb.from('sections').select('id, name').order('sort_order')
+      .then(({ data }) => setSections(data || []));
+  }, []);
+
+  const save = async () => {
+    if (!form.name.trim() || !form.role.trim() || saving) return;
+    setSaving(true);
+    try {
+      await window.sb.from('employees').update({
+        name: form.name.trim(),
+        role: form.role.trim(),
+        section_id: form.section_id || null,
+        phone: form.phone.trim() || null,
+        is_active: !!form.is_active,
+        joined_date: form.joined_date || null,
+      }).eq('id', employee.id);
+      onSaved();
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div onClick={onClose} style={{
+      position: 'absolute', inset: 0, background: 'rgba(11, 13, 14, 0.55)',
+      display: 'flex', alignItems: 'flex-end', zIndex: 160,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        width: '100%', background: T_.surface, borderRadius: '20px 20px 0 0',
+        padding: 20, maxHeight: '85%', overflowY: 'auto',
+      }}>
+        <div style={{
+          fontFamily: 'Fraunces, Georgia, serif', fontSize: 20,
+          fontWeight: 500, color: T_.ink, letterSpacing: -0.3, marginBottom: 14,
+        }}>Edit · {employee.name}</div>
+
+        <FieldLabel>Name</FieldLabel>
+        <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+          style={enrollInputStyle(T_)} />
+        <div style={{ height: 12 }} />
+
+        <FieldLabel>Role / designation</FieldLabel>
+        <input value={form.role} onChange={e => setForm(f => ({ ...f, role: e.target.value }))}
+          placeholder="e.g. Sales Associate" style={enrollInputStyle(T_)} />
+        <div style={{ height: 12 }} />
+
+        <FieldLabel>Section</FieldLabel>
+        <select value={form.section_id}
+          onChange={e => setForm(f => ({ ...f, section_id: e.target.value }))}
+          style={{ ...enrollInputStyle(T_), cursor: 'pointer' }}>
+          <option value="">— none —</option>
+          {sections.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+        <div style={{ height: 12 }} />
+
+        <FieldLabel>Phone</FieldLabel>
+        <input value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))}
+          placeholder="+91 …" style={enrollInputStyle(T_)} />
+        <div style={{ height: 12 }} />
+
+        <FieldLabel>Joined date</FieldLabel>
+        <input type="date" value={form.joined_date}
+          onChange={e => setForm(f => ({ ...f, joined_date: e.target.value }))}
+          style={enrollInputStyle(T_)} />
+        <div style={{ height: 12 }} />
+
+        <label style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          background: T_.bg, border: `1px solid ${T_.border}`,
+          padding: 12, borderRadius: 12, cursor: 'pointer',
+        }}>
+          <input type="checkbox" checked={form.is_active}
+            onChange={e => setForm(f => ({ ...f, is_active: e.target.checked }))} />
+          <div style={{ fontSize: 13.5, color: T_.ink, fontWeight: 500 }}>Active</div>
+        </label>
+
+        <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
+          <button onClick={onClose} disabled={saving} style={{
+            flex: 1, padding: 12, borderRadius: 12,
+            background: T_.surface, border: `1px solid ${T_.border}`,
+            color: T_.ink, fontSize: 13, fontWeight: 600,
+            fontFamily: 'inherit', cursor: 'pointer',
+          }}>Cancel</button>
+          <button onClick={save} disabled={saving} style={{
+            flex: 1.2, padding: 12, borderRadius: 12,
+            background: T_.maroon, color: '#fff', border: 'none',
+            fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
+            cursor: saving ? 'not-allowed' : 'pointer',
+            opacity: saving ? 0.6 : 1,
+          }}>{saving ? 'Saving…' : 'Save'}</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// 3-pose webcam re-enrollment for an existing employee.
+const MobileFaceReEnrollSheet = ({ employee, onClose, onDone }) => {
+  const T_ = window.TOKENS;
+  const videoRef = React.useRef(null);
+  const [modelsReady, setModelsReady] = React.useState(false);
+  const [cameraErr, setCameraErr] = React.useState(null);
+  const [shots, setShots] = React.useState([null, null, null]);
+  const [step, setStep] = React.useState(0);
+  const [busy, setBusy] = React.useState(false);
+  const [hint, setHint] = React.useState('Loading face models…');
+  const [saving, setSaving] = React.useState(false);
+
+  const poses = [
+    { key: 'front', label: 'Look straight' },
+    { key: 'left',  label: 'Slight left' },
+    { key: 'right', label: 'Slight right' },
+  ];
+
+  React.useEffect(() => {
+    let stream = null, cancelled = false;
+    (async () => {
+      try {
+        await window.loadFaceModels();
+        if (cancelled) return;
+        setModelsReady(true);
+        setHint('Opening camera…');
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+          audio: false,
+        });
+        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play().catch(() => {});
+        }
+        setHint('');
+      } catch (err) {
+        setCameraErr(err.name === 'NotAllowedError'
+          ? 'Camera permission denied'
+          : 'Could not open camera');
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (stream) stream.getTracks().forEach(t => t.stop());
+    };
+  }, []);
+
+  const capture = async () => {
+    if (!modelsReady || busy) return;
+    setBusy(true); setHint('Detecting face…');
+    try {
+      const desc = await window.computeFaceDescriptor(videoRef.current);
+      if (!desc) { setHint('No face detected — move closer'); return; }
+      setShots(s => s.map((x, i) => i === step ? desc : x));
+      setHint('');
+      if (step < 2) setStep(step + 1);
+    } finally { setBusy(false); }
+  };
+
+  const allCaptured = shots.every(s => s);
+  const save = async () => {
+    if (!allCaptured || saving) return;
+    setSaving(true);
+    try {
+      await window.sb.from('face_embeddings').delete().eq('employee_id', employee.id);
+      await window.sb.from('face_embeddings').insert(
+        shots.map((d, i) => ({ employee_id: employee.id, pose: poses[i].key, embedding: d }))
+      );
+      onDone();
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div onClick={onClose} style={{
+      position: 'absolute', inset: 0, background: 'rgba(11, 13, 14, 0.7)',
+      display: 'flex', alignItems: 'flex-end', zIndex: 170,
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        width: '100%', background: T_.surface, borderRadius: '20px 20px 0 0',
+        padding: 20, maxHeight: '90%', overflowY: 'auto',
+      }}>
+        <div style={{
+          fontFamily: 'Fraunces, Georgia, serif', fontSize: 20,
+          fontWeight: 500, color: T_.ink, letterSpacing: -0.3, marginBottom: 4,
+        }}>Update face · {employee.name}</div>
+        <div style={{ fontSize: 12.5, color: T_.inkMuted, marginBottom: 14 }}>
+          Step {Math.min(step + 1, 3)} of 3 — {poses[Math.min(step, 2)].label}
+        </div>
+
+        <div style={{
+          position: 'relative', width: '100%', aspectRatio: '3 / 4',
+          background: '#0B0D0E', borderRadius: 18, overflow: 'hidden',
+          border: `1px solid ${T_.border}`, marginBottom: 12,
+        }}>
+          <video ref={videoRef} autoPlay playsInline muted
+            style={{
+              position: 'absolute', inset: 0,
+              width: '100%', height: '100%', objectFit: 'cover',
+              transform: 'scaleX(-1)',
+              opacity: cameraErr ? 0 : 1,
+            }} />
+          <div style={{
+            position: 'absolute', top: '50%', left: '50%',
+            transform: 'translate(-50%, -50%)',
+            width: '60%', height: '70%', borderRadius: '50%',
+            border: '2px dashed rgba(255,255,255,0.45)',
+            pointerEvents: 'none',
+          }} />
+          {(hint || cameraErr) && (
+            <div style={{
+              position: 'absolute', left: 12, right: 12, bottom: 12,
+              background: 'rgba(11,13,14,0.7)', color: '#fff',
+              padding: '8px 12px', borderRadius: 10, fontSize: 12, textAlign: 'center',
+            }}>{cameraErr || hint}</div>
+          )}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 14 }}>
+          {poses.map((p, i) => (
+            <div key={p.key} style={{
+              aspectRatio: '1', borderRadius: 10,
+              background: shots[i] ? T_.maroonSoft : T_.surfaceAlt,
+              border: `1px solid ${shots[i] ? T_.maroon : step === i ? T_.gold : T_.border}`,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexDirection: 'column', gap: 4,
+            }}>
+              <div style={{
+                fontSize: 10.5, fontWeight: 700, letterSpacing: 0.6, textTransform: 'uppercase',
+                color: shots[i] ? T_.maroon : T_.inkMuted,
+              }}>{p.key}</div>
+              <div style={{ fontSize: 11, color: shots[i] ? T_.maroon : T_.inkFaint }}>
+                {shots[i] ? '✓' : step === i ? 'Ready' : '—'}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={onClose} disabled={saving} style={{
+            flex: 1, padding: 12, borderRadius: 12,
+            background: T_.surface, border: `1px solid ${T_.border}`,
+            color: T_.ink, fontSize: 13, fontWeight: 600,
+            fontFamily: 'inherit', cursor: 'pointer',
+          }}>Cancel</button>
+          {!allCaptured ? (
+            <button onClick={capture} disabled={!modelsReady || busy || !!cameraErr}
+              style={{
+                flex: 1.2, padding: 12, borderRadius: 12,
+                background: T_.maroon, color: '#fff', border: 'none',
+                fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
+                cursor: (busy || !modelsReady || cameraErr) ? 'not-allowed' : 'pointer',
+                opacity: (busy || !modelsReady || cameraErr) ? 0.5 : 1,
+              }}>
+              {busy ? 'Detecting…' : !modelsReady ? 'Loading…' : `Capture ${poses[Math.min(step, 2)].key}`}
+            </button>
+          ) : (
+            <button onClick={save} disabled={saving} style={{
+              flex: 1.2, padding: 12, borderRadius: 12,
+              background: T_.success, color: '#fff', border: 'none',
+              fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
+              cursor: saving ? 'not-allowed' : 'pointer',
+              opacity: saving ? 0.6 : 1,
+            }}>{saving ? 'Saving…' : 'Save face data'}</button>
+          )}
         </div>
       </div>
     </div>
