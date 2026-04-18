@@ -2,8 +2,18 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <title>Seemaatti · Admin App Concept</title>
+<meta name="theme-color" content="#0E7C3A" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="Seemaatti" />
+<link rel="icon" type="image/png" href="assets/seemaatti-logo.png" />
+<link rel="shortcut icon" type="image/png" href="assets/seemaatti-logo.png" />
+<link rel="apple-touch-icon" href="assets/seemaatti-logo.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="assets/seemaatti-logo.png" />
+<link rel="manifest" href="manifest.webmanifest" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=Noto+Sans+Tamil:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -397,6 +407,45 @@ function IOSDevice({
   children, width = 402, height = 874, dark = false,
   title, keyboard = false,
 }) {
+  const [isMobile, setIsMobile] = React.useState(
+    () => typeof window !== 'undefined' &&
+      window.matchMedia('(max-width: 900px)').matches
+  );
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const mq = window.matchMedia('(max-width: 900px)');
+    const handler = (e) => setIsMobile(e.matches);
+    if (mq.addEventListener) mq.addEventListener('change', handler);
+    else mq.addListener(handler);
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener('change', handler);
+      else mq.removeListener(handler);
+    };
+  }, []);
+
+  if (isMobile) {
+    // On real phones, skip the mock chrome — no fake notch, status bar, or
+    // home indicator. Let the real iOS/Android UI do its job.
+    return (
+      <div style={{
+        width: '100vw', height: '100dvh',
+        position: 'relative', overflow: 'hidden',
+        background: dark ? '#000' : '#F2F2F7',
+        fontFamily: '-apple-system, system-ui, sans-serif',
+        WebkitFontSmoothing: 'antialiased',
+        paddingTop: 'env(safe-area-inset-top)',
+        paddingBottom: 'env(safe-area-inset-bottom)',
+        boxSizing: 'border-box',
+      }}>
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+          {title !== undefined && <IOSNavBar title={title} dark={dark} />}
+          <div style={{ flex: 1, overflow: 'auto' }}>{children}</div>
+          {keyboard && <IOSKeyboard dark={dark} />}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{
       width, height, borderRadius: 48, overflow: 'hidden',

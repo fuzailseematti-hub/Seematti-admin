@@ -1,0 +1,25 @@
+{
+  "name": "Seemaatti Admin",
+  "short_name": "Seemaatti",
+  "description": "HR, operations and management admin app for Seemaatti, Mayiladuthurai.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F7F7F2",
+  "theme_color": "#0E7C3A",
+  "icons": [
+    {
+      "src": "assets/seemaatti-logo.png",
+      "sizes": "192x192 512x512 any",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "assets/seemaatti-logo.png",
+      "sizes": "192x192 512x512 any",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
