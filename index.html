@@ -1934,33 +1934,91 @@ Object.assign(window, {
 // ========== components/screen-login.jsx ==========
 // Login / Role picker screen
 
+// ──────────────────────────────────────────────────────────
+// Login — picks a role, then the specific person within that role.
+// Only employees with a user_access row can log in.
+// ──────────────────────────────────────────────────────────
+
+const ROLE_HOME = {
+  owner:      'ownerHome',
+  hr:         'hrHome',
+  manager:    'hrHome',    // managers use the HR-style home for now
+  supervisor: 'hrHome',    // supervisors too
+};
+
+const ROLE_UI = {
+  owner:      { icon: 'sparkle', tone: 'brand', title: 'Owner',      titleTa: 'உரிமையாளர்' },
+  hr:         { icon: 'people',  tone: 'info',  title: 'HR',         titleTa: 'மனிதவள துறை' },
+  manager:    { icon: 'store',   tone: 'gold',  title: 'Manager',    titleTa: 'மேலாளர்' },
+  supervisor: { icon: 'user',    tone: 'gold',  title: 'Supervisor', titleTa: 'கண்காணிப்பாளர்' },
+};
+
+const useLoginUsers = () => {
+  const [users, setUsers]     = React.useState([]);
+  const [loading, setLoading] = React.useState(true);
+  const fetchAll = React.useCallback(async () => {
+    if (!window.sb) return;
+    const { data } = await window.sb
+      .from('user_access')
+      .select('employee_id, section_ids, all_sections, employees(id, name, role, section_id, user_type, is_active)')
+      .order('employee_id');
+    const rows = (data || [])
+      .filter(u => u.employees && u.employees.is_active !== false)
+      .map(u => ({
+        id: u.employee_id,
+        name: u.employees.name,
+        role: u.employees.role,
+        section_id: u.employees.section_id,
+        user_type: u.employees.user_type,
+        all_sections: u.all_sections,
+        section_ids: u.section_ids || [],
+      }));
+    setUsers(rows);
+    setLoading(false);
+  }, []);
+  React.useEffect(() => {
+    fetchAll();
+    if (!window.sb) return;
+    const ch = window.sb.channel('login-users')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'user_access' }, () => fetchAll())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'employees' },   () => fetchAll())
+      .subscribe();
+    return () => { window.sb.removeChannel(ch); };
+  }, [fetchAll]);
+  return { users, loading };
+};
+
 const LoginScreen = () => {
-  const { nav, setUser } = useApp();
+  const { nav, setUser, setUserId } = useApp();
   const t = useT();
   const T_ = window.TOKENS;
   const M = window.MOCK;
+  const { users, loading } = useLoginUsers();
 
-  // Pull the demo role reps from the DB so the login subtitles stay accurate
-  // even if the user renames them in the employees table.
-  const { employee: ownerEmp } = window.useLiveStaffEmployee
-    ? window.useLiveStaffEmployee('E000')
-    : { employee: null };
-  const { employee: hrEmp } = window.useLiveStaffEmployee
-    ? window.useLiveStaffEmployee('E001')
-    : { employee: null };
-  const { employee: staffEmp } = window.useLiveStaffEmployee
-    ? window.useLiveStaffEmployee('E003')
-    : { employee: null };
+  // Group users by user_type. Only show a role card if ≥1 user exists.
+  const grouped = React.useMemo(() => {
+    const g = { owner: [], hr: [], manager: [], supervisor: [] };
+    users.forEach(u => { if (g[u.user_type]) g[u.user_type].push(u); });
+    return g;
+  }, [users]);
 
-  const subOwner = ownerEmp
-    ? `${ownerEmp.name} · ${ownerEmp.role}`
-    : `${M.owner.name} · ${M.owner.role}`;
-  const subHR = hrEmp
-    ? `${hrEmp.name} · ${hrEmp.role}`
-    : 'Revathi Krishnan · HR Manager';
-  const subStaff = staffEmp
-    ? `${staffEmp.name} · ${staffEmp.role}${staffEmp.section_id ? ' · ' + (SECTION_LABEL[staffEmp.section_id] || '') + ' Section' : ''}`
-    : `${M.staff.name} · ${M.staff.role}`;
+  // Which role's picker is currently open.
+  const [openRole, setOpenRole] = React.useState(null);
+
+  const signIn = (role, emp) => {
+    setUser(role);
+    setUserId(emp.id);
+    nav.reset(ROLE_HOME[role] || 'ownerHome');
+  };
+
+  const handleRoleTap = (role) => {
+    const list = grouped[role] || [];
+    if (list.length === 0) return;
+    if (list.length === 1) { signIn(role, list[0]); return; }
+    setOpenRole(openRole === role ? null : role);
+  };
+
+  const roleOrder = ['owner', 'hr', 'manager', 'supervisor'];
 
   return (
     <div style={{
@@ -1969,8 +2027,8 @@ const LoginScreen = () => {
       padding: 'var(--screen-top-lg) 28px 40px', boxSizing: 'border-box',
     }}>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
-        {/* Brand — real logo lockup */}
-        <div style={{ marginBottom: 40 }}>
+        {/* Brand */}
+        <div style={{ marginBottom: 32 }}>
           <img src={LOGO_SRC} alt="Seemaatti"
             style={{ height: 56, width: 'auto', display: 'block', marginBottom: 14 }} />
           <div style={{ fontSize: 10.5, color: T_.inkMuted, letterSpacing: 0.6, textTransform: 'uppercase', fontWeight: 600 }}>
@@ -1983,39 +2041,83 @@ const LoginScreen = () => {
           fontSize: 32, fontWeight: 500, color: T_.ink,
           letterSpacing: -0.8, lineHeight: 1.15, marginBottom: 8,
         }}>{t('welcome')}</div>
-        <div style={{ fontSize: 14, color: T_.inkMuted, marginBottom: 36 }}>
+        <div style={{ fontSize: 14, color: T_.inkMuted, marginBottom: 28 }}>
           {t('signIn')}
         </div>
 
-        {/* Role cards */}
+        {/* Role cards — shown only for roles with ≥1 user */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <RoleCard
-            icon="sparkle"
-            title={t('loginOwner')}
-            subtitle={subOwner}
-            onClick={() => { setUser('owner'); nav.go('ownerHome'); }}
-            tone="brand"
-          />
-          <RoleCard
-            icon="people"
-            title="I am HR"
-            subtitle={subHR}
-            onClick={() => { setUser('hr'); nav.go('hrHome'); }}
-            tone="info"
-          />
-          <RoleCard
-            icon="user"
-            title={t('loginStaff')}
-            subtitle={subStaff}
-            onClick={() => { setUser('staff'); nav.go('staffHome'); }}
-            tone="gold"
-          />
+          {loading && (
+            <div style={{ fontSize: 12.5, color: T_.inkMuted, textAlign: 'center', padding: 10 }}>
+              Loading…
+            </div>
+          )}
+          {!loading && roleOrder.map(role => {
+            const list = grouped[role];
+            if (!list || list.length === 0) return null;
+            const ui = ROLE_UI[role];
+            const firstName = list[0]?.name;
+            const subtitle = list.length === 1
+              ? `${list[0].name}${list[0].role ? ' · ' + list[0].role : ''}`
+              : `${list.length} users · Tap to pick`;
+            const expanded = openRole === role && list.length > 1;
+            return (
+              <React.Fragment key={role}>
+                <RoleCard
+                  icon={ui.icon}
+                  title={`I am ${ui.title}`}
+                  subtitle={subtitle}
+                  tone={ui.tone}
+                  onClick={() => handleRoleTap(role)}
+                />
+                {expanded && (
+                  <div style={{
+                    marginTop: -4, marginBottom: 4,
+                    background: T_.surface, border: `1px solid ${T_.border}`,
+                    borderRadius: 16, padding: 6,
+                    display: 'flex', flexDirection: 'column', gap: 2,
+                  }}>
+                    {list.map(emp => (
+                      <button key={emp.id}
+                        onClick={() => signIn(role, emp)}
+                        style={{
+                          background: 'none', border: 'none', textAlign: 'left',
+                          padding: '10px 12px', borderRadius: 10,
+                          cursor: 'pointer', fontFamily: 'inherit',
+                          display: 'flex', alignItems: 'center', gap: 10,
+                        }}>
+                        <Avatar name={emp.name} size={32} />
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 13.5, fontWeight: 600, color: T_.ink }}>{emp.name}</div>
+                          <div style={{ fontSize: 11.5, color: T_.inkMuted }}>
+                            {emp.role}
+                            {emp.section_id && ` · ${SECTION_LABEL[emp.section_id] || emp.section_id}`}
+                            {emp.all_sections && ' · All sections'}
+                          </div>
+                        </div>
+                        <Icon name="chevron" size={16} color={T_.inkFaint} />
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </React.Fragment>
+            );
+          })}
+          {!loading && Object.values(grouped).every(l => l.length === 0) && (
+            <div style={{
+              padding: 16, fontSize: 13, color: T_.inkMuted,
+              background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 14,
+              textAlign: 'center',
+            }}>
+              No users configured. Grant access in the admin dashboard first.
+            </div>
+          )}
         </div>
 
         <div style={{
           marginTop: 28, fontSize: 11.5, color: T_.inkFaint,
           textAlign: 'center', letterSpacing: 0.3,
-        }}>CONCEPT · PROTOTYPE v0.1</div>
+        }}>SEEMAATTI · ADMIN · v0.2</div>
       </div>
     </div>
   );
@@ -5208,50 +5310,32 @@ window.EnrollJoinerScreen = EnrollJoinerScreen;
 // toggle language, and sign out. Surfaced from the bottom tab bar.
 // ─────────────────────────────────────────────────────────────
 const SettingsScreen = () => {
-  const { user, setUser, nav, lang, setLang, toast } = useApp();
+  const { user, userId, setUser, setUserId, nav, lang, setLang, toast } = useApp();
   const T_ = window.TOKENS;
 
-  const roles = [
-    {
-      id: 'owner',
-      label: lang === 'ta' ? 'உரிமையாளர்' : 'Owner',
-      sub: lang === 'ta' ? 'நிர்வாக டாஷ்போர்டு' : 'Admin dashboard',
-      home: 'ownerHome',
-      tone: { bg: T_.maroonSoft, fg: T_.maroon },
-      icon: 'sparkle',
-    },
-    {
-      id: 'hr',
-      label: lang === 'ta' ? 'மனிதவள துறை' : 'HR',
-      sub: lang === 'ta' ? 'வருகை, விடுமுறை, சம்பளம்' : 'Attendance, leaves, payroll',
-      home: 'hrHome',
-      tone: { bg: T_.infoSoft, fg: T_.info },
-      icon: 'people',
-    },
-    {
-      id: 'staff',
-      label: lang === 'ta' ? 'பணியாளர்' : 'Staff',
-      sub: lang === 'ta' ? 'என் வருகை, விடுமுறை, சம்பளம்' : 'My attendance, leaves, payslip',
-      home: 'staffHome',
-      tone: { bg: T_.goldSoft, fg: T_.gold },
-      icon: 'user',
-    },
-  ];
-
-  const switchRole = (r) => {
-    setUser(r.id);
-    nav.reset(r.home);
-    toast(
-      lang === 'ta'
-        ? `${r.label} பயனராக மாறியது`
-        : `Switched to ${r.label}`
-    );
-  };
-
+  // Switching role now means signing out to re-pick the right person,
+  // because different managers/supervisors are different employees.
   const signOut = () => {
     setUser(null);
+    setUserId(null);
     nav.reset('login');
   };
+
+  // Fetch the current user's display info.
+  const [me, setMe] = React.useState(null);
+  React.useEffect(() => {
+    if (!window.sb || !userId) { setMe(null); return; }
+    (async () => {
+      const { data } = await window.sb
+        .from('employees').select('id, name, role, section_id, user_type')
+        .eq('id', userId).maybeSingle();
+      setMe(data);
+    })();
+  }, [userId]);
+
+  const roleLabel = (r) => ({
+    owner: 'Owner', hr: 'HR', manager: 'Manager', supervisor: 'Supervisor',
+  }[r] || r);
 
   return (
     <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 120 }}>
@@ -5276,66 +5360,46 @@ const SettingsScreen = () => {
         </div>
       </div>
 
-      {/* Role switcher */}
+      {/* Signed-in user card */}
       <div style={{ padding: '24px 16px 0' }}>
         <div style={{
           fontSize: 11, letterSpacing: 0.9, textTransform: 'uppercase',
           color: T_.inkMuted, fontWeight: 600, padding: '0 4px 10px',
         }}>
-          {lang === 'ta' ? 'பங்கு மாற்று' : 'Switch role'}
+          {lang === 'ta' ? 'உள்நுழைந்துள்ளீர்' : 'Signed in as'}
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {roles.map(r => {
-            const isActive = user === r.id;
-            return (
-              <button
-                key={r.id}
-                onClick={() => switchRole(r)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 14,
-                  padding: 16, borderRadius: 16,
-                  background: T_.surface,
-                  border: `1px solid ${isActive ? T_.maroon : T_.border}`,
-                  boxShadow: isActive ? `0 0 0 3px ${T_.maroonSoft}` : 'none',
-                  cursor: 'pointer', textAlign: 'left',
-                  fontFamily: 'inherit', color: 'inherit',
-                  width: '100%',
-                }}
-              >
-                <div style={{
-                  width: 44, height: 44, borderRadius: 12,
-                  background: r.tone.bg, color: r.tone.fg,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  flexShrink: 0,
-                }}>
-                  <Icon name={r.icon} size={22} />
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{
-                    fontSize: 16, fontWeight: 600, color: T_.ink,
-                    display: 'flex', alignItems: 'center', gap: 8,
-                  }}>
-                    {r.label}
-                    {isActive && (
-                      <span style={{
-                        fontSize: 10, letterSpacing: 0.6, fontWeight: 700,
-                        background: T_.maroonSoft, color: T_.maroon,
-                        padding: '2px 7px', borderRadius: 999,
-                        textTransform: 'uppercase',
-                      }}>
-                        {lang === 'ta' ? 'தற்போது' : 'Current'}
-                      </span>
-                    )}
-                  </div>
-                  <div style={{ fontSize: 13, color: T_.inkMuted, marginTop: 2 }}>
-                    {r.sub}
-                  </div>
-                </div>
-                <Icon name="chevron" size={18} color={T_.inkFaint} />
-              </button>
-            );
-          })}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 14,
+          padding: 16, borderRadius: 16,
+          background: T_.surface, border: `1px solid ${T_.border}`,
+        }}>
+          {me ? <Avatar name={me.name} size={44} /> : (
+            <div style={{
+              width: 44, height: 44, borderRadius: 12,
+              background: T_.surfaceAlt,
+            }} />
+          )}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 16, fontWeight: 600, color: T_.ink }}>
+              {me?.name || (userId || '—')}
+            </div>
+            <div style={{ fontSize: 12.5, color: T_.inkMuted, marginTop: 2 }}>
+              {roleLabel(user)}
+              {me?.role && ` · ${me.role}`}
+              {me?.section_id && ` · ${SECTION_LABEL[me.section_id] || me.section_id}`}
+            </div>
+          </div>
         </div>
+        <button
+          onClick={signOut}
+          style={{
+            width: '100%', padding: 12, borderRadius: 12,
+            background: T_.surfaceAlt, border: `1px solid ${T_.border}`,
+            color: T_.inkSoft, fontSize: 13, fontWeight: 600,
+            fontFamily: 'inherit', cursor: 'pointer', marginTop: 10,
+          }}>
+          {lang === 'ta' ? 'பயனரை மாற்று' : 'Switch user'}
+        </button>
       </div>
 
       {/* Language */}
@@ -5458,7 +5522,9 @@ function RootApp() {
 
 function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
   const [lang, setLangState] = useState(tweakLang || TWEAK_DEFAULTS.lang);
-  const [user, setUser] = useState(null);
+  const [user, setUser] = useState(null);          // 'owner' | 'hr' | 'manager' | 'supervisor' | null
+  const [userId, setUserId] = useState(null);      // employees.id of the signed-in person
+  const [userAccess, setUserAccess] = useState(null); // user_access row for the signed-in person
   const [stack, setStack] = useState(['login']);
   const [tab, setTab] = useState('home');
   const [toastMsg, setToastMsg] = useState(null);
@@ -5470,15 +5536,42 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
   useEffect(() => {
     try {
       const saved = JSON.parse(localStorage.getItem('sundari-state') || '{}');
-      if (saved.user)  setUser(saved.user);
-      if (saved.stack) setStack(saved.stack);
-      if (saved.tab)   setTab(saved.tab);
+      if (saved.user)    setUser(saved.user);
+      if (saved.userId)  setUserId(saved.userId);
+      if (saved.stack)   setStack(saved.stack);
+      if (saved.tab)     setTab(saved.tab);
       if (saved.lang && !tweakLang) setLangState(saved.lang);
     } catch {}
   }, []);
   useEffect(() => {
-    localStorage.setItem('sundari-state', JSON.stringify({ user, stack, tab, lang }));
-  }, [user, stack, tab, lang]);
+    localStorage.setItem('sundari-state', JSON.stringify({ user, userId, stack, tab, lang }));
+  }, [user, userId, stack, tab, lang]);
+
+  // Fetch the logged-in user's access row so downstream screens can scope
+  // by section and check granular powers.
+  useEffect(() => {
+    if (!window.sb || !userId) { setUserAccess(null); return; }
+    let cancelled = false;
+    (async () => {
+      const { data } = await window.sb
+        .from('user_access')
+        .select('*')
+        .eq('employee_id', userId)
+        .maybeSingle();
+      if (!cancelled) setUserAccess(data || null);
+    })();
+    // Subscribe to changes so dashboard edits propagate live.
+    const ch = window.sb.channel(`user-access-${userId}`)
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'user_access', filter: `employee_id=eq.${userId}` },
+        async () => {
+          const { data } = await window.sb.from('user_access').select('*')
+            .eq('employee_id', userId).maybeSingle();
+          if (!cancelled) setUserAccess(data || null);
+        })
+      .subscribe();
+    return () => { cancelled = true; window.sb.removeChannel(ch); };
+  }, [userId]);
 
   const setLang = (l) => {
     setLangState(l);
@@ -5564,10 +5657,18 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
   const handleTab = (id) => {
     setTab(id);
     if (id === 'home') {
-      const homeMap = { owner: 'ownerHome', hr: 'hrHome', staff: 'staffHome' };
-      nav.reset(homeMap[user] || 'staffHome');
+      const homeMap = {
+        owner: 'ownerHome',
+        hr: 'hrHome',
+        manager: 'hrHome',
+        supervisor: 'hrHome',
+        staff: 'staffHome',
+      };
+      nav.reset(homeMap[user] || 'ownerHome');
     }
-    else if (id === 'people') nav.go(user === 'hr' ? 'markAttendance' : 'attendance');
+    else if (id === 'people') nav.go(
+      (user === 'hr' || user === 'manager' || user === 'supervisor') ? 'markAttendance' : 'attendance'
+    );
     else if (id === 'tasks') nav.go('tasks');
     else if (id === 'settings') nav.go('settings');
   };
@@ -5576,7 +5677,9 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
 
   return (
     <AppCtx.Provider value={{
-      lang, setLang, density: tweakDensity, user, setUser, nav, toast, layout: tweakLayout,
+      lang, setLang, density: tweakDensity,
+      user, setUser, userId, setUserId, userAccess,
+      nav, toast, layout: tweakLayout,
     }}>
       <div className="stage" data-screen-label={screenTitles[current] || current}>
         <div className="sidePanel">
