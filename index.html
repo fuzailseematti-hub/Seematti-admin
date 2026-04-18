@@ -2006,6 +2006,12 @@ const OwnerHomeScreen = () => {
   const openingDone  = openingTasks.filter(t => t.done).length;
   const openingTotal = openingTasks.length;
 
+  // Owner name for greeting (first employee with user_type='owner')
+  const { employee: ownerEmp } = window.useLiveStaffEmployee
+    ? window.useLiveStaffEmployee('E000')
+    : { employee: null };
+  const ownerName = ownerEmp?.name || M.owner.name;
+
   const hour = new Date().getHours();
   const greetKey = hour < 12 ? 'goodMorning' : 'goodAfternoon';
 
@@ -2030,7 +2036,7 @@ const OwnerHomeScreen = () => {
           fontSize: 26, fontWeight: 500, color: T_.ink,
           letterSpacing: -0.5, lineHeight: 1.2,
         }}>
-          {t(greetKey)}, <span style={{ color: T_.maroon }}>{M.owner.name.split(' ')[0]}</span>.
+          {t(greetKey)}, <span style={{ color: T_.maroon }}>{ownerName.split(' ')[0]}</span>.
         </div>
         <div style={{ fontSize: 13.5, color: T_.inkMuted, marginTop: 4 }}>
           {t('todayOverview')}
@@ -3452,6 +3458,11 @@ const HRHomeScreen = () => {
   }).length;
   const hrStats = window.useLiveHRStats ? window.useLiveHRStats() : { newJoinersWeek: 0, lateNames: [], absentNames: [], newJoinerName: null };
   const hrAvgAttendance = a.total ? Math.round((a.present / a.total) * 100) : 0;
+  const { employee: hrEmp } = window.useLiveStaffEmployee
+    ? window.useLiveStaffEmployee('E001')
+    : { employee: null };
+  const hrFirstName = (hrEmp?.name || 'Revathi').split(' ')[0];
+  const hrRoleLine  = hrEmp?.role ? `${hrEmp.role} · People operations` : 'HR Manager · People operations';
 
   // "Not yet marked" — the HR pain point. Deliberately surfaced first.
   // With the live backend, unmarked = total - (present + late + absent + on_leave)
@@ -3486,10 +3497,10 @@ const HRHomeScreen = () => {
           fontSize: 26, fontWeight: 500, color: T_.ink,
           letterSpacing: -0.5, lineHeight: 1.2,
         }}>
-          {greet}, <span style={{ color: T_.maroon }}>Revathi</span>.
+          {greet}, <span style={{ color: T_.maroon }}>{hrFirstName}</span>.
         </div>
         <div style={{ fontSize: 13.5, color: T_.inkMuted, marginTop: 4 }}>
-          HR Manager · People operations
+          {hrRoleLine}
         </div>
       </div>
 
