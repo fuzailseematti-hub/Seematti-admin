@@ -2949,6 +2949,16 @@ const AttendanceScreen = () => {
 
   const filtered = section === 'all' ? roster : roster.filter(r => r.section === section);
 
+  // Stats reflect whatever section (and user scope) is currently selected.
+  // `filtered` is already scoped to user's allowed sections + the tab.
+  const scopedStats = {
+    total:   filtered.length,
+    present: filtered.filter(r => r.status === 'present').length,
+    late:    filtered.filter(r => r.status === 'late').length,
+    absent:  filtered.filter(r => r.status === 'absent').length,
+    onLeave: filtered.filter(r => r.status === 'leave').length,
+  };
+
   return (
     <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 30 }}>
       <ScreenHeader back title="Attendance" subtitle="Live · Today 18 Apr 2026" />
@@ -2958,10 +2968,10 @@ const AttendanceScreen = () => {
         <div style={{
           display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 18,
         }}>
-          <AttStat label="Present" value={a.present} color={T_.success} />
-          <AttStat label="Late"    value={a.late}    color={T_.warning} />
-          <AttStat label="Leave"   value={a.onLeave} color={T_.info} />
-          <AttStat label="Absent"  value={a.absent}  color={T_.danger} />
+          <AttStat label="Present" value={scopedStats.present} color={T_.success} />
+          <AttStat label="Late"    value={scopedStats.late}    color={T_.warning} />
+          <AttStat label="Leave"   value={scopedStats.onLeave} color={T_.info} />
+          <AttStat label="Absent"  value={scopedStats.absent}  color={T_.danger} />
         </div>
 
         {/* Section filter tabs */}
@@ -2995,7 +3005,7 @@ const AttendanceScreen = () => {
         </div>
 
         <div style={{ fontSize: 11, color: T_.inkFaint, textAlign: 'center', marginTop: 14 }}>
-          {loading ? 'Loading…' : `Showing ${filtered.length} of ${a.total} staff · Scroll for more`}
+          {loading ? 'Loading…' : `Showing ${filtered.length} of ${roster.length} staff${section !== 'all' ? ' in this section' : ''}`}
         </div>
       </div>
     </div>
