@@ -4051,6 +4051,9 @@ const TeamAccessPage = () => {
     can_edit_attendance:    true,
     can_post_announcements: true,
     can_manage_tasks:       true,
+    username: '',
+    password: '',           // plaintext in the form; hashed on save
+    password_set: false,    // true if the existing row already has a password
     notes: '',
   });
 
@@ -4064,6 +4067,9 @@ const TeamAccessPage = () => {
     can_edit_attendance:    !!row.can_edit_attendance,
     can_post_announcements: !!row.can_post_announcements,
     can_manage_tasks:       !!row.can_manage_tasks,
+    username: row.username || '',
+    password: '',           // only filled if the admin wants to change it
+    password_set: !!row.password_sha256,
     notes: row.notes || '',
   });
 
@@ -4075,6 +4081,17 @@ const TeamAccessPage = () => {
     if (!editing.all_sections && editing.section_ids.length === 0 && editing.role !== 'hr') {
       toast('Pick at least one section (or All sections)'); return;
     }
+    // Username + password validation.
+    const usernameClean = (editing.username || '').trim().toLowerCase();
+    if (usernameClean && !/^[a-z0-9_.-]{2,32}$/.test(usernameClean)) {
+      toast('Username must be 2–32 chars (letters, numbers, . _ -)');
+      return;
+    }
+    if (editing.password && editing.password.length < 4) {
+      toast('Password must be at least 4 characters');
+      return;
+    }
+
     setSaving(true);
     try {
       // Promote/demote the employee's user_type
@@ -4082,8 +4099,13 @@ const TeamAccessPage = () => {
         .update({ user_type: editing.role }).eq('id', editing.employee_id);
       if (upErr) { toast('Could not promote employee'); return; }
 
-      // Upsert user_access row
-      const { error: axErr } = await window.sb.from('user_access').upsert({
+      // Hash the password if a new one was typed.
+      let passwordHash = undefined;
+      if (editing.password) {
+        passwordHash = await window.sha256(editing.password);
+      }
+
+      const payload = {
         employee_id: editing.employee_id,
         section_ids: editing.all_sections ? [] : editing.section_ids,
         all_sections: editing.all_sections,
@@ -4091,9 +4113,23 @@ const TeamAccessPage = () => {
         can_edit_attendance:    editing.can_edit_attendance,
         can_post_announcements: editing.can_post_announcements,
         can_manage_tasks:       editing.can_manage_tasks,
+        username: usernameClean || null,
         notes: editing.notes || null,
-      }, { onConflict: 'employee_id' });
-      if (axErr) { toast('Could not save access'); return; }
+      };
+      // Only overwrite password when a new one was typed OR the admin
+      // explicitly cleared the existing password (password_set flipped
+      // off while the field is empty).
+      if (passwordHash !== undefined) payload.password_sha256 = passwordHash;
+      else if (!editing.password_set) payload.password_sha256 = null;
+
+      const { error: axErr } = await window.sb.from('user_access')
+        .upsert(payload, { onConflict: 'employee_id' });
+      if (axErr) {
+        toast(axErr.message.includes('duplicate') && axErr.message.includes('username')
+          ? 'That username is already taken'
+          : 'Could not save access');
+        return;
+      }
 
       toast(editing._new ? 'Access granted' : 'Access updated');
       close();
@@ -4181,6 +4217,12 @@ const TeamAccessPage = () => {
                   <td className="name">{e.name}
                     <div style={{ fontSize: 11, color: 'var(--inkMuted)', fontWeight: 400, marginTop: 2 }}>
                       {e.role}
+                      {r.username && (
+                        <> · <span style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>@{r.username}</span></>
+                      )}
+                      {r.password_sha256 && (
+                        <> · <span style={{ color: 'var(--success)' }} title="Password set">🔒</span></>
+                      )}
                     </div>
                   </td>
                   <td>
@@ -4314,6 +4356,43 @@ const TeamAccessPage = () => {
                     </div>
                   </label>
                 ))}
+              </div>
+            </div>
+
+            <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
+                <label>Username {editing._new ? '' : '(login)'}</label>
+                <input
+                  value={editing.username || ''}
+                  onChange={e => setEditing({ ...editing, username: e.target.value.toLowerCase() })}
+                  placeholder="e.g. fuzail"
+                  style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }} />
+                <div style={{ fontSize: 11, color: 'var(--inkMuted)', marginTop: 4 }}>
+                  Optional — if set, the user must log in with username + password.
+                </div>
+              </div>
+              <div>
+                <label>
+                  Password
+                  {editing.password_set && !editing.password
+                    ? <span style={{ color: 'var(--success)', marginLeft: 6 }}>· already set</span>
+                    : ''}
+                </label>
+                <input type="password"
+                  value={editing.password || ''}
+                  onChange={e => setEditing({ ...editing, password: e.target.value })}
+                  placeholder={editing.password_set ? 'Leave blank to keep current' : 'min 4 characters'} />
+                {editing.password_set && (
+                  <label style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                    marginTop: 6, fontSize: 12, color: 'var(--inkSoft)', cursor: 'pointer',
+                  }}>
+                    <input type="checkbox"
+                      checked={!editing.password_set}
+                      onChange={e => setEditing({ ...editing, password_set: !e.target.checked, password: '' })} />
+                    Remove password (allow tap-to-login)
+                  </label>
+                )}
               </div>
             </div>
 

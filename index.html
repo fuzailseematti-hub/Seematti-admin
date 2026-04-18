@@ -6099,6 +6099,84 @@ window.EnrollJoinerScreen = EnrollJoinerScreen;
 // Settings Screen — lets the user switch role (owner/HR/staff),
 // toggle language, and sign out. Surfaced from the bottom tab bar.
 // ─────────────────────────────────────────────────────────────
+// Dev-only role switcher shown inside Settings. Lists one user per role
+// (first of each) so the logged-in user can jump between Owner / HR /
+// Manager / Supervisor without re-entering passwords. Disappears when
+// no login users exist.
+const SettingsPreviewSwitcher = () => {
+  const { user, userId, setUser, setUserId, nav, lang } = useApp();
+  const T_ = window.TOKENS;
+  const { users } = useLoginUsers();
+
+  const pick = (targetUser) => {
+    const list = users.filter(u => u.user_type === targetUser);
+    if (!list.length) return;
+    // Prefer keeping the current user if they match the role; otherwise
+    // pick the first user of that role.
+    const current = list.find(u => u.id === userId);
+    const target = current || list[0];
+    setUser(targetUser);
+    setUserId(target.id);
+    const home = {
+      owner: 'ownerHome', hr: 'hrHome',
+      manager: 'managerHome', supervisor: 'managerHome',
+    }[targetUser] || 'ownerHome';
+    nav.reset(home);
+  };
+
+  const counts = {
+    owner: users.filter(u => u.user_type === 'owner').length,
+    hr: users.filter(u => u.user_type === 'hr').length,
+    manager: users.filter(u => u.user_type === 'manager').length,
+    supervisor: users.filter(u => u.user_type === 'supervisor').length,
+  };
+
+  const roles = [
+    { id: 'owner',      label: 'Owner',      sub: 'Full access',          icon: 'sparkle' },
+    { id: 'hr',         label: 'HR',         sub: 'People operations',    icon: 'people' },
+    { id: 'manager',    label: 'Manager',    sub: 'Section view',         icon: 'store' },
+    { id: 'supervisor', label: 'Supervisor', sub: 'Section view',         icon: 'user' },
+  ].filter(r => counts[r.id] > 0);
+
+  if (roles.length === 0) return null;
+
+  return (
+    <div style={{ padding: '28px 16px 0' }}>
+      <div style={{
+        fontSize: 11, letterSpacing: 0.9, textTransform: 'uppercase',
+        color: T_.inkMuted, fontWeight: 600, padding: '0 4px 6px',
+      }}>
+        {lang === 'ta' ? 'விரைவு மாற்று' : 'Preview mode'}
+      </div>
+      <div style={{
+        fontSize: 11.5, color: T_.inkFaint, padding: '0 4px 10px',
+      }}>
+        Jump between roles without signing out. For development only.
+      </div>
+      <div style={{
+        background: T_.goldSoft, borderRadius: 14,
+        padding: 4, display: 'grid',
+        gridTemplateColumns: `repeat(${roles.length}, 1fr)`, gap: 2,
+      }}>
+        {roles.map(r => (
+          <button key={r.id} onClick={() => pick(r.id)}
+            style={{
+              padding: '10px 6px', borderRadius: 10, border: 'none',
+              background: user === r.id ? T_.surface : 'transparent',
+              color: user === r.id ? T_.ink : T_.inkSoft,
+              boxShadow: user === r.id ? '0 1px 2px rgba(0,0,0,0.08)' : 'none',
+              fontFamily: 'inherit', cursor: 'pointer',
+              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4,
+            }}>
+            <Icon name={r.icon} size={18} color={user === r.id ? T_.maroon : T_.inkMuted} />
+            <div style={{ fontSize: 11.5, fontWeight: 600 }}>{r.label}</div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const SettingsScreen = () => {
   const { user, userId, setUser, setUserId, nav, lang, setLang, toast } = useApp();
   const T_ = window.TOKENS;
@@ -6191,6 +6269,11 @@ const SettingsScreen = () => {
           {lang === 'ta' ? 'பயனரை மாற்று' : 'Switch user'}
         </button>
       </div>
+
+      {/* Preview mode — dev bypass to jump between roles while the app is
+         still being built. Skips the password check. Remove this block
+         before going live. */}
+      <SettingsPreviewSwitcher />
 
       {/* Language */}
       <div style={{ padding: '28px 16px 0' }}>
