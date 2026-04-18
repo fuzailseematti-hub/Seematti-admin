@@ -555,6 +555,7 @@ const PERMS = {
     announcements:{ read: true, edit: true,  delete: true,  create: true },
     visitors:     { read: true, edit: true,  delete: true,  create: true },
     payslips:     { read: true, edit: false, delete: false, create: false },
+    access:       { read: false },
     reports:      { read: true },
   },
 };
@@ -578,8 +579,9 @@ const NAV = [
     { id: 'kiosk',         label: 'Kiosk & face',  area: 'attendance' },
   ]},
   { section: 'People', items: [
-    { id: 'employees', label: 'Employees', area: 'employees' },
-    { id: 'sections',  label: 'Sections',  area: 'sections' },
+    { id: 'employees',   label: 'Employees',   area: 'employees' },
+    { id: 'sections',    label: 'Sections',    area: 'sections' },
+    { id: 'team_access', label: 'Team access', area: 'access' },
   ]},
   { section: 'Payroll', items: [
     { id: 'payslips', label: 'Payslips', area: 'payslips' },
@@ -3979,6 +3981,357 @@ const KioskSettingsPage = () => {
 };
 
 // ──────────────────────────────────────────────────────────
+// Team access — Owner-only. Promote employees to manager/supervisor/HR
+// and set their per-section scope + granular power flags.
+// ──────────────────────────────────────────────────────────
+const ROLE_OPTIONS = [
+  { id: 'manager',    label: 'Manager',    sub: 'Sees their sections, full operational access' },
+  { id: 'supervisor', label: 'Supervisor', sub: 'Sees their sections, limited powers by default' },
+  { id: 'hr',         label: 'HR',         sub: 'Company-wide except sections/payslips edits' },
+];
+
+const TeamAccessPage = () => {
+  const toast = useToast();
+  const { can } = useContext(AppCtx);
+
+  const [employees, setEmployees] = useState([]);
+  const [access, setAccess]       = useState([]); // joined: user_access + employee
+  const [sections, setSections]   = useState([]);
+  const [loading, setLoading]     = useState(true);
+  const [search, setSearch]       = useState('');
+
+  const [editing, setEditing] = useState(null);
+  const [saving, setSaving]   = useState(false);
+
+  const fetchAll = useCallback(async () => {
+    if (!window.sb) return;
+    const [empRes, accessRes, secRes] = await Promise.all([
+      window.sb.from('employees')
+        .select('id, name, role, section_id, user_type, is_active')
+        .eq('is_active', true)
+        .order('name'),
+      window.sb.from('user_access')
+        .select('*, employees(id, name, role, section_id, user_type, is_active)'),
+      window.sb.from('sections').select('*').order('sort_order'),
+    ]);
+    setEmployees(empRes.data || []);
+    setAccess((accessRes.data || []).filter(a => a.employees));
+    setSections(secRes.data || []);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (!window.sb) return;
+    fetchAll();
+    const ch = window.sb.channel('dash-access')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'user_access' }, () => fetchAll())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'employees' },   () => fetchAll())
+      .subscribe();
+    return () => { window.sb.removeChannel(ch); };
+  }, [fetchAll]);
+
+  const rows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return access.filter(a => {
+      if (!q) return true;
+      const e = a.employees;
+      return e.name.toLowerCase().includes(q) ||
+             e.id.toLowerCase().includes(q) ||
+             (e.role || '').toLowerCase().includes(q);
+    });
+  }, [access, search]);
+
+  const startGrant = () => setEditing({
+    _new: true,
+    employee_id: '',
+    role: 'manager',
+    section_ids: [],
+    all_sections: false,
+    can_approve_leaves:     true,
+    can_edit_attendance:    true,
+    can_post_announcements: true,
+    can_manage_tasks:       true,
+    notes: '',
+  });
+
+  const startEdit = (row) => setEditing({
+    _new: false,
+    employee_id: row.employee_id,
+    role: row.employees.user_type,
+    section_ids: row.section_ids || [],
+    all_sections: !!row.all_sections,
+    can_approve_leaves:     !!row.can_approve_leaves,
+    can_edit_attendance:    !!row.can_edit_attendance,
+    can_post_announcements: !!row.can_post_announcements,
+    can_manage_tasks:       !!row.can_manage_tasks,
+    notes: row.notes || '',
+  });
+
+  const close = () => setEditing(null);
+
+  const save = async () => {
+    if (!editing || saving) return;
+    if (!editing.employee_id) { toast('Pick an employee'); return; }
+    if (!editing.all_sections && editing.section_ids.length === 0 && editing.role !== 'hr') {
+      toast('Pick at least one section (or All sections)'); return;
+    }
+    setSaving(true);
+    try {
+      // Promote/demote the employee's user_type
+      const { error: upErr } = await window.sb.from('employees')
+        .update({ user_type: editing.role }).eq('id', editing.employee_id);
+      if (upErr) { toast('Could not promote employee'); return; }
+
+      // Upsert user_access row
+      const { error: axErr } = await window.sb.from('user_access').upsert({
+        employee_id: editing.employee_id,
+        section_ids: editing.all_sections ? [] : editing.section_ids,
+        all_sections: editing.all_sections,
+        can_approve_leaves:     editing.can_approve_leaves,
+        can_edit_attendance:    editing.can_edit_attendance,
+        can_post_announcements: editing.can_post_announcements,
+        can_manage_tasks:       editing.can_manage_tasks,
+        notes: editing.notes || null,
+      }, { onConflict: 'employee_id' });
+      if (axErr) { toast('Could not save access'); return; }
+
+      toast(editing._new ? 'Access granted' : 'Access updated');
+      close();
+    } finally { setSaving(false); }
+  };
+
+  const revoke = async (row) => {
+    if (row.employees.user_type === 'owner') {
+      toast('Cannot revoke the owner'); return;
+    }
+    if (!window.confirm(`Revoke ${row.employees.name}'s login access?\n\nThey'll be demoted to regular staff. Their attendance/leave history stays intact.`)) return;
+    await Promise.all([
+      window.sb.from('user_access').delete().eq('employee_id', row.employee_id),
+      window.sb.from('employees').update({ user_type: 'staff' }).eq('id', row.employee_id),
+    ]);
+    toast(`Access revoked for ${row.employees.name}`);
+  };
+
+  // Employees who don't already have access (used by the pick-employee dropdown)
+  const availableEmployees = useMemo(() => {
+    const taken = new Set(access.map(a => a.employee_id));
+    return employees.filter(e => !taken.has(e.id) || (editing && !editing._new && editing.employee_id === e.id));
+  }, [employees, access, editing]);
+
+  const sectionLabel = (id) => sections.find(s => s.id === id)?.name || id;
+  const roleLabel = (r) => r === 'owner' ? 'Owner'
+                       : r === 'hr' ? 'HR'
+                       : r === 'manager' ? 'Manager'
+                       : r === 'supervisor' ? 'Supervisor'
+                       : r;
+
+  return (
+    <div>
+      <div className="stat-strip">
+        <div className="stat"><div className="k">Login users</div><div className="v">{access.length}</div></div>
+        <div className="stat present"><div className="k">Owners</div><div className="v">{access.filter(a => a.employees.user_type === 'owner').length}</div></div>
+        <div className="stat leave"><div className="k">HR</div><div className="v">{access.filter(a => a.employees.user_type === 'hr').length}</div></div>
+        <div className="stat late"><div className="k">Managers</div><div className="v">{access.filter(a => a.employees.user_type === 'manager').length}</div></div>
+        <div className="stat"><div className="k">Supervisors</div><div className="v">{access.filter(a => a.employees.user_type === 'supervisor').length}</div></div>
+      </div>
+
+      <div className="toolbar">
+        <input type="search" placeholder="Search name or ID…"
+          value={search} onChange={e => setSearch(e.target.value)} />
+        <div style={{ marginLeft: 'auto' }}>
+          <button className="btn primary" onClick={startGrant}>+ Grant access</button>
+        </div>
+      </div>
+
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th style={{ width: 80 }}>ID</th>
+              <th>Name</th>
+              <th style={{ width: 110 }}>Role</th>
+              <th>Scope</th>
+              <th>Powers</th>
+              <th style={{ width: 180 }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={6} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                  {loading ? 'Loading…' : 'No login users yet — click Grant access to add your first.'}
+                </td>
+              </tr>
+            )}
+            {rows.map(r => {
+              const e = r.employees;
+              const scope = r.all_sections ? 'All sections'
+                : (r.section_ids.length
+                    ? r.section_ids.map(sectionLabel).join(' · ')
+                    : '—');
+              const powers = [
+                r.can_approve_leaves     && 'Leaves',
+                r.can_edit_attendance    && 'Attendance',
+                r.can_post_announcements && 'Announcements',
+                r.can_manage_tasks       && 'Tasks',
+              ].filter(Boolean);
+              return (
+                <tr key={r.employee_id}>
+                  <td className="id">{r.employee_id}</td>
+                  <td className="name">{e.name}
+                    <div style={{ fontSize: 11, color: 'var(--inkMuted)', fontWeight: 400, marginTop: 2 }}>
+                      {e.role}
+                    </div>
+                  </td>
+                  <td>
+                    <span className={`status-pill ${e.user_type === 'owner' ? 'present' : e.user_type === 'hr' ? 'leave' : e.user_type === 'manager' ? 'late' : 'unmarked'}`}>
+                      {roleLabel(e.user_type)}
+                    </span>
+                  </td>
+                  <td>{scope}</td>
+                  <td style={{ fontSize: 12, color: 'var(--inkSoft)' }}>
+                    {powers.length ? powers.join(' · ') : <span className="muted">—</span>}
+                  </td>
+                  <td>
+                    <button className="btn" style={{ height: 28, padding: '0 10px', marginRight: 6 }}
+                      onClick={() => startEdit(r)}>Edit</button>
+                    {e.user_type !== 'owner' && (
+                      <button className="btn danger" style={{ height: 28, padding: '0 10px' }}
+                        onClick={() => revoke(r)}>Revoke</button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <Modal
+        open={!!editing}
+        title={editing?._new ? 'Grant access' : 'Edit access'}
+        onClose={close}
+        footer={
+          <>
+            <button className="btn" onClick={close} disabled={saving}>Cancel</button>
+            <button className="btn primary" onClick={save} disabled={saving}>
+              {saving ? 'Saving…' : editing?._new ? 'Grant access' : 'Save'}
+            </button>
+          </>
+        }
+      >
+        {editing && (
+          <>
+            <div className="field-row">
+              <label>Employee</label>
+              {editing._new ? (
+                <select value={editing.employee_id}
+                  onChange={e => setEditing({ ...editing, employee_id: e.target.value })}>
+                  <option value="">— pick someone —</option>
+                  {availableEmployees.map(emp => (
+                    <option key={emp.id} value={emp.id}>
+                      {emp.name} · {emp.id} · {emp.role}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input readOnly
+                  value={`${employees.find(e => e.id === editing.employee_id)?.name || editing.employee_id}`}
+                  style={{ background: 'var(--surfaceAlt)' }} />
+              )}
+            </div>
+
+            <div className="field-row">
+              <label>Role</label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {ROLE_OPTIONS.map(opt => (
+                  <label key={opt.id} className="checkbox-row" style={{ cursor: 'pointer' }}>
+                    <input type="radio"
+                      name="role-pick"
+                      checked={editing.role === opt.id}
+                      onChange={() => setEditing({ ...editing, role: opt.id })} />
+                    <div>
+                      <div className="label-text">{opt.label}</div>
+                      <div className="sub">{opt.sub}</div>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="field-row">
+              <label>Sections they can see</label>
+              <label className="checkbox-row" style={{ cursor: 'pointer', marginBottom: 8 }}>
+                <input type="checkbox"
+                  checked={editing.all_sections}
+                  onChange={e => setEditing({ ...editing, all_sections: e.target.checked })} />
+                <div>
+                  <div className="label-text">All sections</div>
+                  <div className="sub">Company-wide visibility, including any sections added later.</div>
+                </div>
+              </label>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, opacity: editing.all_sections ? 0.4 : 1 }}>
+                {sections.map(s => {
+                  const checked = editing.section_ids.includes(s.id);
+                  return (
+                    <label key={s.id} className="checkbox-row" style={{ cursor: 'pointer' }}>
+                      <input type="checkbox"
+                        checked={checked}
+                        disabled={editing.all_sections}
+                        onChange={e => {
+                          setEditing({
+                            ...editing,
+                            section_ids: e.target.checked
+                              ? [...editing.section_ids, s.id]
+                              : editing.section_ids.filter(id => id !== s.id),
+                          });
+                        }} />
+                      <div>
+                        <div className="label-text">{s.name}</div>
+                        <div className="sub">{s.monogram}</div>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="field-row">
+              <label>Powers</label>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
+                {[
+                  { k: 'can_approve_leaves',     label: 'Approve / reject leaves' },
+                  { k: 'can_edit_attendance',    label: 'Mark / edit attendance' },
+                  { k: 'can_post_announcements', label: 'Post announcements' },
+                  { k: 'can_manage_tasks',       label: 'Create / edit tasks' },
+                ].map(p => (
+                  <label key={p.k} className="checkbox-row" style={{ cursor: 'pointer' }}>
+                    <input type="checkbox"
+                      checked={editing[p.k]}
+                      onChange={e => setEditing({ ...editing, [p.k]: e.target.checked })} />
+                    <div>
+                      <div className="label-text">{p.label}</div>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="field-row">
+              <label>Notes (optional)</label>
+              <textarea
+                value={editing.notes || ''}
+                onChange={e => setEditing({ ...editing, notes: e.target.value })}
+                placeholder="Shift pattern, hand-off rules, anything worth remembering…" />
+            </div>
+          </>
+        )}
+      </Modal>
+    </div>
+  );
+};
+
+// ──────────────────────────────────────────────────────────
 // Page router
 // ──────────────────────────────────────────────────────────
 const Page = ({ name }) => {
@@ -3992,6 +4345,7 @@ const Page = ({ name }) => {
   if (name === 'payslips')      return <PayslipsPage />;
   if (name === 'reports')       return <ReportsPage />;
   if (name === 'kiosk')         return <KioskSettingsPage />;
+  if (name === 'team_access')   return <TeamAccessPage />;
   return (
     <div className="empty">
       <h3>Coming soon</h3>
