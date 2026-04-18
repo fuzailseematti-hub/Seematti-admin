@@ -1389,6 +1389,68 @@ const useLivePayslip = (employeeId) => {
 window.useLivePayslip = useLivePayslip;
 
 // ──────────────────────────────────────────────────────────
+// Single-employee hook for the staff home screen — combines the
+// employee row with today's attendance status + punch in/out writes.
+// ──────────────────────────────────────────────────────────
+const useLiveStaffEmployee = (employeeId) => {
+  const [employee, setEmployee] = React.useState(null);
+  const [today, setToday]       = React.useState(null);
+  const [loading, setLoading]   = React.useState(true);
+
+  const fetchAll = React.useCallback(async () => {
+    if (!window.sb || !employeeId) return;
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const [empRes, attRes] = await Promise.all([
+      window.sb.from('employees').select('id, name, role, section_id, joined_date, user_type').eq('id', employeeId).maybeSingle(),
+      window.sb.from('attendance').select('status, punch_in_time, punch_out_time').eq('employee_id', employeeId).eq('date', dateStr).maybeSingle(),
+    ]);
+    setEmployee(empRes.data || null);
+    setToday(attRes.data || null);
+    setLoading(false);
+  }, [employeeId]);
+
+  React.useEffect(() => {
+    if (!window.sb || !employeeId) return;
+    fetchAll();
+    const channel = window.sb
+      .channel(`staff-${employeeId}`)
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'attendance', filter: `employee_id=eq.${employeeId}` },
+        () => { fetchAll(); })
+      .subscribe();
+    return () => { window.sb.removeChannel(channel); };
+  }, [fetchAll, employeeId]);
+
+  const punchIn = React.useCallback(async () => {
+    if (!window.sb || !employeeId) return;
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    await window.sb.from('attendance').upsert({
+      employee_id: employeeId,
+      date:        now.toISOString().slice(0, 10),
+      status:      now.getHours() >= 10 ? 'late' : 'present',
+      punch_in_time: `${hh}:${mm}:00`,
+      source:      'self',
+    }, { onConflict: 'employee_id,date' });
+  }, [employeeId]);
+
+  const punchOut = React.useCallback(async () => {
+    if (!window.sb || !employeeId || !today) return;
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    await window.sb.from('attendance')
+      .update({ punch_out_time: `${hh}:${mm}:00` })
+      .eq('employee_id', employeeId)
+      .eq('date', now.toISOString().slice(0, 10));
+  }, [employeeId, today]);
+
+  return { employee, today, loading, punchIn, punchOut };
+};
+window.useLiveStaffEmployee = useLiveStaffEmployee;
+
+// ──────────────────────────────────────────────────────────
 // Icons — line-style, 24px, stroke 1.75
 // ──────────────────────────────────────────────────────────
 const Icon = ({ name, size = 20, color = 'currentColor', strokeWidth = 1.75 }) => {
@@ -2182,20 +2244,50 @@ const StaffHomeScreen = () => {
   const t = useT();
   const T_ = window.TOKENS;
   const M = window.MOCK;
-  const [punchedIn, setPunchedIn] = React.useState(true);
-  const [punchTime] = React.useState('9:42 AM');
 
-  const handlePunch = () => {
+  // Demo staff account — single seeded employee for now.
+  const STAFF_ID = 'E003';
+
+  const { employee, today, punchIn, punchOut } = window.useLiveStaffEmployee
+    ? window.useLiveStaffEmployee(STAFF_ID)
+    : { employee: null, today: null, punchIn: async () => {}, punchOut: async () => {} };
+
+  const { tasks: staffTasks, toggle: persistToggle } = window.useLiveTasks
+    ? window.useLiveTasks({ scope: 'staff', assigneeId: STAFF_ID })
+    : { tasks: [], toggle: async () => {} };
+
+  const { items: anns } = window.useLiveAnnouncements
+    ? window.useLiveAnnouncements()
+    : { items: [] };
+
+  const { payslip: livePayslip } = window.useLivePayslip
+    ? window.useLivePayslip(STAFF_ID)
+    : { payslip: null };
+  const p = livePayslip || M.payslip;
+
+  const staffInfo = employee || M.staff;
+  const roleLine = employee
+    ? `${employee.role}${employee.section_id ? ' · ' + (SECTION_LABEL[employee.section_id] || '') + ' Section' : ''}`
+    : M.staff.role;
+
+  const punchedIn = !!(today && (today.status === 'present' || today.status === 'late') && !today.punch_out_time);
+  const punchTime = today && today.punch_in_time ? fmtTime(today.punch_in_time) + (new Date().getHours() >= 12 ? ' PM' : ' AM') : null;
+
+  const handlePunch = async () => {
     if (punchedIn) {
-      setPunchedIn(false);
-      toast('Punched out at 6:48 PM · 9h 06m today');
+      await punchOut();
+      toast('Punched out');
     } else {
-      setPunchedIn(true);
+      await punchIn();
       toast('Punched in · Have a great day!');
     }
   };
 
-  const doneTasks = M.staffTasks.filter(x => x.done).length;
+  const doneTasks = staffTasks.filter(x => x.done).length;
+  const totalTasks = staffTasks.length;
+
+  // Top 2 announcements as staff notices; map 'pinned' as urgent colouring.
+  const notices = anns.slice(0, 2);
 
   return (
     <div style={{ background: T_.bg, paddingBottom: 90 }}>
@@ -2203,13 +2295,13 @@ const StaffHomeScreen = () => {
       <div style={{ padding: 'var(--screen-top) 20px 0' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <Avatar name={M.staff.name} size={38} />
+            <Avatar name={staffInfo.name} size={38} />
             <div>
               <div style={{ fontSize: 11, color: T_.inkMuted, letterSpacing: 0.3, textTransform: 'uppercase', fontWeight: 600 }}>
-                {M.staff.id}
+                {staffInfo.id || STAFF_ID}
               </div>
               <div style={{ fontSize: 14, fontWeight: 600, color: T_.ink, marginTop: 1 }}>
-                {M.staff.name}
+                {staffInfo.name}
               </div>
             </div>
           </div>
@@ -2242,7 +2334,7 @@ const StaffHomeScreen = () => {
           letterSpacing: -0.5, lineHeight: 1.2,
         }}>{t('myDay')}</div>
         <div style={{ fontSize: 13, color: T_.inkMuted, marginTop: 4 }}>
-          {M.staff.role}
+          {roleLine}
         </div>
       </div>
 
@@ -2268,7 +2360,7 @@ const StaffHomeScreen = () => {
                 fontFamily: 'Fraunces, Georgia, serif',
                 fontSize: 28, fontWeight: 600, marginTop: 6, letterSpacing: -0.6,
               }}>
-                {punchedIn ? `On shift · ${punchTime}` : 'Not punched in'}
+                {punchedIn ? `On shift · ${punchTime || ''}` : 'Not punched in'}
               </div>
             </div>
             <div style={{
@@ -2299,16 +2391,16 @@ const StaffHomeScreen = () => {
       </div>
 
       {/* Notices */}
-      {M.staffNotices.length > 0 && (
+      {notices.length > 0 && (
         <div style={{ padding: '20px 16px 0' }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {M.staffNotices.map(n => (
+            {notices.map(n => (
               <div key={n.id} style={{
-                background: n.urgent ? T_.maroonSoft : T_.goldSoft,
+                background: n.pinned ? T_.maroonSoft : T_.goldSoft,
                 borderRadius: 14, padding: '12px 14px',
                 display: 'flex', alignItems: 'center', gap: 10,
               }}>
-                <Icon name="megaphone" size={18} color={n.urgent ? T_.maroon : T_.gold} />
+                <Icon name="megaphone" size={18} color={n.pinned ? T_.maroon : T_.gold} />
                 <div style={{ flex: 1, fontSize: 12.5, fontWeight: 500, color: T_.ink }}>
                   {n.title}
                 </div>
@@ -2334,7 +2426,7 @@ const StaffHomeScreen = () => {
           <div style={{
             fontSize: 12, fontWeight: 600, color: T_.inkMuted,
             letterSpacing: 0.6, textTransform: 'uppercase',
-          }}>{t('tasksToday')} · {doneTasks}/{M.staffTasks.length}</div>
+          }}>{t('tasksToday')} · {doneTasks}/{totalTasks}</div>
           <button onClick={() => nav.go('tasks')} style={{
             background: 'none', border: 'none', color: T_.maroon, cursor: 'pointer',
             fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
@@ -2344,8 +2436,10 @@ const StaffHomeScreen = () => {
           background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 16,
           overflow: 'hidden',
         }}>
-          {M.staffTasks.slice(0, 4).map((task, i) => (
-            <StaffTaskRow key={task.id} task={task} last={i === 3} />
+          {staffTasks.slice(0, 4).map((task, i) => (
+            <StaffTaskRow key={task.id} task={task}
+              last={i === Math.min(staffTasks.length, 4) - 1}
+              onToggle={() => persistToggle(task.id, !task.done)} />
           ))}
         </div>
       </div>
@@ -2367,12 +2461,12 @@ const StaffHomeScreen = () => {
           </div>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 11.5, color: T_.inkMuted, letterSpacing: 0.3, textTransform: 'uppercase', fontWeight: 600 }}>
-              March payslip
+              {p.month || 'Latest'} payslip
             </div>
             <div style={{
               fontFamily: 'Fraunces, Georgia, serif',
               fontSize: 20, fontWeight: 600, color: T_.ink, marginTop: 2, letterSpacing: -0.5,
-            }}>₹22,650</div>
+            }}>₹{(p.net || 0).toLocaleString('en-IN')}</div>
           </div>
           <Icon name="chevron" size={16} color={T_.inkFaint} />
         </button>
@@ -2404,15 +2498,15 @@ const QuickAction = ({ icon, label, onClick }) => {
   );
 };
 
-const StaffTaskRow = ({ task, last }) => {
+const StaffTaskRow = ({ task, last, onToggle }) => {
   const T_ = window.TOKENS;
-  const [done, setDone] = React.useState(task.done);
+  const done = task.done;
   return (
     <div style={{
       padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 12,
       borderBottom: last ? 'none' : `1px solid ${T_.borderSoft}`,
     }}>
-      <button onClick={() => setDone(!done)} style={{
+      <button onClick={onToggle} style={{
         width: 22, height: 22, borderRadius: 7,
         background: done ? T_.success : 'transparent',
         border: done ? 'none' : `1.5px solid ${T_.border}`,
