@@ -976,10 +976,187 @@ const AttendancePage = () => {
 };
 
 // ──────────────────────────────────────────────────────────
+// Employees page — directory view (slice 1: read-only with filters).
+// ──────────────────────────────────────────────────────────
+const TYPE_LABEL = { owner: 'Owner', hr: 'HR', staff: 'Staff' };
+const TYPE_TONE  = { owner: 'brand', hr: 'info', staff: 'gold' };
+
+const EmployeesPage = () => {
+  const [search, setSearch] = useState('');
+  const [section, setSection] = useState('all');
+  const [type, setType] = useState('all');
+  const [sortBy, setSortBy] = useState('id');
+  const [sortDir, setSortDir] = useState('asc');
+
+  const [all, setAll] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const fetchAll = useCallback(async () => {
+    if (!window.sb) return;
+    const { data } = await window.sb
+      .from('employees')
+      .select('id, name, role, section_id, user_type, is_active, joined_date')
+      .order('id');
+    setAll(data || []);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (!window.sb) return;
+    fetchAll();
+    const ch = window.sb.channel('dash-emp-list')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'employees' },
+        () => fetchAll())
+      .subscribe();
+    return () => { window.sb.removeChannel(ch); };
+  }, [fetchAll]);
+
+  const rows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const filtered = all.filter(e => {
+      if (type !== 'all' && e.user_type !== type) return false;
+      if (section !== 'all' && e.section_id !== section) return false;
+      if (q && !(e.name.toLowerCase().includes(q) ||
+                 e.id.toLowerCase().includes(q) ||
+                 (e.role || '').toLowerCase().includes(q))) return false;
+      return true;
+    });
+    const cmp = (a, b) => {
+      const va = a[sortBy] ?? '';
+      const vb = b[sortBy] ?? '';
+      if (va < vb) return sortDir === 'asc' ? -1 : 1;
+      if (va > vb) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    };
+    return [...filtered].sort(cmp);
+  }, [all, search, section, type, sortBy, sortDir]);
+
+  const counts = useMemo(() => ({
+    total: all.length,
+    owner: all.filter(e => e.user_type === 'owner').length,
+    hr:    all.filter(e => e.user_type === 'hr').length,
+    staff: all.filter(e => e.user_type === 'staff').length,
+    fancy:  all.filter(e => e.section_id === 'fancy').length,
+    cotton: all.filter(e => e.section_id === 'cotton').length,
+    silk:   all.filter(e => e.section_id === 'silk').length,
+    dhoti:  all.filter(e => e.section_id === 'dhoti').length,
+  }), [all]);
+
+  const clickSort = (col) => {
+    if (sortBy === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortBy(col); setSortDir('asc'); }
+  };
+  const arrow = (col) => sortBy === col ? (sortDir === 'asc' ? ' ↑' : ' ↓') : '';
+
+  const fmtDate = (iso) => iso
+    ? new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+    : '—';
+
+  return (
+    <div>
+      {/* Stat strip */}
+      <div className="stat-strip">
+        <div className="stat"><div className="k">Total</div><div className="v">{counts.total}</div></div>
+        <div className="stat"><div className="k">Owners</div><div className="v">{counts.owner}</div></div>
+        <div className="stat"><div className="k">HR</div><div className="v">{counts.hr}</div></div>
+        <div className="stat"><div className="k">Staff</div><div className="v">{counts.staff}</div></div>
+        <div className="stat"><div className="k">Active</div><div className="v">{all.filter(e => e.is_active).length}</div></div>
+      </div>
+
+      <div className="toolbar">
+        <div className="seg">
+          {[
+            { id: 'all',    label: `All · ${counts.total}` },
+            { id: 'fancy',  label: `Fancy · ${counts.fancy}` },
+            { id: 'cotton', label: `Cotton · ${counts.cotton}` },
+            { id: 'silk',   label: `Silk · ${counts.silk}` },
+            { id: 'dhoti',  label: `Dhoti · ${counts.dhoti}` },
+          ].map(s => (
+            <button key={s.id}
+              className={section === s.id ? 'active' : ''}
+              onClick={() => setSection(s.id)}>
+              {s.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="seg">
+          {[
+            { id: 'all', label: 'Any role' },
+            { id: 'owner', label: 'Owner' },
+            { id: 'hr', label: 'HR' },
+            { id: 'staff', label: 'Staff' },
+          ].map(s => (
+            <button key={s.id}
+              className={type === s.id ? 'active' : ''}
+              onClick={() => setType(s.id)}>
+              {s.label}
+            </button>
+          ))}
+        </div>
+
+        <input type="search" placeholder="Search name, ID or role…"
+          value={search} onChange={e => setSearch(e.target.value)} />
+
+        <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--inkMuted)' }}>
+          {loading ? 'Loading…' : `Showing ${rows.length} of ${all.length}`}
+        </div>
+      </div>
+
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th onClick={() => clickSort('id')} style={{ cursor: 'pointer', width: 90 }}>ID{arrow('id')}</th>
+              <th onClick={() => clickSort('name')} style={{ cursor: 'pointer' }}>Name{arrow('name')}</th>
+              <th onClick={() => clickSort('role')} style={{ cursor: 'pointer' }}>Role{arrow('role')}</th>
+              <th onClick={() => clickSort('section_id')} style={{ cursor: 'pointer', width: 110 }}>Section{arrow('section_id')}</th>
+              <th onClick={() => clickSort('user_type')} style={{ cursor: 'pointer', width: 100 }}>Type{arrow('user_type')}</th>
+              <th onClick={() => clickSort('joined_date')} style={{ cursor: 'pointer', width: 130 }}>Joined{arrow('joined_date')}</th>
+              <th style={{ width: 80 }}>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={7} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                  {loading ? 'Loading…' : 'No employees match these filters.'}
+                </td>
+              </tr>
+            )}
+            {rows.map(r => (
+              <tr key={r.id}>
+                <td className="id">{r.id}</td>
+                <td className="name">{r.name}</td>
+                <td>{r.role}</td>
+                <td>{SECTION_META[r.section_id]?.label || <span className="muted">—</span>}</td>
+                <td>
+                  <span className={`status-pill ${r.user_type === 'owner' ? 'present' : r.user_type === 'hr' ? 'leave' : 'unmarked'}`}
+                    style={{ letterSpacing: 0.4 }}>
+                    {TYPE_LABEL[r.user_type] || r.user_type}
+                  </span>
+                </td>
+                <td className="muted">{fmtDate(r.joined_date)}</td>
+                <td>
+                  {r.is_active
+                    ? <span className="status-pill present">Active</span>
+                    : <span className="status-pill absent">Inactive</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+// ──────────────────────────────────────────────────────────
 // Page router
 // ──────────────────────────────────────────────────────────
 const Page = ({ name }) => {
   if (name === 'attendance') return <AttendancePage />;
+  if (name === 'employees')  return <EmployeesPage />;
   return (
     <div className="empty">
       <h3>Coming soon</h3>
