@@ -1049,17 +1049,24 @@ const AttendancePage = () => {
 };
 
 // ──────────────────────────────────────────────────────────
-// Employees page — directory view (slice 1: read-only with filters).
+// Employees page — directory with add / edit / deactivate / delete.
 // ──────────────────────────────────────────────────────────
 const TYPE_LABEL = { owner: 'Owner', hr: 'HR', staff: 'Staff' };
 const TYPE_TONE  = { owner: 'brand', hr: 'info', staff: 'gold' };
 
 const EmployeesPage = () => {
+  const toast = useToast();
+  const { can } = useContext(AppCtx);
+
   const [search, setSearch] = useState('');
   const [section, setSection] = useState('all');
   const [type, setType] = useState('all');
+  const [showInactive, setShowInactive] = useState(false);
   const [sortBy, setSortBy] = useState('id');
   const [sortDir, setSortDir] = useState('asc');
+
+  const [editing, setEditing] = useState(null); // null | row (id===null means new)
+  const [saving, setSaving] = useState(false);
 
   const [all, setAll] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1087,6 +1094,7 @@ const EmployeesPage = () => {
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
     const filtered = all.filter(e => {
+      if (!showInactive && !e.is_active) return false;
       if (type !== 'all' && e.user_type !== type) return false;
       if (section !== 'all' && e.section_id !== section) return false;
       if (q && !(e.name.toLowerCase().includes(q) ||
@@ -1120,6 +1128,77 @@ const EmployeesPage = () => {
     else { setSortBy(col); setSortDir('asc'); }
   };
   const arrow = (col) => sortBy === col ? (sortDir === 'asc' ? ' ↑' : ' ↓') : '';
+
+  // Generate the next sequential employee ID ('E001' -> next is 'E002' etc).
+  const nextId = () => {
+    const nums = all.map(e => {
+      const m = (e.id || '').match(/^E(\d+)$/i);
+      return m ? parseInt(m[1], 10) : -1;
+    }).filter(n => n >= 0);
+    const max = nums.length ? Math.max(...nums) : 0;
+    return 'E' + String(max + 1).padStart(3, '0');
+  };
+
+  const startNew = () => setEditing({
+    id: '', name: '', role: '', section_id: 'fancy',
+    user_type: 'staff', is_active: true, joined_date: new Date().toISOString().slice(0, 10),
+    phone: '',
+    _new: true, _suggestedId: nextId(),
+  });
+  const startEdit = (row) => setEditing({ ...row, _new: false });
+  const close = () => setEditing(null);
+
+  const save = async () => {
+    if (!editing || saving) return;
+    const payload = {
+      name: (editing.name || '').trim(),
+      role: (editing.role || '').trim(),
+      section_id: editing.user_type === 'staff' ? editing.section_id : null,
+      user_type: editing.user_type,
+      is_active: !!editing.is_active,
+      joined_date: editing.joined_date || null,
+      phone: (editing.phone || '').trim() || null,
+    };
+    if (!payload.name) { toast('Name is required'); return; }
+    if (!payload.role) { toast('Role is required'); return; }
+
+    setSaving(true);
+    try {
+      if (editing._new) {
+        const id = (editing.id || editing._suggestedId || '').trim().toUpperCase();
+        if (!id) { toast('Employee ID is required'); setSaving(false); return; }
+        const { error } = await window.sb.from('employees').insert({ id, ...payload });
+        if (error) {
+          toast(error.message.includes('duplicate') ? 'Employee ID already exists' : 'Could not save');
+        } else {
+          toast(`Added ${payload.name}`);
+          close();
+        }
+      } else {
+        const { error } = await window.sb.from('employees')
+          .update(payload).eq('id', editing.id);
+        if (error) toast('Could not save');
+        else { toast('Saved'); close(); }
+      }
+    } finally { setSaving(false); }
+  };
+
+  const toggleActive = async (row) => {
+    if (!can('employees', 'edit')) return;
+    await window.sb.from('employees')
+      .update({ is_active: !row.is_active }).eq('id', row.id);
+    toast(row.is_active ? `${row.name} deactivated` : `${row.name} reactivated`);
+  };
+
+  const del = async (row) => {
+    if (!can('employees', 'delete')) return;
+    if (!window.confirm(
+      `Permanently delete ${row.name}?\n\nThis will also delete their attendance records, leave requests, and payslips. This cannot be undone.\n\nIf you just want to archive them, use Deactivate instead.`
+    )) return;
+    const { error } = await window.sb.from('employees').delete().eq('id', row.id);
+    if (error) toast('Could not delete (see console)');
+    else toast(`${row.name} deleted`);
+  };
 
   const fmtDate = (iso) => iso
     ? new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
@@ -1171,9 +1250,26 @@ const EmployeesPage = () => {
         <input type="search" placeholder="Search name, ID or role…"
           value={search} onChange={e => setSearch(e.target.value)} />
 
-        <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--inkMuted)' }}>
+        <label style={{
+          display: 'inline-flex', alignItems: 'center', gap: 6,
+          fontSize: 12.5, color: 'var(--inkSoft)', cursor: 'pointer',
+        }}>
+          <input type="checkbox"
+            checked={showInactive}
+            onChange={e => setShowInactive(e.target.checked)} />
+          Include inactive
+        </label>
+
+        <div style={{ fontSize: 12, color: 'var(--inkMuted)' }}>
           {loading ? 'Loading…' : `Showing ${rows.length} of ${all.length}`}
         </div>
+
+        {can('employees', 'create') && (
+          <button className="btn primary" onClick={startNew}
+            style={{ marginLeft: 'auto' }}>
+            + New employee
+          </button>
+        )}
       </div>
 
       <div className="table-wrap">
@@ -1187,18 +1283,21 @@ const EmployeesPage = () => {
               <th onClick={() => clickSort('user_type')} style={{ cursor: 'pointer', width: 100 }}>Type{arrow('user_type')}</th>
               <th onClick={() => clickSort('joined_date')} style={{ cursor: 'pointer', width: 130 }}>Joined{arrow('joined_date')}</th>
               <th style={{ width: 80 }}>Status</th>
+              {(can('employees', 'edit') || can('employees', 'delete')) && (
+                <th style={{ width: 220 }}>Actions</th>
+              )}
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={7} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                <td colSpan={8} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
                   {loading ? 'Loading…' : 'No employees match these filters.'}
                 </td>
               </tr>
             )}
             {rows.map(r => (
-              <tr key={r.id}>
+              <tr key={r.id} style={{ opacity: r.is_active ? 1 : 0.55 }}>
                 <td className="id">{r.id}</td>
                 <td className="name">{r.name}</td>
                 <td>{r.role}</td>
@@ -1215,11 +1314,135 @@ const EmployeesPage = () => {
                     ? <span className="status-pill present">Active</span>
                     : <span className="status-pill absent">Inactive</span>}
                 </td>
+                {(can('employees', 'edit') || can('employees', 'delete')) && (
+                  <td>
+                    {can('employees', 'edit') && (
+                      <>
+                        <button className="btn" style={{ height: 28, padding: '0 10px', marginRight: 6 }}
+                          onClick={() => startEdit(r)}>Edit</button>
+                        <button className="btn" style={{ height: 28, padding: '0 10px', marginRight: 6 }}
+                          onClick={() => toggleActive(r)}>
+                          {r.is_active ? 'Deactivate' : 'Reactivate'}
+                        </button>
+                      </>
+                    )}
+                    {can('employees', 'delete') && (
+                      <button className="btn danger" style={{ height: 28, padding: '0 10px' }}
+                        onClick={() => del(r)}>Delete</button>
+                    )}
+                  </td>
+                )}
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+
+      {/* Add / Edit modal */}
+      <Modal
+        open={!!editing}
+        title={editing?._new ? 'Add employee' : `Edit ${editing?.name || ''}`}
+        onClose={close}
+        footer={
+          <>
+            <button className="btn" onClick={close} disabled={saving}>Cancel</button>
+            <button className="btn primary" onClick={save} disabled={saving}>
+              {saving ? 'Saving…' : editing?._new ? 'Add employee' : 'Save changes'}
+            </button>
+          </>
+        }
+      >
+        {editing && (
+          <>
+            <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: 12 }}>
+              <div>
+                <label>Employee ID</label>
+                {editing._new ? (
+                  <input
+                    value={editing.id || editing._suggestedId}
+                    onChange={e => setEditing({ ...editing, id: e.target.value.toUpperCase() })}
+                    placeholder={editing._suggestedId}
+                    style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}
+                  />
+                ) : (
+                  <input value={editing.id} readOnly
+                    style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', background: 'var(--surfaceAlt)' }} />
+                )}
+              </div>
+              <div>
+                <label>Full name</label>
+                <input autoFocus={editing._new}
+                  value={editing.name || ''}
+                  onChange={e => setEditing({ ...editing, name: e.target.value })}
+                  placeholder="e.g. Divya Parvathy" />
+              </div>
+            </div>
+
+            <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
+                <label>Role / designation</label>
+                <input
+                  value={editing.role || ''}
+                  onChange={e => setEditing({ ...editing, role: e.target.value })}
+                  placeholder="e.g. Sales Associate" />
+              </div>
+              <div>
+                <label>User type</label>
+                <select
+                  value={editing.user_type || 'staff'}
+                  onChange={e => setEditing({ ...editing, user_type: e.target.value })}>
+                  <option value="staff">Staff</option>
+                  <option value="hr">HR</option>
+                  <option value="owner">Owner</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
+                <label>Section {editing.user_type !== 'staff' && '(staff only)'}</label>
+                <select
+                  value={editing.section_id || ''}
+                  onChange={e => setEditing({ ...editing, section_id: e.target.value || null })}
+                  disabled={editing.user_type !== 'staff'}>
+                  <option value="">— none —</option>
+                  {Object.entries(SECTION_META).map(([k, v]) => (
+                    <option key={k} value={k}>{v.full}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label>Joined date</label>
+                <input type="date"
+                  value={editing.joined_date || ''}
+                  onChange={e => setEditing({ ...editing, joined_date: e.target.value })} />
+              </div>
+            </div>
+
+            <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
+                <label>Phone (optional)</label>
+                <input
+                  value={editing.phone || ''}
+                  onChange={e => setEditing({ ...editing, phone: e.target.value })}
+                  placeholder="+91 ..." />
+              </div>
+              <div>
+                <label>Active</label>
+                <label className="checkbox-row" style={{ cursor: 'pointer' }}>
+                  <input type="checkbox"
+                    checked={!!editing.is_active}
+                    onChange={e => setEditing({ ...editing, is_active: e.target.checked })} />
+                  <div>
+                    <div className="label-text">{editing.is_active ? 'Active' : 'Inactive'}</div>
+                    <div className="sub">Inactive employees are hidden from attendance rosters.</div>
+                  </div>
+                </label>
+              </div>
+            </div>
+          </>
+        )}
+      </Modal>
     </div>
   );
 };
