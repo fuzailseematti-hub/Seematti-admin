@@ -4469,8 +4469,27 @@ const EnrollJoinerScreen = () => {
     }, 900);
   };
 
-  const finish = () => {
-    toast(`${details.name || 'New joiner'} enrolled · Face saved`);
+  const finish = async () => {
+    if (!window.sb) {
+      toast('Offline — cannot save');
+      return;
+    }
+    const empId = (details.empId || '').trim().toUpperCase() || `E${String(Math.floor(Math.random() * 900) + 400).padStart(3, '0')}`;
+    const { error } = await window.sb
+      .from('employees')
+      .insert({
+        id:          empId,
+        name:        details.name.trim(),
+        role:        details.role.trim(),
+        section_id:  details.section,
+        user_type:   'staff',
+        joined_date: new Date().toISOString().slice(0, 10),
+      });
+    if (error) {
+      toast(error.message.includes('duplicate') ? 'Employee ID already exists' : 'Could not save — try again');
+      return;
+    }
+    toast(`${details.name} enrolled · Face saved`);
     setTimeout(() => nav.back(), 700);
   };
 
