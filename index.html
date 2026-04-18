@@ -212,6 +212,20 @@
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+  // ──────────────────────────────────────────────────────────
+  // Supabase client — publishable anon key, safe to ship.
+  // Schema + RLS lives in the Supabase project itself.
+  // ──────────────────────────────────────────────────────────
+  window.SB_URL = 'https://hixhbznbejqfnasvgyid.supabase.co';
+  window.SB_KEY = 'sb_publishable__Pit2dNHnYZ5oGLsJsn6lg_ojxAPfT8';
+  if (window.supabase && window.supabase.createClient) {
+    window.sb = window.supabase.createClient(window.SB_URL, window.SB_KEY, {
+      realtime: { params: { eventsPerSecond: 5 } },
+    });
+  }
+</script>
 </head>
 <body>
 
@@ -848,6 +862,98 @@ const useT = () => {
 };
 
 // ──────────────────────────────────────────────────────────
+// Live attendance hook — reads from Supabase + subscribes to realtime
+// changes on the attendance table so any mark/unmark broadcasts to all
+// connected devices immediately.
+//
+// Returns shapes that match the existing MOCK.attendance and MOCK.floors
+// so downstream components don't need to know about the data source.
+// ──────────────────────────────────────────────────────────
+const SECTION_TO_LABEL_KEY = {
+  fancy:  'secFancy',
+  cotton: 'secCotton',
+  silk:   'secSilk',
+  dhoti:  'secDhoti',
+};
+
+const useLiveAttendance = () => {
+  const [state, setState] = React.useState({
+    loading: true,
+    attendance: null,
+    sections: null,
+  });
+
+  const fetchAll = React.useCallback(async () => {
+    if (!window.sb) return;
+    const today = new Date().toISOString().slice(0, 10);
+
+    const [secRes, staffCountRes, attRes] = await Promise.all([
+      window.sb
+        .from('attendance_today_by_section')
+        .select('*')
+        .order('sort_order'),
+      window.sb
+        .from('employees')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_type', 'staff')
+        .eq('is_active', true),
+      window.sb
+        .from('attendance')
+        .select('status')
+        .eq('date', today),
+    ]);
+
+    const rows = attRes.data || [];
+    const count = (s) => rows.filter(r => r.status === s).length;
+    const total = staffCountRes.count || rows.length;
+
+    const sections = (secRes.data || []).map(r => ({
+      id:         r.section_id,
+      labelKey:   SECTION_TO_LABEL_KEY[r.section_id] || r.section_name,
+      glyph:      r.section_monogram,
+      staff:      r.headcount,
+      present:    r.present_count,
+      late:       r.late_count,
+      absent:     r.absent_count,
+      onLeave:    r.on_leave_count,
+      trend:      r.headcount
+        ? Math.round((r.present_count / r.headcount) * 100) + '%'
+        : '0%',
+    }));
+
+    setState({
+      loading: false,
+      attendance: {
+        total,
+        present: count('present'),
+        late:    count('late'),
+        absent:  count('absent'),
+        onLeave: count('on_leave'),
+      },
+      sections,
+    });
+  }, []);
+
+  React.useEffect(() => {
+    if (!window.sb) return;
+    fetchAll();
+    const channel = window.sb
+      .channel('live-attendance')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'attendance' },
+        () => { fetchAll(); })
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'employees' },
+        () => { fetchAll(); })
+      .subscribe();
+    return () => { window.sb.removeChannel(channel); };
+  }, [fetchAll]);
+
+  return state;
+};
+window.useLiveAttendance = useLiveAttendance;
+
+// ──────────────────────────────────────────────────────────
 // Icons — line-style, 24px, stroke 1.75
 // ──────────────────────────────────────────────────────────
 const Icon = ({ name, size = 20, color = 'currentColor', strokeWidth = 1.75 }) => {
@@ -1311,7 +1417,9 @@ const OwnerHomeScreen = () => {
   const t = useT();
   const T_ = window.TOKENS;
   const M = window.MOCK;
-  const a = M.attendance;
+  const live = window.useLiveAttendance ? window.useLiveAttendance() : { loading: true };
+  const a        = live.attendance || M.attendance;
+  const sections = (live.sections && live.sections.length) ? live.sections : M.floors;
   const attendancePct = Math.round((a.present / a.total) * 100);
 
   const hour = new Date().getHours();
@@ -1375,7 +1483,7 @@ const OwnerHomeScreen = () => {
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           }}>
             <div style={{ fontSize: 12.5, color: T_.inkSoft }}>
-              <span style={{ fontWeight: 600 }}>312 staff</span> across 4 sections
+              <span style={{ fontWeight: 600 }}>{a.total} staff</span> across {sections.length} sections
             </div>
             <button onClick={() => nav.go('attendance')} style={{
               background: 'none', border: 'none', color: T_.maroon,
@@ -1392,7 +1500,7 @@ const OwnerHomeScreen = () => {
       <div style={{ padding: '20px 16px 0' }}>
         <SectionTitle title={t('floors')} />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
-          {M.floors.map(f => (
+          {sections.map(f => (
             <FloorCard key={f.id} floor={f} />
           ))}
         </div>
