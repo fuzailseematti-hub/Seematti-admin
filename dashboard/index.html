@@ -215,6 +215,165 @@
   }
   .empty p { margin: 0; font-size: 13.5px; }
 
+  /* Stats strip */
+  .stat-strip {
+    display: grid; grid-template-columns: repeat(5, 1fr);
+    gap: 10px; margin-bottom: 20px;
+  }
+  .stat {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; padding: 14px 16px;
+  }
+  .stat .k {
+    font-size: 10.5px; font-weight: 700; letter-spacing: 0.5px;
+    text-transform: uppercase; color: var(--inkMuted);
+    margin-bottom: 4px;
+  }
+  .stat .v {
+    font-family: 'Fraunces', Georgia, serif;
+    font-size: 26px; font-weight: 600; letter-spacing: -0.6px;
+    line-height: 1; font-feature-settings: '"tnum"';
+  }
+  .stat.present .v { color: var(--success); }
+  .stat.late    .v { color: var(--warning); }
+  .stat.absent  .v { color: var(--danger); }
+  .stat.leave   .v { color: var(--info); }
+
+  /* Toolbar */
+  .toolbar {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+    margin-bottom: 16px;
+  }
+  .field, input[type=text], input[type=search], input[type=date], select {
+    height: 38px; padding: 0 12px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--ink); font-size: 13.5px; box-sizing: border-box;
+  }
+  input[type=search] { min-width: 220px; }
+  input:focus, select:focus { border-color: var(--brand); }
+  .seg {
+    display: inline-flex; padding: 3px; border-radius: 10px;
+    background: var(--surfaceAlt); gap: 2px;
+  }
+  .seg button {
+    background: none; border: none; padding: 6px 12px;
+    border-radius: 7px; font-size: 12.5px; font-weight: 600;
+    color: var(--inkMuted); cursor: pointer;
+  }
+  .seg button.active {
+    background: var(--surface); color: var(--ink);
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .btn {
+    height: 38px; padding: 0 14px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--ink); font-size: 13px; font-weight: 600;
+    cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .btn:hover { background: var(--surfaceAlt); }
+  .btn.primary { background: var(--brand); color: #fff; border: none; }
+  .btn.primary:hover { background: var(--brandDeep); }
+  .btn.danger { color: var(--danger); border-color: var(--dangerSoft); }
+  .btn.danger:hover { background: var(--dangerSoft); }
+  .btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+
+  /* Bulk action bar */
+  .bulk {
+    background: var(--ink); color: #fff;
+    border-radius: 12px; padding: 10px 14px;
+    display: flex; align-items: center; gap: 12px;
+    font-size: 13px;
+    margin-bottom: 12px;
+  }
+  .bulk .btn {
+    background: rgba(255,255,255,0.12); color: #fff; border-color: transparent;
+  }
+  .bulk .btn:hover { background: rgba(255,255,255,0.22); }
+
+  /* Table */
+  .table-wrap {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; overflow: hidden;
+  }
+  table.data {
+    width: 100%; border-collapse: collapse;
+  }
+  table.data th {
+    font-size: 10.5px; font-weight: 700; letter-spacing: 0.5px;
+    text-transform: uppercase; color: var(--inkMuted);
+    padding: 12px 14px; text-align: left; white-space: nowrap;
+    border-bottom: 1px solid var(--border);
+    background: var(--surfaceAlt);
+    position: sticky; top: 0; z-index: 1;
+  }
+  table.data td {
+    padding: 10px 14px; font-size: 13px;
+    border-bottom: 1px solid var(--borderSoft);
+    vertical-align: middle;
+  }
+  table.data tr:last-child td { border-bottom: none; }
+  table.data tr:hover td { background: rgba(14, 124, 58, 0.025); }
+  table.data tr.selected td { background: var(--brandSoft); }
+  table.data td.id {
+    font-family: 'JetBrains Mono', Menlo, monospace;
+    font-size: 11.5px; color: var(--inkMuted);
+  }
+  table.data td.name { font-weight: 600; color: var(--ink); }
+  table.data .muted { color: var(--inkMuted); }
+  table.data input[type=checkbox] {
+    width: 16px; height: 16px; cursor: pointer;
+  }
+
+  /* Status chip group (inline edit) */
+  .status-chips {
+    display: inline-flex; gap: 3px; padding: 2px;
+    background: var(--surfaceAlt); border-radius: 8px;
+  }
+  .status-chips button {
+    border: none; background: none; cursor: pointer;
+    padding: 4px 8px; font-size: 11px; font-weight: 700;
+    letter-spacing: 0.4px; text-transform: uppercase;
+    color: var(--inkMuted);
+    border-radius: 6px;
+  }
+  .status-chips button:hover { background: var(--surface); }
+  .status-chips button.active {
+    background: var(--surface); color: var(--ink);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.08);
+  }
+  .status-chips button[data-s=present].active { color: var(--success); }
+  .status-chips button[data-s=late].active    { color: var(--warning); }
+  .status-chips button[data-s=absent].active  { color: var(--danger); }
+  .status-chips button[data-s=leave].active   { color: var(--info); }
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 700;
+    letter-spacing: 0.3px; text-transform: uppercase;
+  }
+  .status-pill.present { background: var(--brandSoft); color: var(--success); }
+  .status-pill.late    { background: var(--warningSoft); color: var(--warning); }
+  .status-pill.absent  { background: var(--dangerSoft); color: var(--danger); }
+  .status-pill.leave   { background: var(--infoSoft); color: var(--info); }
+  .status-pill.unmarked{ background: var(--surfaceAlt); color: var(--inkMuted); }
+
+  /* Toast */
+  .toast {
+    position: fixed; bottom: 24px; left: 50%;
+    transform: translateX(-50%);
+    background: var(--ink); color: #fff;
+    padding: 12px 20px; border-radius: 12px;
+    font-size: 13px; font-weight: 500;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+    z-index: 50;
+    animation: toastIn 180ms ease-out;
+  }
+  @keyframes toastIn {
+    from { opacity: 0; transform: translate(-50%, 10px); }
+    to   { opacity: 1; transform: translate(-50%, 0); }
+  }
+
   /* Mobile fallback */
   @media (max-width: 720px) {
     .shell { grid-template-columns: 1fr; }
@@ -442,13 +601,389 @@ const App = () => {
 };
 
 // ──────────────────────────────────────────────────────────
-// Page router — slice 1 ships only the shell.
+// Toast host (simple — one at a time)
+// ──────────────────────────────────────────────────────────
+const ToastCtx = createContext(() => {});
+const ToastHost = ({ children }) => {
+  const [msg, setMsg] = useState(null);
+  const show = useCallback((m) => {
+    setMsg(m);
+    setTimeout(() => setMsg((cur) => cur === m ? null : cur), 2400);
+  }, []);
+  return (
+    <ToastCtx.Provider value={show}>
+      {children}
+      {msg && <div className="toast">{msg}</div>}
+    </ToastCtx.Provider>
+  );
+};
+const useToast = () => useContext(ToastCtx);
+
+// ──────────────────────────────────────────────────────────
+// Shared hooks (employees list + per-date attendance)
+// ──────────────────────────────────────────────────────────
+const SECTION_META = {
+  fancy:  { label: 'Fancy',  full: 'Fancy Section' },
+  cotton: { label: 'Cotton', full: 'Cotton Section' },
+  silk:   { label: 'Silk',   full: 'Silk Section' },
+  dhoti:  { label: 'Dhoti',  full: 'Dhoties & Shirting' },
+};
+
+const useEmployees = () => {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const fetchAll = useCallback(async () => {
+    if (!window.sb) return;
+    const { data } = await window.sb
+      .from('employees')
+      .select('id, name, role, section_id, user_type, is_active, joined_date')
+      .eq('is_active', true)
+      .order('id');
+    setRows(data || []);
+    setLoading(false);
+  }, []);
+  useEffect(() => {
+    if (!window.sb) return;
+    fetchAll();
+    const ch = window.sb.channel('dash-employees')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'employees' },
+        () => fetchAll())
+      .subscribe();
+    return () => { window.sb.removeChannel(ch); };
+  }, [fetchAll]);
+  return { rows, loading };
+};
+
+const DB_TO_UI = { present: 'present', late: 'late', absent: 'absent', on_leave: 'leave' };
+const UI_TO_DB = { present: 'present', late: 'late', absent: 'absent', leave:  'on_leave' };
+
+const fmtTime = (t) => {
+  if (!t) return null;
+  const [hR, m] = t.split(':');
+  const h = parseInt(hR, 10);
+  const hh = h % 12 || 12;
+  const ap = h >= 12 ? 'pm' : 'am';
+  return `${hh}:${m} ${ap}`;
+};
+
+const useAttendanceForDate = (dateStr) => {
+  const [byId, setById] = useState({});
+  const [loading, setLoading] = useState(true);
+  const fetchAll = useCallback(async () => {
+    if (!window.sb) return;
+    const { data } = await window.sb
+      .from('attendance')
+      .select('employee_id, status, punch_in_time, punch_out_time, source')
+      .eq('date', dateStr);
+    const m = {};
+    (data || []).forEach(a => { m[a.employee_id] = a; });
+    setById(m);
+    setLoading(false);
+  }, [dateStr]);
+  useEffect(() => {
+    if (!window.sb) return;
+    setLoading(true);
+    fetchAll();
+    const ch = window.sb.channel(`dash-attendance-${dateStr}`)
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'attendance', filter: `date=eq.${dateStr}` },
+        () => fetchAll())
+      .subscribe();
+    return () => { window.sb.removeChannel(ch); };
+  }, [fetchAll, dateStr]);
+  return { byId, loading };
+};
+
+// Upsert one employee's status for a date (null uiStatus = clear row).
+const writeAttendance = async (employeeId, dateStr, uiStatus, existingInTime) => {
+  if (!window.sb) return;
+  if (uiStatus === null) {
+    await window.sb.from('attendance')
+      .delete().eq('employee_id', employeeId).eq('date', dateStr);
+    return;
+  }
+  const dbStatus = UI_TO_DB[uiStatus];
+  const hasInTime = uiStatus === 'present' || uiStatus === 'late';
+  let punchIn = existingInTime;
+  if (hasInTime && !punchIn) {
+    const n = new Date();
+    const hh = String(n.getHours()).padStart(2, '0');
+    const mm = String(n.getMinutes()).padStart(2, '0');
+    punchIn = `${hh}:${mm}:00`;
+  }
+  if (!hasInTime) punchIn = null;
+  await window.sb.from('attendance').upsert({
+    employee_id: employeeId,
+    date: dateStr,
+    status: dbStatus,
+    punch_in_time: punchIn,
+    source: 'manual',
+  }, { onConflict: 'employee_id,date' });
+};
+
+// ──────────────────────────────────────────────────────────
+// Attendance page
+// ──────────────────────────────────────────────────────────
+const fmtDateISO = (d) => d.toISOString().slice(0, 10);
+
+const AttendancePage = () => {
+  const toast = useToast();
+  const { can } = useContext(AppCtx);
+
+  const [date, setDate]     = useState(() => fmtDateISO(new Date()));
+  const [section, setSection] = useState('all');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [search, setSearch] = useState('');
+  const [selected, setSelected] = useState(new Set());
+
+  const { rows: employees, loading: empLoading } = useEmployees();
+  const { byId, loading: attLoading } = useAttendanceForDate(date);
+
+  const staff = useMemo(() =>
+    employees.filter(e => e.user_type === 'staff'), [employees]);
+
+  const rows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return staff.map(e => {
+      const a = byId[e.id];
+      return {
+        id: e.id, name: e.name, role: e.role, section_id: e.section_id,
+        status: a ? (DB_TO_UI[a.status] || null) : null,
+        inTime: a ? a.punch_in_time : null,
+        outTime: a ? a.punch_out_time : null,
+        source: a ? a.source : null,
+      };
+    }).filter(r => {
+      if (section !== 'all' && r.section_id !== section) return false;
+      if (statusFilter !== 'all') {
+        if (statusFilter === 'unmarked' && r.status !== null) return false;
+        if (statusFilter !== 'unmarked' && r.status !== statusFilter) return false;
+      }
+      if (q && !(r.name.toLowerCase().includes(q) || r.id.toLowerCase().includes(q))) return false;
+      return true;
+    });
+  }, [staff, byId, section, statusFilter, search]);
+
+  const totals = useMemo(() => {
+    const filteredStaff = staff.filter(e => section === 'all' || e.section_id === section);
+    const count = (s) => filteredStaff.filter(e => {
+      const a = byId[e.id];
+      return a && DB_TO_UI[a.status] === s;
+    }).length;
+    const unmarked = filteredStaff.filter(e => !byId[e.id]).length;
+    return {
+      total: filteredStaff.length,
+      present: count('present'),
+      late:    count('late'),
+      absent:  count('absent'),
+      leave:   count('leave'),
+      unmarked,
+    };
+  }, [staff, byId, section]);
+
+  // Reset selection when page or filters change
+  useEffect(() => { setSelected(new Set()); }, [date, section, statusFilter, search]);
+
+  const toggleRow = (id) => setSelected(s => {
+    const n = new Set(s);
+    n.has(id) ? n.delete(id) : n.add(id);
+    return n;
+  });
+  const toggleAll = () => setSelected(s =>
+    s.size === rows.length ? new Set() : new Set(rows.map(r => r.id)));
+
+  const setRowStatus = async (id, uiStatus) => {
+    if (!can('attendance', 'edit')) return;
+    const cur = byId[id];
+    await writeAttendance(id, date, uiStatus, cur?.punch_in_time);
+  };
+
+  const clearRow = async (id) => {
+    if (!can('attendance', 'delete')) return;
+    await writeAttendance(id, date, null);
+  };
+
+  const bulkSet = async (uiStatus) => {
+    if (!can('attendance', 'edit')) return;
+    const ids = Array.from(selected);
+    if (!ids.length) return;
+    await Promise.all(ids.map(id => writeAttendance(id, date, uiStatus, byId[id]?.punch_in_time)));
+    toast(`${ids.length} marked ${uiStatus === 'leave' ? 'on leave' : uiStatus}`);
+    setSelected(new Set());
+  };
+  const bulkClear = async () => {
+    if (!can('attendance', 'delete')) return;
+    const ids = Array.from(selected);
+    if (!ids.length) return;
+    await Promise.all(ids.map(id => writeAttendance(id, date, null)));
+    toast(`${ids.length} cleared`);
+    setSelected(new Set());
+  };
+
+  const isToday  = date === fmtDateISO(new Date());
+  const dateObj  = new Date(date + 'T00:00:00');
+
+  return (
+    <div>
+      {/* Stat strip */}
+      <div className="stat-strip">
+        <div className="stat"><div className="k">Staff</div><div className="v">{totals.total}</div></div>
+        <div className="stat present"><div className="k">Present</div><div className="v">{totals.present}</div></div>
+        <div className="stat late"><div className="k">Late</div><div className="v">{totals.late}</div></div>
+        <div className="stat absent"><div className="k">Absent</div><div className="v">{totals.absent}</div></div>
+        <div className="stat leave"><div className="k">On leave</div><div className="v">{totals.leave}</div></div>
+      </div>
+
+      {/* Toolbar */}
+      <div className="toolbar">
+        <input type="date" value={date} onChange={e => setDate(e.target.value)}
+          style={{ fontWeight: 600 }} />
+        <button className="btn" onClick={() => setDate(fmtDateISO(new Date()))}
+          disabled={isToday}>Today</button>
+
+        <div className="seg">
+          {[{ id: 'all', label: 'All' }, ...Object.entries(SECTION_META).map(([k, v]) => ({ id: k, label: v.label }))]
+            .map(s => (
+              <button key={s.id}
+                className={section === s.id ? 'active' : ''}
+                onClick={() => setSection(s.id)}>
+                {s.label}
+              </button>
+            ))}
+        </div>
+
+        <div className="seg">
+          {[
+            { id: 'all', label: 'Any status' },
+            { id: 'unmarked', label: 'Unmarked' },
+            { id: 'present', label: 'Present' },
+            { id: 'late', label: 'Late' },
+            { id: 'absent', label: 'Absent' },
+            { id: 'leave', label: 'Leave' },
+          ].map(s => (
+            <button key={s.id}
+              className={statusFilter === s.id ? 'active' : ''}
+              onClick={() => setStatusFilter(s.id)}>
+              {s.label}
+              {s.id === 'unmarked' && totals.unmarked ? ` · ${totals.unmarked}` : ''}
+            </button>
+          ))}
+        </div>
+
+        <input type="search" placeholder="Search name or ID…"
+          value={search} onChange={e => setSearch(e.target.value)} />
+
+        <div style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--inkMuted)' }}>
+          {dateObj.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+          {attLoading ? ' · loading…' : ''}
+        </div>
+      </div>
+
+      {/* Bulk action bar */}
+      {selected.size > 0 && can('attendance', 'edit') && (
+        <div className="bulk">
+          <span>{selected.size} selected</span>
+          <button className="btn" onClick={() => bulkSet('present')}>Mark present</button>
+          <button className="btn" onClick={() => bulkSet('late')}>Late</button>
+          <button className="btn" onClick={() => bulkSet('absent')}>Absent</button>
+          <button className="btn" onClick={() => bulkSet('leave')}>On leave</button>
+          <button className="btn" onClick={bulkClear} disabled={!can('attendance', 'delete')}>
+            Clear
+          </button>
+          <button className="btn" onClick={() => setSelected(new Set())} style={{ marginLeft: 'auto' }}>
+            Deselect
+          </button>
+        </div>
+      )}
+
+      {/* Table */}
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th style={{ width: 36 }}>
+                <input type="checkbox"
+                  checked={rows.length > 0 && selected.size === rows.length}
+                  onChange={toggleAll} />
+              </th>
+              <th style={{ width: 80 }}>ID</th>
+              <th>Name</th>
+              <th>Role</th>
+              <th>Section</th>
+              <th style={{ width: 290 }}>Status</th>
+              <th style={{ width: 90 }}>In</th>
+              <th style={{ width: 90 }}>Out</th>
+              <th style={{ width: 80 }}>Source</th>
+              {can('attendance', 'delete') && <th style={{ width: 60 }}></th>}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={10} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                  {empLoading || attLoading ? 'Loading…' : 'No staff match these filters.'}
+                </td>
+              </tr>
+            )}
+            {rows.map(r => (
+              <tr key={r.id} className={selected.has(r.id) ? 'selected' : ''}>
+                <td>
+                  <input type="checkbox"
+                    checked={selected.has(r.id)}
+                    onChange={() => toggleRow(r.id)} />
+                </td>
+                <td className="id">{r.id}</td>
+                <td className="name">{r.name}</td>
+                <td>{r.role}</td>
+                <td>{SECTION_META[r.section_id]?.label || '—'}</td>
+                <td>
+                  {can('attendance', 'edit') ? (
+                    <div className="status-chips">
+                      {['present','late','absent','leave'].map(s => (
+                        <button key={s} data-s={s}
+                          className={r.status === s ? 'active' : ''}
+                          onClick={() => setRowStatus(r.id, s)}>
+                          {s === 'leave' ? 'Leave' : s[0].toUpperCase() + s.slice(1)}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className={`status-pill ${r.status || 'unmarked'}`}>
+                      {r.status || 'unmarked'}
+                    </span>
+                  )}
+                </td>
+                <td className="muted">{fmtTime(r.inTime) || '—'}</td>
+                <td className="muted">{fmtTime(r.outTime) || '—'}</td>
+                <td className="muted">{r.source || '—'}</td>
+                {can('attendance', 'delete') && (
+                  <td>
+                    {r.status && (
+                      <button className="btn danger" style={{ height: 28, padding: '0 10px' }}
+                        onClick={() => clearRow(r.id)} title="Clear status (back to unmarked)">
+                        Clear
+                      </button>
+                    )}
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+// ──────────────────────────────────────────────────────────
+// Page router
 // ──────────────────────────────────────────────────────────
 const Page = ({ name }) => {
+  if (name === 'attendance') return <AttendancePage />;
   return (
     <div className="empty">
       <h3>Coming soon</h3>
-      <p>The <strong>{name}</strong> module will land in the next slice.</p>
+      <p>The <strong>{name}</strong> module will land in the next chunk.</p>
     </div>
   );
 };
@@ -461,7 +996,7 @@ const Root = () => {
     () => sessionStorage.getItem('seematti_admin_unlock') === '1'
   );
   if (!unlocked) return <Gate onPass={() => setUnlocked(true)} />;
-  return <App />;
+  return <ToastHost><App /></ToastHost>;
 };
 
 const mount = (attempts = 0) => {
