@@ -3079,9 +3079,16 @@ const LeavesScreen = () => {
   const isAdmin = user === 'owner' || user === 'hr';
   const hasAll = isAdmin || !!(userAccess && userAccess.all_sections);
   const allowed = hasAll ? null : (userAccess?.section_ids || []);
-  const canApprove = hasAll || !!(userAccess && userAccess.can_approve_leaves);
+  // Approval is owner/hr-only by policy. Managers + Supervisors can
+  // submit leave requests (via Apply Leave) but cannot approve them.
+  const canApprove = user === 'owner' || user === 'hr';
 
-  const items = allItems.filter(r => hasAll || (r.section_id && allowed.includes(r.section_id)));
+  // Manager/Supervisor see their sections' requests + always their own.
+  const items = allItems.filter(r =>
+    hasAll
+    || (r.section_id && allowed.includes(r.section_id))
+    || r.employee_id === userId
+  );
 
   const handleAction = async (id, action) => {
     if (!canApprove) { toast('You don\u2019t have leave approval rights'); return; }
@@ -3098,7 +3105,22 @@ const LeavesScreen = () => {
 
   return (
     <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 90 }}>
-      <ScreenHeader back title={t('leaveRequests')} subtitle={`${pending.length} awaiting your decision`} />
+      <ScreenHeader back title={t('leaveRequests')}
+        subtitle={canApprove
+          ? `${pending.length} awaiting your decision`
+          : `${items.filter(i => i.employee_id === userId).length} of yours`}
+        trailing={
+          <button onClick={() => nav.go('applyLeave')} style={{
+            height: 34, padding: '0 12px', borderRadius: 10,
+            background: T_.maroon, color: '#fff', border: 'none',
+            fontSize: 12, fontWeight: 600, fontFamily: 'inherit',
+            cursor: 'pointer',
+            display: 'inline-flex', alignItems: 'center', gap: 4,
+          }}>
+            <Icon name="plus" size={12} /> Apply
+          </button>
+        }
+      />
 
       <div style={{ padding: '0 16px', marginTop: 8 }}>
         <div style={{
@@ -3242,9 +3264,9 @@ const MiniStat = ({ label, value, tone }) => {
   );
 };
 
-// ─── Apply Leave (staff flow) ───────────────────────────────
+// ─── Apply Leave — anyone signed in submits a request for themselves ──
 const ApplyLeaveScreen = () => {
-  const { nav, toast } = useApp();
+  const { nav, toast, userId } = useApp();
   const T_ = window.TOKENS;
   const { submit: persistLeave } = window.useLiveLeaves
     ? window.useLiveLeaves()
@@ -3256,12 +3278,13 @@ const ApplyLeaveScreen = () => {
 
   const submit = async () => {
     if (submitting || !reason.trim()) return;
+    if (!userId) { toast('Sign in first'); return; }
     setSubmitting(true);
     const fromDate = new Date();
     fromDate.setDate(fromDate.getDate() + 2); // default: from day after tomorrow
     try {
       await persistLeave({
-        employeeId: 'E003',  // Priya Lakshmi — the demo staff account
+        employeeId: userId,
         type,
         days,
         fromDate: fromDate.toISOString().slice(0, 10),
@@ -4291,6 +4314,13 @@ const HRHomeScreen = () => {
             onClick={() => nav.go('enroll')}
           />
           <HRTile
+            icon="leaf" tone="brand"
+            title="Apply for leave"
+            value="My"
+            sub="Submit your own request"
+            onClick={() => nav.go('applyLeave')}
+          />
+          <HRTile
             icon="bell" tone="neutral"
             title="Announcements"
             value={hrAnnCount}
@@ -4641,6 +4671,30 @@ const ManagerHomeScreen = () => {
             View roster <Icon name="chevron" size={14} />
           </button>
         </div>
+      </div>
+
+      {/* Leave actions */}
+      <div style={{ padding: '14px 16px 0', display: 'flex', gap: 10 }}>
+        <button onClick={() => nav.go('applyLeave')} style={{
+          flex: 1, padding: '14px',
+          background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 14,
+          fontSize: 13, fontWeight: 600, color: T_.ink, fontFamily: 'inherit',
+          cursor: 'pointer',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+        }}>
+          <Icon name="leaf" size={16} color={T_.maroon} />
+          Apply for leave
+        </button>
+        <button onClick={() => nav.go('leaves')} style={{
+          flex: 1, padding: '14px',
+          background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 14,
+          fontSize: 13, fontWeight: 600, color: T_.ink, fontFamily: 'inherit',
+          cursor: 'pointer',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+        }}>
+          <Icon name="calendar" size={16} color={T_.info} />
+          My requests
+        </button>
       </div>
 
       {/* Checklist + Tasks side by side */}
