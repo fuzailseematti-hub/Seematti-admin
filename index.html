@@ -5469,6 +5469,426 @@ const SettingsScreen = () => {
 window.SettingsScreen = SettingsScreen;
 
 
+// ─────────────────────────────────────────────────────────────
+// Checklist screen — daily opening/closing routine.
+// Scoped by the logged-in user's user_access.section_ids / all_sections.
+// Manage tasks power gates add/edit/delete.
+// ─────────────────────────────────────────────────────────────
+const ChecklistScreen = () => {
+  const { nav, user, userId, userAccess, toast } = useApp();
+  const T_ = window.TOKENS;
+
+  const today = new Date().toISOString().slice(0, 10);
+  const [items, setItems] = React.useState([]);
+  const [sections, setSections] = React.useState([]);
+  const [loading, setLoading] = React.useState(true);
+  const [activeSection, setActiveSection] = React.useState('all');
+  const [editing, setEditing] = React.useState(null);
+  const [saving, setSaving]   = React.useState(false);
+
+  const isAdmin = user === 'owner' || user === 'hr';
+  const hasAll  = !!(userAccess && userAccess.all_sections) || isAdmin;
+  const visibleSectionIds = hasAll
+    ? null                                           // null = every section
+    : (userAccess?.section_ids || []);
+
+  // Load today's checklist + the sections the user is allowed to see.
+  const fetchAll = React.useCallback(async () => {
+    if (!window.sb) return;
+    const [taskRes, secRes] = await Promise.all([
+      window.sb.from('tasks')
+        .select('id, scope, section_id, label, owner_label, done, priority, sort_order')
+        .in('scope', ['checklist', 'owner'])          // old 'owner' data coexists
+        .eq('due_date', today)
+        .order('sort_order'),
+      window.sb.from('sections').select('*').order('sort_order'),
+    ]);
+    setItems(taskRes.data || []);
+    setSections(secRes.data || []);
+    setLoading(false);
+  }, [today]);
+
+  React.useEffect(() => {
+    if (!window.sb) return;
+    fetchAll();
+    const ch = window.sb.channel('mobile-checklist')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'tasks', filter: `due_date=eq.${today}` },
+        () => fetchAll())
+      .subscribe();
+    return () => { window.sb.removeChannel(ch); };
+  }, [fetchAll, today]);
+
+  const rows = React.useMemo(() => {
+    return items.filter(t => {
+      // Owner/HR/all-sections see everything; narrow scopes see only their sections (+ null = company-wide)
+      if (!hasAll) {
+        if (t.section_id !== null && !visibleSectionIds.includes(t.section_id)) return false;
+      }
+      if (activeSection !== 'all') {
+        if (activeSection === 'company' && t.section_id !== null) return false;
+        if (activeSection !== 'company' && t.section_id !== activeSection) return false;
+      }
+      return true;
+    });
+  }, [items, activeSection, hasAll, visibleSectionIds]);
+
+  const grouped = React.useMemo(() => {
+    const groups = {};
+    rows.forEach(r => {
+      const key = r.section_id || 'company';
+      (groups[key] ||= []).push(r);
+    });
+    return groups;
+  }, [rows]);
+
+  const sectionMeta = React.useMemo(() => {
+    const m = { company: { label: 'Company-wide', mono: '★' } };
+    sections.forEach(s => { m[s.id] = { label: s.name, mono: s.monogram }; });
+    return m;
+  }, [sections]);
+
+  const tabSections = React.useMemo(() => {
+    const available = hasAll
+      ? ['company', ...sections.map(s => s.id)]
+      : [...(visibleSectionIds || []), ...(visibleSectionIds?.length ? ['company'] : [])]
+          .filter((v, i, arr) => arr.indexOf(v) === i);
+    return [
+      { id: 'all', label: 'All', count: rows.length },
+      ...available.map(id => ({
+        id, label: sectionMeta[id]?.label || id,
+        count: items.filter(t => (t.section_id || 'company') === id).length,
+      })),
+    ];
+  }, [hasAll, visibleSectionIds, sections, rows.length, items, sectionMeta]);
+
+  const canManage = hasAll || !!(userAccess && userAccess.can_manage_tasks);
+
+  const totalCount = rows.length;
+  const doneCount  = rows.filter(r => r.done).length;
+  const pct        = totalCount ? Math.round((doneCount / totalCount) * 100) : 0;
+
+  const toggleDone = async (row) => {
+    if (!window.sb) return;
+    await window.sb.from('tasks').update({ done: !row.done }).eq('id', row.id);
+  };
+
+  const del = async (row) => {
+    if (!canManage) return;
+    if (!window.confirm(`Delete "${row.label}"?`)) return;
+    await window.sb.from('tasks').delete().eq('id', row.id);
+    toast('Deleted');
+  };
+
+  const startNew = () => {
+    // Default section: the first one the user can write to, if any.
+    const defaultSection = (hasAll || !visibleSectionIds?.length)
+      ? null
+      : visibleSectionIds[0];
+    const maxOrder = Math.max(0, ...items.map(t => t.sort_order || 0));
+    setEditing({
+      id: null, _new: true,
+      label: '', owner_label: '', priority: false,
+      section_id: defaultSection,
+      sort_order: maxOrder + 1,
+    });
+  };
+  const startEdit = (row) => setEditing({ ...row, _new: false });
+  const close = () => setEditing(null);
+
+  const save = async () => {
+    if (!editing || saving) return;
+    if (!editing.label.trim()) { toast('Label required'); return; }
+    setSaving(true);
+    try {
+      const payload = {
+        scope: 'checklist',
+        section_id: editing.section_id,
+        label: editing.label.trim(),
+        owner_label: (editing.owner_label || '').trim() || null,
+        priority: !!editing.priority,
+        sort_order: parseInt(editing.sort_order, 10) || 0,
+        due_date: today,
+        assignee_id: null,
+      };
+      if (editing._new) {
+        await window.sb.from('tasks').insert(payload);
+        toast('Added');
+      } else {
+        await window.sb.from('tasks').update(payload).eq('id', editing.id);
+        toast('Saved');
+      }
+      close();
+    } finally { setSaving(false); }
+  };
+
+  const groupKeys = activeSection === 'all'
+    ? Object.keys(grouped).sort((a, b) => {
+        if (a === 'company') return -1;
+        if (b === 'company') return 1;
+        return (sectionMeta[a]?.label || '').localeCompare(sectionMeta[b]?.label || '');
+      })
+    : [activeSection === 'all' ? 'company' : activeSection].filter(k => grouped[k]);
+
+  return (
+    <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 90 }}>
+      {/* Header */}
+      <div style={{ padding: 'var(--screen-top) 20px 0' }}>
+        <div style={{
+          fontSize: 11, letterSpacing: 1.2, textTransform: 'uppercase',
+          color: T_.inkMuted, fontWeight: 600,
+        }}>
+          Daily checklist
+        </div>
+        <div style={{
+          fontFamily: 'Fraunces, Georgia, serif',
+          fontSize: 28, fontWeight: 500, color: T_.ink,
+          letterSpacing: -0.7, marginTop: 4, lineHeight: 1.15,
+        }}>
+          {doneCount} / {totalCount} done
+          <span style={{
+            fontFamily: 'Inter, sans-serif',
+            fontSize: 14, fontWeight: 500, color: T_.inkMuted, marginLeft: 8,
+          }}>· {pct}%</span>
+        </div>
+        <div style={{ fontSize: 13, color: T_.inkMuted, marginTop: 4 }}>
+          {hasAll ? 'All sections' : (visibleSectionIds?.length
+            ? `${visibleSectionIds.length} section${visibleSectionIds.length === 1 ? '' : 's'} assigned`
+            : 'No sections assigned')}
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      <div style={{ padding: '14px 16px 0' }}>
+        <div style={{
+          height: 8, borderRadius: 4, background: T_.surfaceAlt, overflow: 'hidden',
+        }}>
+          <div style={{
+            width: `${pct}%`, height: '100%',
+            background: pct === 100 ? T_.success : T_.maroon,
+            transition: 'width 300ms',
+          }} />
+        </div>
+      </div>
+
+      {/* Section tabs (only when user has more than 1 visible section) */}
+      {tabSections.length > 2 && (
+        <div style={{
+          padding: '14px 16px 0',
+          overflowX: 'auto', WebkitOverflowScrolling: 'touch',
+        }}>
+          <div style={{
+            display: 'flex', gap: 6, padding: 4, background: T_.surfaceAlt, borderRadius: 12,
+            minWidth: 'min-content',
+          }}>
+            {tabSections.map(s => (
+              <button key={s.id} onClick={() => setActiveSection(s.id)}
+                style={{
+                  padding: '8px 14px', borderRadius: 8, border: 'none',
+                  background: activeSection === s.id ? T_.surface : 'transparent',
+                  color: activeSection === s.id ? T_.ink : T_.inkMuted,
+                  fontSize: 12.5, fontWeight: 600, whiteSpace: 'nowrap',
+                  fontFamily: 'inherit', cursor: 'pointer',
+                  boxShadow: activeSection === s.id ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
+                }}>
+                {s.label}{s.count ? ` · ${s.count}` : ''}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* List */}
+      <div style={{ padding: '16px 16px 0' }}>
+        {loading && (
+          <div style={{ textAlign: 'center', color: T_.inkMuted, fontSize: 13, padding: 30 }}>
+            Loading…
+          </div>
+        )}
+        {!loading && rows.length === 0 && (
+          <div style={{
+            background: T_.surface, border: `1px dashed ${T_.border}`,
+            borderRadius: 14, padding: '30px 20px', textAlign: 'center',
+          }}>
+            <div style={{
+              fontFamily: 'Fraunces, Georgia, serif', fontSize: 18,
+              fontWeight: 500, color: T_.ink, marginBottom: 6,
+            }}>No checklist items</div>
+            <div style={{ fontSize: 12.5, color: T_.inkMuted }}>
+              {canManage
+                ? 'Tap "New item" to add the first one.'
+                : 'Nothing for today. Ask the owner to set up the checklist.'}
+            </div>
+          </div>
+        )}
+        {!loading && groupKeys.map(key => (
+          <div key={key} style={{ marginBottom: 16 }}>
+            {groupKeys.length > 1 && (
+              <div style={{
+                fontSize: 11, fontWeight: 700, letterSpacing: 0.6, textTransform: 'uppercase',
+                color: T_.inkMuted, padding: '0 6px 8px',
+              }}>{sectionMeta[key]?.label || key}</div>
+            )}
+            <div style={{
+              background: T_.surface, border: `1px solid ${T_.border}`,
+              borderRadius: 16, overflow: 'hidden',
+            }}>
+              {grouped[key].map((row, i) => (
+                <div key={row.id} style={{
+                  padding: '14px', display: 'flex', alignItems: 'flex-start', gap: 12,
+                  borderBottom: i === grouped[key].length - 1 ? 'none' : `1px solid ${T_.borderSoft}`,
+                  opacity: row.done ? 0.6 : 1,
+                }}>
+                  <button onClick={() => toggleDone(row)} style={{
+                    width: 22, height: 22, borderRadius: 7, marginTop: 1,
+                    background: row.done ? T_.success : 'transparent',
+                    border: row.done ? 'none' : `1.5px solid ${T_.border}`,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    cursor: 'pointer', flexShrink: 0,
+                  }}>
+                    {row.done && <Icon name="check" size={14} color="#fff" strokeWidth={2.5} />}
+                  </button>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{
+                      fontSize: 13.5, color: row.done ? T_.inkMuted : T_.ink, fontWeight: 500,
+                      textDecoration: row.done ? 'line-through' : 'none', lineHeight: 1.4,
+                    }}>{row.label}</div>
+                    {row.owner_label && (
+                      <div style={{ fontSize: 11.5, color: T_.inkMuted, marginTop: 3 }}>
+                        {row.owner_label}
+                      </div>
+                    )}
+                  </div>
+                  {row.priority && !row.done && (
+                    <span style={{
+                      fontSize: 10, fontWeight: 700, letterSpacing: 0.3, textTransform: 'uppercase',
+                      background: T_.warningSoft, color: T_.warning,
+                      padding: '3px 7px', borderRadius: 999, whiteSpace: 'nowrap',
+                    }}>Priority</span>
+                  )}
+                  {canManage && (
+                    <button onClick={() => startEdit(row)} style={{
+                      background: 'none', border: 'none', cursor: 'pointer', padding: 4,
+                      color: T_.inkFaint, flexShrink: 0,
+                    }} title="Edit">
+                      <Icon name="more" size={16} />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Add button */}
+      {canManage && (
+        <div style={{ padding: '8px 16px 20px' }}>
+          <button onClick={startNew} style={{
+            width: '100%', padding: 14, borderRadius: 14,
+            background: T_.maroon, color: '#fff', border: 'none',
+            fontSize: 14, fontWeight: 600, cursor: 'pointer',
+            fontFamily: 'inherit',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+            boxShadow: '0 6px 16px -6px rgba(14, 124, 58, 0.45)',
+          }}>
+            <Icon name="plus" size={16} /> New checklist item
+          </button>
+        </div>
+      )}
+
+      {/* Edit sheet */}
+      {editing && (
+        <div onClick={close} style={{
+          position: 'absolute', inset: 0, background: 'rgba(11, 13, 14, 0.55)', zIndex: 100,
+          display: 'flex', alignItems: 'flex-end',
+        }}>
+          <div onClick={e => e.stopPropagation()} style={{
+            width: '100%', background: T_.surface, borderRadius: '20px 20px 0 0',
+            padding: 20, maxHeight: '80%', overflowY: 'auto',
+          }}>
+            <div style={{
+              fontFamily: 'Fraunces, Georgia, serif', fontSize: 20,
+              fontWeight: 500, color: T_.ink, letterSpacing: -0.3, marginBottom: 14,
+            }}>
+              {editing._new ? 'New checklist item' : 'Edit item'}
+            </div>
+
+            <FieldLabel>Task</FieldLabel>
+            <textarea value={editing.label} autoFocus
+              onChange={e => setEditing({ ...editing, label: e.target.value })}
+              placeholder="e.g. Cash float verified at 6 counters"
+              style={{
+                width: '100%', minHeight: 70, padding: 12, borderRadius: 12,
+                background: T_.bg, border: `1px solid ${T_.border}`,
+                fontSize: 14, fontFamily: 'inherit', color: T_.ink,
+                boxSizing: 'border-box', resize: 'vertical', outline: 'none',
+                marginBottom: 14,
+              }} />
+
+            <FieldLabel>Who's responsible? (optional)</FieldLabel>
+            <input value={editing.owner_label || ''}
+              onChange={e => setEditing({ ...editing, owner_label: e.target.value })}
+              placeholder="e.g. Saranya (Cashier Lead)"
+              style={enrollInputStyle(T_)} />
+
+            <div style={{ height: 14 }} />
+
+            <FieldLabel>Section</FieldLabel>
+            <select value={editing.section_id || ''}
+              onChange={e => setEditing({ ...editing, section_id: e.target.value || null })}
+              style={{ ...enrollInputStyle(T_), cursor: 'pointer' }}>
+              <option value="">Company-wide</option>
+              {(hasAll ? sections : sections.filter(s => visibleSectionIds.includes(s.id)))
+                .map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+
+            <div style={{ height: 14 }} />
+
+            <label style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              background: T_.bg, border: `1px solid ${T_.border}`,
+              padding: 12, borderRadius: 12, cursor: 'pointer',
+            }}>
+              <input type="checkbox"
+                checked={!!editing.priority}
+                onChange={e => setEditing({ ...editing, priority: e.target.checked })} />
+              <div style={{ fontSize: 13.5, color: T_.ink, fontWeight: 500 }}>Priority</div>
+            </label>
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
+              {!editing._new && (
+                <button onClick={() => { del(editing); close(); }} style={{
+                  padding: '12px 16px', borderRadius: 12,
+                  background: T_.surface, border: `1px solid ${T_.border}`,
+                  color: T_.danger, fontSize: 13, fontWeight: 600,
+                  fontFamily: 'inherit', cursor: 'pointer',
+                }}>Delete</button>
+              )}
+              <button onClick={close} style={{
+                flex: 1, padding: '12px 16px', borderRadius: 12,
+                background: T_.surface, border: `1px solid ${T_.border}`,
+                color: T_.ink, fontSize: 13, fontWeight: 600,
+                fontFamily: 'inherit', cursor: 'pointer',
+              }}>Cancel</button>
+              <button onClick={save} disabled={saving} style={{
+                flex: 1.2, padding: '12px 16px', borderRadius: 12,
+                background: T_.maroon, border: 'none', color: '#fff',
+                fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
+                cursor: saving ? 'not-allowed' : 'pointer',
+                boxShadow: '0 6px 16px -6px rgba(14, 124, 58, 0.45)',
+              }}>{saving ? 'Saving…' : editing._new ? 'Add' : 'Save'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+window.ChecklistScreen = ChecklistScreen;
+
+
 // ========== mount ==========
 
 const W = (n) => window[n];
@@ -5627,6 +6047,7 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     announcements:   makeScreen('AnnouncementsScreen'),
     visitors:        makeScreen('VisitorsScreen'),
     settings:        makeScreen('SettingsScreen'),
+    checklist:       makeScreen('ChecklistScreen'),
   };
 
   const screenTitles = {
@@ -5645,13 +6066,14 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     kiosk:          '13 Kiosk Scanner',
     enroll:         '14 Enroll Joiner',
     settings:       '15 Settings',
+    checklist:      '16 Checklist',
   };
 
   const tabs = [
-    { id: 'home',     icon: 'home',     label: lang === 'ta' ? 'முகப்பு' : 'Home' },
-    { id: 'people',   icon: 'people',   label: lang === 'ta' ? 'பணியாளர்கள்' : 'People' },
-    { id: 'tasks',    icon: 'tasks',    label: lang === 'ta' ? 'பணிகள்' : 'Tasks' },
-    { id: 'settings', icon: 'settings', label: lang === 'ta' ? 'அமைப்பு' : 'Settings' },
+    { id: 'home',      icon: 'home',     label: lang === 'ta' ? 'முகப்பு' : 'Home' },
+    { id: 'checklist', icon: 'check',    label: lang === 'ta' ? 'பட்டியல்' : 'Checklist' },
+    { id: 'tasks',     icon: 'tasks',    label: lang === 'ta' ? 'பணிகள்' : 'Tasks' },
+    { id: 'settings',  icon: 'settings', label: lang === 'ta' ? 'அமைப்பு' : 'Settings' },
   ];
 
   const handleTab = (id) => {
@@ -5666,11 +6088,9 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
       };
       nav.reset(homeMap[user] || 'ownerHome');
     }
-    else if (id === 'people') nav.go(
-      (user === 'hr' || user === 'manager' || user === 'supervisor') ? 'markAttendance' : 'attendance'
-    );
-    else if (id === 'tasks') nav.go('tasks');
-    else if (id === 'settings') nav.go('settings');
+    else if (id === 'checklist') nav.go('checklist');
+    else if (id === 'tasks')     nav.go('tasks');
+    else if (id === 'settings')  nav.go('settings');
   };
 
   const showTabBar = current !== 'login' && current !== 'applyLeave' && current !== 'kiosk' && current !== 'enroll' && user;
@@ -5753,7 +6173,7 @@ const REQUIRED = [
   'LoginScreen','OwnerHomeScreen','StaffHomeScreen','AttendanceScreen',
   'LeavesScreen','ApplyLeaveScreen','TasksScreen','PayslipScreen',
   'AnnouncementsScreen','VisitorsScreen','HRHomeScreen','MarkAttendanceScreen',
-  'KioskScannerScreen','EnrollJoinerScreen','SettingsScreen',
+  'KioskScannerScreen','EnrollJoinerScreen','SettingsScreen','ChecklistScreen',
   'AppCtx','IOSDevice','TabBar','Toast','TOKENS','MOCK',
 ];
 const mountWhenReady = (attempts = 0) => {
