@@ -6362,37 +6362,37 @@ const ChecklistScreen = () => {
   const T_ = window.TOKENS;
 
   const today = new Date().toISOString().slice(0, 10);
-  const [items, setItems] = React.useState([]);
-  const [sections, setSections] = React.useState([]);
+  const [rows, setRows]       = React.useState([]);
   const [loading, setLoading] = React.useState(true);
-  const [activeSection, setActiveSection] = React.useState('all');
   const [editing, setEditing] = React.useState(null);
   const [saving, setSaving]   = React.useState(false);
+  const [mode, setMode]       = React.useState('mine'); // 'mine' | 'assigned' (admins)
+  const [loginUsers, setLoginUsers] = React.useState([]);
 
-  const isAdmin = user === 'owner' || user === 'hr';
-  const hasAll  = !!(userAccess && userAccess.all_sections) || isAdmin;
-  const visibleSectionIds = hasAll
-    ? null                                           // null = every section
-    : (userAccess?.section_ids || []);
+  // Only Owner/HR can assign checklist items to other people. Managers/
+  // Supervisors can still add items to their own checklist.
+  const canAssignOthers = user === 'owner' || user === 'hr';
 
-  // Load today's checklist + the sections the user is allowed to see.
+  // Fetch today's checklist rows. For the user's 'Mine' view we filter
+  // by assignee_id; admins' 'All I've assigned' view returns everyone's.
   const fetchAll = React.useCallback(async () => {
     if (!window.sb) return;
-    const [taskRes, secRes] = await Promise.all([
-      window.sb.from('tasks')
-        .select('id, scope, section_id, label, owner_label, done, priority, sort_order')
-        .in('scope', ['checklist', 'owner'])          // old 'owner' data coexists
-        .eq('due_date', today)
-        .order('sort_order'),
-      window.sb.from('sections').select('*').order('sort_order'),
-    ]);
-    setItems(taskRes.data || []);
-    setSections(secRes.data || []);
+    let q = window.sb.from('tasks')
+      .select('id, scope, assignee_id, label, done, priority, sort_order')
+      .in('scope', ['checklist', 'owner'])  // legacy 'owner' rows show too
+      .eq('due_date', today)
+      .order('sort_order');
+    if (mode === 'mine') {
+      q = userId ? q.eq('assignee_id', userId) : q.eq('assignee_id', '__none__');
+    }
+    const { data } = await q;
+    setRows(data || []);
     setLoading(false);
-  }, [today]);
+  }, [today, mode, userId]);
 
   React.useEffect(() => {
     if (!window.sb) return;
+    setLoading(true);
     fetchAll();
     const ch = window.sb.channel('mobile-checklist')
       .on('postgres_changes',
@@ -6402,50 +6402,28 @@ const ChecklistScreen = () => {
     return () => { window.sb.removeChannel(ch); };
   }, [fetchAll, today]);
 
-  const rows = React.useMemo(() => {
-    return items.filter(t => {
-      // Owner/HR/all-sections see everything; narrow scopes see only their sections (+ null = company-wide)
-      if (!hasAll) {
-        if (t.section_id !== null && !visibleSectionIds.includes(t.section_id)) return false;
+  // Admins need the team roster to assign to others.
+  React.useEffect(() => {
+    if (!canAssignOthers || !window.sb) return;
+    let cancelled = false;
+    (async () => {
+      const { data } = await window.sb
+        .from('user_access')
+        .select('employee_id, employees(id, name, role, user_type, section_id, is_active)');
+      if (!cancelled) {
+        setLoginUsers((data || [])
+          .filter(r => r.employees && r.employees.is_active !== false)
+          .map(r => r.employees));
       }
-      if (activeSection !== 'all') {
-        if (activeSection === 'company' && t.section_id !== null) return false;
-        if (activeSection !== 'company' && t.section_id !== activeSection) return false;
-      }
-      return true;
-    });
-  }, [items, activeSection, hasAll, visibleSectionIds]);
+    })();
+    return () => { cancelled = true; };
+  }, [canAssignOthers]);
 
-  const grouped = React.useMemo(() => {
-    const groups = {};
-    rows.forEach(r => {
-      const key = r.section_id || 'company';
-      (groups[key] ||= []).push(r);
-    });
-    return groups;
-  }, [rows]);
-
-  const sectionMeta = React.useMemo(() => {
-    const m = { company: { label: 'Company-wide', mono: '★' } };
-    sections.forEach(s => { m[s.id] = { label: s.name, mono: s.monogram }; });
+  const loginUsersById = React.useMemo(() => {
+    const m = {};
+    loginUsers.forEach(u => { m[u.id] = u; });
     return m;
-  }, [sections]);
-
-  const tabSections = React.useMemo(() => {
-    const available = hasAll
-      ? ['company', ...sections.map(s => s.id)]
-      : [...(visibleSectionIds || []), ...(visibleSectionIds?.length ? ['company'] : [])]
-          .filter((v, i, arr) => arr.indexOf(v) === i);
-    return [
-      { id: 'all', label: 'All', count: rows.length },
-      ...available.map(id => ({
-        id, label: sectionMeta[id]?.label || id,
-        count: items.filter(t => (t.section_id || 'company') === id).length,
-      })),
-    ];
-  }, [hasAll, visibleSectionIds, sections, rows.length, items, sectionMeta]);
-
-  const canManage = hasAll || !!(userAccess && userAccess.can_manage_tasks);
+  }, [loginUsers]);
 
   const totalCount = rows.length;
   const doneCount  = rows.filter(r => r.done).length;
@@ -6457,22 +6435,17 @@ const ChecklistScreen = () => {
   };
 
   const del = async (row) => {
-    if (!canManage) return;
     if (!window.confirm(`Delete "${row.label}"?`)) return;
     await window.sb.from('tasks').delete().eq('id', row.id);
     toast('Deleted');
   };
 
   const startNew = () => {
-    // Default section: the first one the user can write to, if any.
-    const defaultSection = (hasAll || !visibleSectionIds?.length)
-      ? null
-      : visibleSectionIds[0];
-    const maxOrder = Math.max(0, ...items.map(t => t.sort_order || 0));
+    const maxOrder = Math.max(0, ...rows.map(t => t.sort_order || 0));
     setEditing({
       id: null, _new: true,
-      label: '', owner_label: '', priority: false,
-      section_id: defaultSection,
+      label: '', priority: false,
+      assignee_id: userId || '',
       sort_order: maxOrder + 1,
     });
   };
@@ -6482,17 +6455,18 @@ const ChecklistScreen = () => {
   const save = async () => {
     if (!editing || saving) return;
     if (!editing.label.trim()) { toast('Label required'); return; }
+    if (!editing.assignee_id) { toast('Pick an assignee'); return; }
     setSaving(true);
     try {
       const payload = {
         scope: 'checklist',
-        section_id: editing.section_id,
+        section_id: null,
+        assignee_id: editing.assignee_id,
         label: editing.label.trim(),
-        owner_label: (editing.owner_label || '').trim() || null,
+        owner_label: null,
         priority: !!editing.priority,
         sort_order: parseInt(editing.sort_order, 10) || 0,
         due_date: today,
-        assignee_id: null,
       };
       if (editing._new) {
         await window.sb.from('tasks').insert(payload);
@@ -6504,14 +6478,6 @@ const ChecklistScreen = () => {
       close();
     } finally { setSaving(false); }
   };
-
-  const groupKeys = activeSection === 'all'
-    ? Object.keys(grouped).sort((a, b) => {
-        if (a === 'company') return -1;
-        if (b === 'company') return 1;
-        return (sectionMeta[a]?.label || '').localeCompare(sectionMeta[b]?.label || '');
-      })
-    : [activeSection === 'all' ? 'company' : activeSection].filter(k => grouped[k]);
 
   return (
     <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 90 }}>
@@ -6535,9 +6501,7 @@ const ChecklistScreen = () => {
           }}>· {pct}%</span>
         </div>
         <div style={{ fontSize: 13, color: T_.inkMuted, marginTop: 4 }}>
-          {hasAll ? 'All sections' : (visibleSectionIds?.length
-            ? `${visibleSectionIds.length} section${visibleSectionIds.length === 1 ? '' : 's'} assigned`
-            : 'No sections assigned')}
+          {mode === 'mine' ? 'Your daily routine' : 'Everyone\u2019s checklists'}
         </div>
       </div>
 
@@ -6554,28 +6518,25 @@ const ChecklistScreen = () => {
         </div>
       </div>
 
-      {/* Section tabs (only when user has more than 1 visible section) */}
-      {tabSections.length > 2 && (
-        <div style={{
-          padding: '14px 16px 0',
-          overflowX: 'auto', WebkitOverflowScrolling: 'touch',
-        }}>
+      {/* Mine / Everyone toggle (admins only) */}
+      {canAssignOthers && (
+        <div style={{ padding: '14px 16px 0' }}>
           <div style={{
-            display: 'flex', gap: 6, padding: 4, background: T_.surfaceAlt, borderRadius: 12,
-            minWidth: 'min-content',
+            display: 'flex', gap: 6, padding: 4, borderRadius: 12,
+            background: T_.surfaceAlt,
           }}>
-            {tabSections.map(s => (
-              <button key={s.id} onClick={() => setActiveSection(s.id)}
+            {[
+              { id: 'mine',     label: 'Mine' },
+              { id: 'assigned', label: 'Everyone' },
+            ].map(m => (
+              <button key={m.id} onClick={() => setMode(m.id)}
                 style={{
-                  padding: '8px 14px', borderRadius: 8, border: 'none',
-                  background: activeSection === s.id ? T_.surface : 'transparent',
-                  color: activeSection === s.id ? T_.ink : T_.inkMuted,
-                  fontSize: 12.5, fontWeight: 600, whiteSpace: 'nowrap',
-                  fontFamily: 'inherit', cursor: 'pointer',
-                  boxShadow: activeSection === s.id ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
-                }}>
-                {s.label}{s.count ? ` · ${s.count}` : ''}
-              </button>
+                  flex: 1, padding: '8px 4px', borderRadius: 8, border: 'none',
+                  background: mode === m.id ? T_.surface : 'transparent',
+                  color: mode === m.id ? T_.ink : T_.inkMuted,
+                  fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer',
+                  boxShadow: mode === m.id ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
+                }}>{m.label}</button>
             ))}
           </div>
         </div>
@@ -6598,28 +6559,22 @@ const ChecklistScreen = () => {
               fontWeight: 500, color: T_.ink, marginBottom: 6,
             }}>No checklist items</div>
             <div style={{ fontSize: 12.5, color: T_.inkMuted }}>
-              {canManage
-                ? 'Tap "New item" to add the first one.'
-                : 'Nothing for today. Ask the owner to set up the checklist.'}
+              Tap "New item" to add one.
             </div>
           </div>
         )}
-        {!loading && groupKeys.map(key => (
-          <div key={key} style={{ marginBottom: 16 }}>
-            {groupKeys.length > 1 && (
-              <div style={{
-                fontSize: 11, fontWeight: 700, letterSpacing: 0.6, textTransform: 'uppercase',
-                color: T_.inkMuted, padding: '0 6px 8px',
-              }}>{sectionMeta[key]?.label || key}</div>
-            )}
-            <div style={{
-              background: T_.surface, border: `1px solid ${T_.border}`,
-              borderRadius: 16, overflow: 'hidden',
-            }}>
-              {grouped[key].map((row, i) => (
+        {!loading && rows.length > 0 && (
+          <div style={{
+            background: T_.surface, border: `1px solid ${T_.border}`,
+            borderRadius: 16, overflow: 'hidden',
+          }}>
+            {rows.map((row, i) => {
+              const assignee = loginUsersById[row.assignee_id];
+              const isMine   = row.assignee_id === userId;
+              return (
                 <div key={row.id} style={{
                   padding: '14px', display: 'flex', alignItems: 'flex-start', gap: 12,
-                  borderBottom: i === grouped[key].length - 1 ? 'none' : `1px solid ${T_.borderSoft}`,
+                  borderBottom: i === rows.length - 1 ? 'none' : `1px solid ${T_.borderSoft}`,
                   opacity: row.done ? 0.6 : 1,
                 }}>
                   <button onClick={() => toggleDone(row)} style={{
@@ -6636,9 +6591,9 @@ const ChecklistScreen = () => {
                       fontSize: 13.5, color: row.done ? T_.inkMuted : T_.ink, fontWeight: 500,
                       textDecoration: row.done ? 'line-through' : 'none', lineHeight: 1.4,
                     }}>{row.label}</div>
-                    {row.owner_label && (
+                    {mode === 'assigned' && !isMine && assignee && (
                       <div style={{ fontSize: 11.5, color: T_.inkMuted, marginTop: 3 }}>
-                        {row.owner_label}
+                        → {assignee.name}
                       </div>
                     )}
                   </div>
@@ -6649,7 +6604,7 @@ const ChecklistScreen = () => {
                       padding: '3px 7px', borderRadius: 999, whiteSpace: 'nowrap',
                     }}>Priority</span>
                   )}
-                  {canManage && (
+                  {(canAssignOthers || isMine) && (
                     <button onClick={() => startEdit(row)} style={{
                       background: 'none', border: 'none', cursor: 'pointer', padding: 4,
                       color: T_.inkFaint, flexShrink: 0,
@@ -6658,27 +6613,26 @@ const ChecklistScreen = () => {
                     </button>
                   )}
                 </div>
-              ))}
-            </div>
+              );
+            })}
           </div>
-        ))}
+        )}
       </div>
 
-      {/* Add button */}
-      {canManage && (
-        <div style={{ padding: '8px 16px 20px' }}>
-          <button onClick={startNew} style={{
-            width: '100%', padding: 14, borderRadius: 14,
-            background: T_.maroon, color: '#fff', border: 'none',
-            fontSize: 14, fontWeight: 600, cursor: 'pointer',
-            fontFamily: 'inherit',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-            boxShadow: '0 6px 16px -6px rgba(14, 124, 58, 0.45)',
-          }}>
-            <Icon name="plus" size={16} /> New checklist item
-          </button>
-        </div>
-      )}
+      {/* Add button — everyone can add to their own checklist */}
+      <div style={{ padding: '14px 16px 20px' }}>
+        <button onClick={startNew} style={{
+          width: '100%', padding: 14, borderRadius: 14,
+          background: T_.maroon, color: '#fff', border: 'none',
+          fontSize: 14, fontWeight: 600, cursor: 'pointer',
+          fontFamily: 'inherit',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+          boxShadow: '0 6px 16px -6px rgba(14, 124, 58, 0.45)',
+        }}>
+          <Icon name="plus" size={16} />
+          {canAssignOthers ? 'New checklist item' : 'Add to my checklist'}
+        </button>
+      </div>
 
       {/* Edit sheet */}
       {editing && (
@@ -6709,22 +6663,22 @@ const ChecklistScreen = () => {
                 marginBottom: 14,
               }} />
 
-            <FieldLabel>Who's responsible? (optional)</FieldLabel>
-            <input value={editing.owner_label || ''}
-              onChange={e => setEditing({ ...editing, owner_label: e.target.value })}
-              placeholder="e.g. Saranya (Cashier Lead)"
-              style={enrollInputStyle(T_)} />
-
-            <div style={{ height: 14 }} />
-
-            <FieldLabel>Section</FieldLabel>
-            <select value={editing.section_id || ''}
-              onChange={e => setEditing({ ...editing, section_id: e.target.value || null })}
-              style={{ ...enrollInputStyle(T_), cursor: 'pointer' }}>
-              <option value="">Company-wide</option>
-              {(hasAll ? sections : sections.filter(s => visibleSectionIds.includes(s.id)))
-                .map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
+            <FieldLabel>Assign to</FieldLabel>
+            {canAssignOthers ? (
+              <select value={editing.assignee_id || ''}
+                onChange={e => setEditing({ ...editing, assignee_id: e.target.value })}
+                style={{ ...enrollInputStyle(T_), cursor: 'pointer' }}>
+                <option value="">— pick someone —</option>
+                {loginUsers.map(u => (
+                  <option key={u.id} value={u.id}>
+                    {u.name}{u.id === userId ? ' (me)' : ''}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input readOnly value="Myself"
+                style={{ ...enrollInputStyle(T_), background: T_.surfaceAlt }} />
+            )}
 
             <div style={{ height: 14 }} />
 
