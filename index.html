@@ -3047,6 +3047,15 @@ const AttendanceScreen = () => {
   const M = window.MOCK;
   const { user, userAccess } = useApp();
   const [section, setSection] = React.useState('all');
+  const [statusFilter, setStatusFilter] = React.useState(
+    () => window.__attendanceFilter || 'all'
+  );
+  React.useEffect(() => {
+    if (window.__attendanceFilter) {
+      setStatusFilter(window.__attendanceFilter);
+      delete window.__attendanceFilter;
+    }
+  }, []);
   const [detail, setDetail] = React.useState(null);  // selected employee_id
 
   const { roster: liveRoster, loading } = window.useLiveRoster
@@ -3086,16 +3095,20 @@ const AttendanceScreen = () => {
     ? ['fancy', 'cotton', 'silk', 'dhoti']
     : (allowed || []);
 
-  const filtered = section === 'all' ? roster : roster.filter(r => r.section === section);
+  const filteredBySection = section === 'all' ? roster : roster.filter(r => r.section === section);
+  const filtered = statusFilter === 'all'
+    ? filteredBySection
+    : filteredBySection.filter(r => r.status === statusFilter);
 
-  // Stats reflect whatever section (and user scope) is currently selected.
-  // `filtered` is already scoped to user's allowed sections + the tab.
+  // Stats reflect the currently-selected section (but ignore the status
+  // filter so all four numbers are visible even when the roster list is
+  // filtered to, say, just 'late').
   const scopedStats = {
-    total:   filtered.length,
-    present: filtered.filter(r => r.status === 'present').length,
-    late:    filtered.filter(r => r.status === 'late').length,
-    absent:  filtered.filter(r => r.status === 'absent').length,
-    onLeave: filtered.filter(r => r.status === 'leave').length,
+    total:   filteredBySection.length,
+    present: filteredBySection.filter(r => r.status === 'present').length,
+    late:    filteredBySection.filter(r => r.status === 'late').length,
+    absent:  filteredBySection.filter(r => r.status === 'absent').length,
+    onLeave: filteredBySection.filter(r => r.status === 'leave').length,
   };
 
   return (
@@ -3131,6 +3144,32 @@ const AttendanceScreen = () => {
               boxShadow: section === f.id ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
             }}>{f.label}</button>
           ))}
+        </div>
+
+        {/* Status filter chips */}
+        <div style={{
+          display: 'flex', gap: 6, marginBottom: 14, overflowX: 'auto',
+          WebkitOverflowScrolling: 'touch',
+        }}>
+          {[
+            { id: 'all',     label: `All · ${filteredBySection.length}`, tone: null },
+            { id: 'present', label: `Present · ${filteredBySection.filter(r => r.status === 'present').length}`, tone: T_.success },
+            { id: 'late',    label: `Late · ${filteredBySection.filter(r => r.status === 'late').length}`,       tone: T_.warning },
+            { id: 'absent',  label: `Absent · ${filteredBySection.filter(r => r.status === 'absent').length}`,   tone: T_.danger },
+            { id: 'leave',   label: `Leave · ${filteredBySection.filter(r => r.status === 'leave').length}`,     tone: T_.info },
+          ].map(f => {
+            const active = statusFilter === f.id;
+            return (
+              <button key={f.id} onClick={() => setStatusFilter(f.id)} style={{
+                padding: '6px 12px', borderRadius: 999,
+                background: active ? (f.tone || T_.ink) : T_.surface,
+                border: `1px solid ${active ? (f.tone || T_.ink) : T_.border}`,
+                color: active ? '#fff' : T_.inkSoft,
+                fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
+                fontFamily: 'inherit', whiteSpace: 'nowrap',
+              }}>{f.label}</button>
+            );
+          })}
         </div>
 
         {/* Roster */}
@@ -4912,7 +4951,7 @@ const HRHomeScreen = () => {
               ? hrStats.lateNames.slice(0, 3).join(' · ')
               : 'Beyond 10 AM'}
             action="Review"
-            onClick={() => nav.go('attendance')}
+            onClick={() => { window.__attendanceFilter = 'late'; nav.go('attendance'); }}
           />
           <HRAttentionRow
             icon="calendar" tone="danger"
@@ -4921,7 +4960,7 @@ const HRHomeScreen = () => {
               ? hrStats.absentNames.slice(0, 3).join(' · ')
               : 'Follow up with section leads'}
             action="Follow up"
-            onClick={() => nav.go('attendance')}
+            onClick={() => { window.__attendanceFilter = 'absent'; nav.go('attendance'); }}
           />
           <HRAttentionRow
             icon="user" tone="info"
