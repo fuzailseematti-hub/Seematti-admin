@@ -1173,6 +1173,106 @@ const useLiveLeaves = () => {
 window.useLiveLeaves = useLiveLeaves;
 
 // ──────────────────────────────────────────────────────────
+// Live tasks hook — filtered by scope ('owner' or 'staff') and
+// optionally assignee. Exposes toggle(id, done) for checkbox taps.
+// ──────────────────────────────────────────────────────────
+const useLiveTasks = ({ scope, assigneeId } = {}) => {
+  const [tasks, setTasks]     = React.useState([]);
+  const [loading, setLoading] = React.useState(true);
+
+  const fetchAll = React.useCallback(async () => {
+    if (!window.sb) return;
+    const today = new Date().toISOString().slice(0, 10);
+    let q = window.sb
+      .from('tasks')
+      .select('id, scope, assignee_id, label, owner_label, done, priority, sort_order, due_date')
+      .eq('due_date', today)
+      .order('sort_order');
+    if (scope) q = q.eq('scope', scope);
+    if (assigneeId) q = q.eq('assignee_id', assigneeId);
+    const { data } = await q;
+    setTasks((data || []).map(t => ({
+      id: t.id, label: t.label, done: t.done,
+      owner: t.owner_label, priority: t.priority,
+    })));
+    setLoading(false);
+  }, [scope, assigneeId]);
+
+  React.useEffect(() => {
+    if (!window.sb) return;
+    fetchAll();
+    const channel = window.sb
+      .channel('live-tasks')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'tasks' },
+        () => { fetchAll(); })
+      .subscribe();
+    return () => { window.sb.removeChannel(channel); };
+  }, [fetchAll]);
+
+  const toggle = React.useCallback(async (id, done) => {
+    if (!window.sb) return;
+    await window.sb.from('tasks').update({ done }).eq('id', id);
+  }, []);
+
+  return { tasks, loading, toggle };
+};
+window.useLiveTasks = useLiveTasks;
+
+// ──────────────────────────────────────────────────────────
+// Live announcements hook. Produces a human-readable "at" string
+// from created_at so the UI matches the existing mock shape.
+// ──────────────────────────────────────────────────────────
+const relTime = (iso) => {
+  const d = new Date(iso);
+  const diff = (Date.now() - d.getTime()) / 1000;
+  if (diff < 60)        return 'Just now';
+  if (diff < 3600)      return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400)     return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 172800)    return 'Yesterday';
+  if (diff < 604800)    return `${Math.floor(diff / 86400)} days ago`;
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+};
+
+const useLiveAnnouncements = () => {
+  const [items, setItems]     = React.useState([]);
+  const [loading, setLoading] = React.useState(true);
+
+  const fetchAll = React.useCallback(async () => {
+    if (!window.sb) return;
+    const { data } = await window.sb
+      .from('announcements')
+      .select('*')
+      .order('pinned', { ascending: false })
+      .order('created_at', { ascending: false });
+    setItems((data || []).map(a => ({
+      id: a.id, title: a.title,
+      by: a.posted_by, pinned: a.pinned,
+      at: relTime(a.created_at),
+      body: a.body || null,
+    })));
+    setLoading(false);
+  }, []);
+
+  React.useEffect(() => {
+    if (!window.sb) return;
+    fetchAll();
+    const channel = window.sb
+      .channel('live-announcements')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'announcements' },
+        () => { fetchAll(); })
+      .subscribe();
+    // Refresh the relative times every 60s so "2h ago" stays accurate.
+    const tick = setInterval(fetchAll, 60000);
+    return () => { window.sb.removeChannel(channel); clearInterval(tick); };
+  }, [fetchAll]);
+
+  return { items, loading };
+};
+window.useLiveAnnouncements = useLiveAnnouncements;
+
+// ──────────────────────────────────────────────────────────
 // Icons — line-style, 24px, stroke 1.75
 // ──────────────────────────────────────────────────────────
 const Icon = ({ name, size = 20, color = 'currentColor', strokeWidth = 1.75 }) => {
@@ -2636,19 +2736,24 @@ window.ApplyLeaveScreen = ApplyLeaveScreen;
 const TasksScreen = () => {
   const { user, toast } = useApp();
   const T_ = window.TOKENS;
-  const M = window.MOCK;
   const isOwner = user === 'owner';
 
-  const [tasks, setTasks] = React.useState(
-    isOwner ? M.openingTasks : M.staffTasks
-  );
+  const { tasks, loading, toggle: persistToggle } = window.useLiveTasks
+    ? window.useLiveTasks(
+        isOwner
+          ? { scope: 'owner' }
+          : { scope: 'staff', assigneeId: 'E003' } // Priya (demo staff)
+      )
+    : { tasks: [], loading: false, toggle: async () => {} };
 
-  const toggle = (id) => {
-    setTasks(tasks.map(t => t.id === id ? { ...t, done: !t.done } : t));
+  const toggle = async (id) => {
+    const current = tasks.find(t => t.id === id);
+    if (!current) return;
+    await persistToggle(id, !current.done);
   };
 
   const done = tasks.filter(t => t.done).length;
-  const total = tasks.length;
+  const total = tasks.length || 1;
   const pct = Math.round((done / total) * 100);
 
   return (
@@ -2869,14 +2974,18 @@ window.PayslipScreen = PayslipScreen;
 const AnnouncementsScreen = () => {
   const T_ = window.TOKENS;
   const M = window.MOCK;
+  const { items, loading } = window.useLiveAnnouncements
+    ? window.useLiveAnnouncements()
+    : { items: [], loading: false };
+  const rows = items.length ? items : M.announcements;
 
   return (
     <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 40 }}>
-      <ScreenHeader back title="Announcements" subtitle={`${M.announcements.length} recent notices`} />
+      <ScreenHeader back title="Announcements" subtitle={loading ? 'Loading…' : `${rows.length} recent notices`} />
 
       <div style={{ padding: '0 16px' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {M.announcements.map(a => (
+          {rows.map(a => (
             <div key={a.id} style={{
               background: a.pinned ? T_.goldSoft : T_.surface,
               border: `1px solid ${a.pinned ? T_.goldSoft : T_.border}`,
