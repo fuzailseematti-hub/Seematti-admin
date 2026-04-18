@@ -4513,28 +4513,15 @@ const ManagerHomeScreen = () => {
             </div>
           )}
 
-          <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
-            <button onClick={() => nav.go('attendance')} style={{
-              flex: 1, padding: '10px 14px',
-              background: T_.surfaceAlt, border: 'none', borderRadius: 12,
-              color: T_.ink, fontSize: 12.5, fontWeight: 600,
-              cursor: 'pointer', fontFamily: 'inherit',
-              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-            }}>
-              View roster <Icon name="chevron" size={14} />
-            </button>
-            {userAccess && userAccess.can_edit_attendance && (
-              <button onClick={() => nav.go('markAttendance')} style={{
-                flex: 1, padding: '10px 14px',
-                background: T_.maroon, border: 'none', borderRadius: 12,
-                color: '#fff', fontSize: 12.5, fontWeight: 600,
-                cursor: 'pointer', fontFamily: 'inherit',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-              }}>
-                Mark attendance
-              </button>
-            )}
-          </div>
+          <button onClick={() => nav.go('attendance')} style={{
+            marginTop: 14, width: '100%', padding: '10px 14px',
+            background: T_.surfaceAlt, border: 'none', borderRadius: 12,
+            color: T_.ink, fontSize: 12.5, fontWeight: 600,
+            cursor: 'pointer', fontFamily: 'inherit',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+          }}>
+            View roster <Icon name="chevron" size={14} />
+          </button>
         </div>
       </div>
 
@@ -4684,7 +4671,9 @@ const MarkAttendanceScreen = () => {
   const isAdmin = user === 'owner' || user === 'hr';
   const hasAll  = isAdmin || !!(userAccess && userAccess.all_sections);
   const allowed = hasAll ? null : (userAccess?.section_ids || []);
-  const canEdit = hasAll || !!(userAccess && userAccess.can_edit_attendance);
+  // Marking attendance is owner/hr-only by policy. Managers/Supervisors
+  // see the roster read-only.
+  const canEdit = user === 'owner' || user === 'hr';
 
   // Scope the roster down to the user's sections.
   const roster = fullRoster.filter(r => hasAll || allowed.includes(r.section));
