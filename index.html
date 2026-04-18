@@ -1451,6 +1451,84 @@ const useLiveStaffEmployee = (employeeId) => {
 window.useLiveStaffEmployee = useLiveStaffEmployee;
 
 // ──────────────────────────────────────────────────────────
+// HR home stats — new joiners (last 7 days), latest late-arrival
+// names, latest absent names. Derived from existing tables, so no
+// extra schema needed.
+// ──────────────────────────────────────────────────────────
+const useLiveHRStats = () => {
+  const [stats, setStats] = React.useState({
+    newJoinersWeek: 0,
+    lateNames:  [],
+    absentNames:[],
+    newJoinerName: null,
+  });
+
+  const fetchAll = React.useCallback(async () => {
+    if (!window.sb) return;
+    const today = new Date();
+    const weekAgo = new Date(today);
+    weekAgo.setDate(today.getDate() - 7);
+    const todayStr   = today.toISOString().slice(0, 10);
+    const weekAgoStr = weekAgo.toISOString().slice(0, 10);
+
+    const [joinersRes, lateRes, absentRes, lastJoinerRes] = await Promise.all([
+      // New joiners (last 7 days)
+      window.sb
+        .from('employees')
+        .select('id', { count: 'exact', head: true })
+        .gte('joined_date', weekAgoStr)
+        .lte('joined_date', todayStr),
+      // Today's late names (up to 3)
+      window.sb
+        .from('attendance')
+        .select('employee_id, employees(name, section_id)')
+        .eq('date', todayStr)
+        .eq('status', 'late')
+        .limit(5),
+      // Today's absent names (up to 3)
+      window.sb
+        .from('attendance')
+        .select('employee_id, employees(name, section_id)')
+        .eq('date', todayStr)
+        .eq('status', 'absent')
+        .limit(5),
+      // Most recent joiner (single row) for the attention card subtitle
+      window.sb
+        .from('employees')
+        .select('name, role, section_id, joined_date')
+        .gte('joined_date', weekAgoStr)
+        .order('joined_date', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+    ]);
+
+    const latestJoiner = lastJoinerRes.data;
+    setStats({
+      newJoinersWeek: joinersRes.count || 0,
+      lateNames:   (lateRes.data   || []).map(r => r.employees?.name).filter(Boolean),
+      absentNames: (absentRes.data || []).map(r => r.employees?.name).filter(Boolean),
+      newJoinerName: latestJoiner
+        ? `${latestJoiner.name} — ${SECTION_LABEL[latestJoiner.section_id] || ''} Section ${latestJoiner.role}`
+        : null,
+    });
+  }, []);
+
+  React.useEffect(() => {
+    if (!window.sb) return;
+    fetchAll();
+    const channel = window.sb
+      .channel('live-hr-stats')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance' }, () => fetchAll())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'employees' },  () => fetchAll())
+      .subscribe();
+    return () => { window.sb.removeChannel(channel); };
+  }, [fetchAll]);
+
+  return stats;
+};
+window.useLiveHRStats = useLiveHRStats;
+
+// ──────────────────────────────────────────────────────────
 // Icons — line-style, 24px, stroke 1.75
 // ──────────────────────────────────────────────────────────
 const Icon = ({ name, size = 20, color = 'currentColor', strokeWidth = 1.75 }) => {
@@ -3367,6 +3445,13 @@ const HRHomeScreen = () => {
   const { items: hrAnns } = window.useLiveAnnouncements ? window.useLiveAnnouncements() : { items: [] };
   const hrAnnCount = hrAnns.length || M.announcements.length;
   const hrSectionCount = live.sections ? live.sections.length : (M.floors || []).length;
+  const hrApprovedThisWeek = hrLeaves.filter(l => {
+    if (l.status !== 'approved') return false;
+    // liveLeaves stores no date for decision; approximate: count all approved as "this week"
+    return true;
+  }).length;
+  const hrStats = window.useLiveHRStats ? window.useLiveHRStats() : { newJoinersWeek: 0, lateNames: [], absentNames: [], newJoinerName: null };
+  const hrAvgAttendance = a.total ? Math.round((a.present / a.total) * 100) : 0;
 
   // "Not yet marked" — the HR pain point. Deliberately surfaced first.
   // With the live backend, unmarked = total - (present + late + absent + on_leave)
@@ -3546,24 +3631,28 @@ const HRHomeScreen = () => {
         }}>
           <HRAttentionRow
             icon="alert" tone="warning"
-            title="3 late arrivals this morning"
-            sub="Silk · Fancy sections — beyond 10 AM"
+            title={`${a.late} late arrival${a.late === 1 ? '' : 's'} this morning`}
+            sub={hrStats.lateNames.length
+              ? hrStats.lateNames.slice(0, 3).join(' · ')
+              : 'Beyond 10 AM'}
             action="Review"
             onClick={() => nav.go('attendance')}
           />
           <HRAttentionRow
             icon="calendar" tone="danger"
-            title="2 unapproved absences"
-            sub="Anitha R. · Muthulakshmi V."
+            title={`${a.absent} unapproved absence${a.absent === 1 ? '' : 's'}`}
+            sub={hrStats.absentNames.length
+              ? hrStats.absentNames.slice(0, 3).join(' · ')
+              : 'Follow up with section leads'}
             action="Follow up"
-            onClick={() => nav.go('leaves')}
+            onClick={() => nav.go('attendance')}
           />
           <HRAttentionRow
             icon="user" tone="info"
-            title="1 new joiner today"
-            sub="Divya P. — Cotton Section trainee"
+            title={`${hrStats.newJoinersWeek} new joiner${hrStats.newJoinersWeek === 1 ? '' : 's'} this week`}
+            sub={hrStats.newJoinerName || 'No new joiners yet'}
             action="Onboard"
-            onClick={() => {}}
+            onClick={() => nav.go('enroll')}
             last
           />
         </div>
@@ -3575,9 +3664,9 @@ const HRHomeScreen = () => {
         <div style={{
           marginTop: 10, display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10,
         }}>
-          <WeekStat label="Avg. attendance" value="89%" tone="success" />
-          <WeekStat label="Leave granted"   value="14"  tone="info" />
-          <WeekStat label="New joiners"     value="2"   tone="brand" />
+          <WeekStat label="Avg. attendance" value={`${hrAvgAttendance}%`} tone="success" />
+          <WeekStat label="Leave granted"   value={hrApprovedThisWeek}    tone="info" />
+          <WeekStat label="New joiners"     value={hrStats.newJoinersWeek} tone="brand" />
         </div>
       </div>
     </div>
