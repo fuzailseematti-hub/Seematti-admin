@@ -3966,29 +3966,50 @@ window.VisitorsScreen = VisitorsScreen;
 // manually every morning.
 
 const HRHomeScreen = () => {
-  const { nav, setLang, lang } = useApp();
+  const { nav, setLang, lang, user, userId, userAccess } = useApp();
   const T_ = window.TOKENS;
   const M = window.MOCK;
+
+  const isAdmin = user === 'owner' || user === 'hr';
+  const hasAll  = isAdmin || !!(userAccess && userAccess.all_sections);
+  const allowed = hasAll ? null : (userAccess?.section_ids || []);
+
   const live = window.useLiveAttendance ? window.useLiveAttendance() : { attendance: null, sections: null };
-  const a = live.attendance || M.attendance;
+
+  // Scope section stats + attendance totals to the user's sections.
+  const scopedSections = (live.sections || []).filter(s => hasAll || allowed.includes(s.id));
+  const a = hasAll
+    ? (live.attendance || M.attendance)
+    : scopedSections.reduce((acc, s) => ({
+        total:   acc.total   + (s.staff   || 0),
+        present: acc.present + (s.present || 0),
+        late:    acc.late    + (s.late    || 0),
+        absent:  acc.absent  + (s.absent  || 0),
+        onLeave: acc.onLeave + (s.onLeave || 0),
+      }), { total: 0, present: 0, late: 0, absent: 0, onLeave: 0 });
 
   const { items: hrLeaves } = window.useLiveLeaves ? window.useLiveLeaves() : { items: [] };
-  const hrPendingLeaves = hrLeaves.filter(l => l.status === 'pending').length;
+  const scopedLeaves = hrLeaves.filter(l => hasAll || (l.section_id && allowed.includes(l.section_id)));
+  const hrPendingLeaves = scopedLeaves.filter(l => l.status === 'pending').length;
+
   const { items: hrAnns } = window.useLiveAnnouncements ? window.useLiveAnnouncements() : { items: [] };
   const hrAnnCount = hrAnns.length || M.announcements.length;
-  const hrSectionCount = live.sections ? live.sections.length : (M.floors || []).length;
-  const hrApprovedThisWeek = hrLeaves.filter(l => {
-    if (l.status !== 'approved') return false;
-    // liveLeaves stores no date for decision; approximate: count all approved as "this week"
-    return true;
-  }).length;
+  const hrSectionCount = hasAll
+    ? (live.sections ? live.sections.length : (M.floors || []).length)
+    : (allowed?.length || 0);
+  const hrApprovedThisWeek = scopedLeaves.filter(l => l.status === 'approved').length;
   const hrStats = window.useLiveHRStats ? window.useLiveHRStats() : { newJoinersWeek: 0, lateNames: [], absentNames: [], newJoinerName: null };
   const hrAvgAttendance = a.total ? Math.round((a.present / a.total) * 100) : 0;
-  const { employee: hrEmp } = window.useLiveStaffEmployee
-    ? window.useLiveStaffEmployee('E001')
+
+  // Use the logged-in user for the greeting instead of hardcoded E001.
+  const { employee: me } = window.useLiveStaffEmployee
+    ? window.useLiveStaffEmployee(userId || 'E001')
     : { employee: null };
-  const hrFirstName = (hrEmp?.name || 'Revathi').split(' ')[0];
-  const hrRoleLine  = hrEmp?.role ? `${hrEmp.role} · People operations` : 'HR Manager · People operations';
+  const hrFirstName = (me?.name || 'there').split(' ')[0];
+  const roleLabel = {
+    owner: 'Owner', hr: 'HR Manager', manager: 'Section Manager', supervisor: 'Supervisor',
+  }[user] || 'Admin';
+  const hrRoleLine = `${roleLabel}${hasAll ? ' · All sections' : (allowed?.length ? ' · ' + allowed.length + ' section' + (allowed.length === 1 ? '' : 's') : '')}`;
 
   // "Not yet marked" — the HR pain point. Deliberately surfaced first.
   // With the live backend, unmarked = total - (present + late + absent + on_leave)
