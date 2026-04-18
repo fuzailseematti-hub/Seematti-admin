@@ -575,6 +575,7 @@ const NAV = [
     { id: 'tasks',         label: 'Tasks',         area: 'tasks' },
     { id: 'announcements', label: 'Announcements', area: 'announcements' },
     { id: 'visitors',      label: 'Visitor log',   area: 'visitors' },
+    { id: 'kiosk',         label: 'Kiosk & face',  area: 'attendance' },
   ]},
   { section: 'People', items: [
     { id: 'employees', label: 'Employees', area: 'employees' },
@@ -1069,15 +1070,23 @@ const EmployeesPage = () => {
   const [saving, setSaving] = useState(false);
 
   const [all, setAll] = useState([]);
+  const [faceCounts, setFaceCounts] = useState({}); // employee_id -> pose count
   const [loading, setLoading] = useState(true);
 
   const fetchAll = useCallback(async () => {
     if (!window.sb) return;
-    const { data } = await window.sb
-      .from('employees')
-      .select('id, name, role, section_id, user_type, is_active, joined_date')
-      .order('id');
-    setAll(data || []);
+    const [empRes, faceRes] = await Promise.all([
+      window.sb.from('employees')
+        .select('id, name, role, section_id, user_type, is_active, joined_date')
+        .order('id'),
+      window.sb.from('face_embeddings').select('employee_id'),
+    ]);
+    const counts = {};
+    (faceRes.data || []).forEach(f => {
+      counts[f.employee_id] = (counts[f.employee_id] || 0) + 1;
+    });
+    setFaceCounts(counts);
+    setAll(empRes.data || []);
     setLoading(false);
   }, []);
 
@@ -1087,9 +1096,18 @@ const EmployeesPage = () => {
     const ch = window.sb.channel('dash-emp-list')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'employees' },
         () => fetchAll())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'face_embeddings' },
+        () => fetchAll())
       .subscribe();
     return () => { window.sb.removeChannel(ch); };
   }, [fetchAll]);
+
+  const clearFace = async (row) => {
+    if (!can('employees', 'edit')) return;
+    if (!window.confirm(`Delete face data for ${row.name}? They'll need to re-enroll before the kiosk can recognise them.`)) return;
+    await window.sb.from('face_embeddings').delete().eq('employee_id', row.id);
+    toast(`Face data cleared for ${row.name}`);
+  };
 
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -1212,7 +1230,7 @@ const EmployeesPage = () => {
         <div className="stat"><div className="k">Owners</div><div className="v">{counts.owner}</div></div>
         <div className="stat"><div className="k">HR</div><div className="v">{counts.hr}</div></div>
         <div className="stat"><div className="k">Staff</div><div className="v">{counts.staff}</div></div>
-        <div className="stat"><div className="k">Active</div><div className="v">{all.filter(e => e.is_active).length}</div></div>
+        <div className="stat present"><div className="k">Face-enrolled</div><div className="v">{Object.keys(faceCounts).length}</div></div>
       </div>
 
       <div className="toolbar">
@@ -1283,15 +1301,16 @@ const EmployeesPage = () => {
               <th onClick={() => clickSort('user_type')} style={{ cursor: 'pointer', width: 100 }}>Type{arrow('user_type')}</th>
               <th onClick={() => clickSort('joined_date')} style={{ cursor: 'pointer', width: 130 }}>Joined{arrow('joined_date')}</th>
               <th style={{ width: 80 }}>Status</th>
+              <th style={{ width: 110 }}>Face</th>
               {(can('employees', 'edit') || can('employees', 'delete')) && (
-                <th style={{ width: 220 }}>Actions</th>
+                <th style={{ width: 280 }}>Actions</th>
               )}
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={8} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                <td colSpan={9} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
                   {loading ? 'Loading…' : 'No employees match these filters.'}
                 </td>
               </tr>
@@ -1314,6 +1333,14 @@ const EmployeesPage = () => {
                     ? <span className="status-pill present">Active</span>
                     : <span className="status-pill absent">Inactive</span>}
                 </td>
+                <td>
+                  {(() => {
+                    const n = faceCounts[r.id] || 0;
+                    if (n >= 3) return <span className="status-pill present" title={`${n} poses enrolled`}>✓ {n}/3</span>;
+                    if (n > 0)  return <span className="status-pill late" title={`${n} of 3 poses — needs re-enrollment`}>{n}/3</span>;
+                    return <span className="status-pill unmarked">—</span>;
+                  })()}
+                </td>
                 {(can('employees', 'edit') || can('employees', 'delete')) && (
                   <td>
                     {can('employees', 'edit') && (
@@ -1324,6 +1351,13 @@ const EmployeesPage = () => {
                           onClick={() => toggleActive(r)}>
                           {r.is_active ? 'Deactivate' : 'Reactivate'}
                         </button>
+                        {(faceCounts[r.id] || 0) > 0 && (
+                          <button className="btn" style={{ height: 28, padding: '0 10px', marginRight: 6 }}
+                            onClick={() => clearFace(r)}
+                            title="Delete face embeddings so the kiosk no longer recognises them">
+                            Clear face
+                          </button>
+                        )}
                       </>
                     )}
                     {can('employees', 'delete') && (
@@ -3735,6 +3769,216 @@ const ReportsPage = () => {
 };
 
 // ──────────────────────────────────────────────────────────
+// Kiosk & face settings — late cutoff, match threshold, enrolled faces.
+// ──────────────────────────────────────────────────────────
+const KioskSettingsPage = () => {
+  const toast = useToast();
+  const { can } = useContext(AppCtx);
+
+  const [settings, setSettings] = useState({ late_cutoff: '10:00', match_threshold: '0.55' });
+  const [loading, setLoading] = useState(true);
+  const [savingKey, setSavingKey] = useState(null);
+
+  const [faceStats, setFaceStats] = useState({ totalStaff: 0, enrolled: 0, partials: 0 });
+  const [partialList, setPartialList] = useState([]);
+
+  const fetchAll = useCallback(async () => {
+    if (!window.sb) return;
+    const [setRes, staffRes, facesRes] = await Promise.all([
+      window.sb.from('settings').select('*').in('key', ['late_cutoff', 'match_threshold']),
+      window.sb.from('employees').select('id, name, role, section_id')
+        .eq('user_type', 'staff').eq('is_active', true),
+      window.sb.from('face_embeddings').select('employee_id'),
+    ]);
+    const s = { late_cutoff: '10:00', match_threshold: '0.55' };
+    (setRes.data || []).forEach(r => { s[r.key] = r.value; });
+    setSettings(s);
+
+    const counts = {};
+    (facesRes.data || []).forEach(f => {
+      counts[f.employee_id] = (counts[f.employee_id] || 0) + 1;
+    });
+    const staff = staffRes.data || [];
+    const enrolled = staff.filter(e => (counts[e.id] || 0) >= 3).length;
+    const partials = staff.filter(e => (counts[e.id] || 0) > 0 && (counts[e.id] || 0) < 3);
+    setFaceStats({ totalStaff: staff.length, enrolled, partials: partials.length });
+    setPartialList(partials.map(e => ({ ...e, count: counts[e.id] })));
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (!window.sb) return;
+    fetchAll();
+    const ch = window.sb.channel('dash-kiosk')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'settings' },        () => fetchAll())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'face_embeddings' }, () => fetchAll())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'employees' },       () => fetchAll())
+      .subscribe();
+    return () => { window.sb.removeChannel(ch); };
+  }, [fetchAll]);
+
+  const writeSetting = async (key, value) => {
+    if (!can('attendance', 'edit')) return;
+    setSavingKey(key);
+    try {
+      const { error } = await window.sb.from('settings').upsert({
+        key, value, updated_at: new Date().toISOString(),
+      });
+      if (error) toast('Could not save');
+      else {
+        setSettings(s => ({ ...s, [key]: value }));
+        toast('Saved');
+      }
+    } finally { setSavingKey(null); }
+  };
+
+  const saveCutoff = () => writeSetting('late_cutoff', settings.late_cutoff);
+  const saveThreshold = () => writeSetting('match_threshold',
+    String(Math.max(0.30, Math.min(0.80, parseFloat(settings.match_threshold) || 0.55)).toFixed(2)));
+
+  const clearAllFaces = async () => {
+    if (!can('attendance', 'delete')) return;
+    if (!window.confirm('Delete ALL face embeddings across every employee?\n\nYou will need to re-enroll everyone via the mobile app. This cannot be undone.')) return;
+    const { error } = await window.sb.from('face_embeddings').delete().not('id', 'is', null);
+    if (error) toast('Could not delete');
+    else toast('All face data cleared');
+  };
+
+  const readOnly = !can('attendance', 'edit');
+  const thresholdPct = Math.round(parseFloat(settings.match_threshold) * 100);
+
+  return (
+    <div>
+      <div className="stat-strip">
+        <div className="stat present"><div className="k">Enrolled</div><div className="v">{faceStats.enrolled}</div></div>
+        <div className="stat late"><div className="k">Partial</div><div className="v">{faceStats.partials}</div></div>
+        <div className="stat"><div className="k">Active staff</div><div className="v">{faceStats.totalStaff}</div></div>
+        <div className="stat leave"><div className="k">Coverage</div><div className="v">{faceStats.totalStaff ? Math.round((faceStats.enrolled / faceStats.totalStaff) * 100) : 0}%</div></div>
+        <div className="stat"><div className="k">Threshold</div><div className="v">{thresholdPct}%</div></div>
+      </div>
+
+      {/* Late cutoff + threshold in a two-column layout */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+        <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 24 }}>
+          <div style={{
+            fontFamily: 'Fraunces, Georgia, serif', fontSize: 20, fontWeight: 500,
+            letterSpacing: -0.3, marginBottom: 4,
+          }}>Late cutoff</div>
+          <div style={{ fontSize: 13, color: 'var(--inkMuted)', marginBottom: 16 }}>
+            Kiosk punches after this time get marked as <strong>Late</strong> instead of Present.
+          </div>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+            <input type="time"
+              value={settings.late_cutoff}
+              disabled={readOnly}
+              onChange={e => setSettings(s => ({ ...s, late_cutoff: e.target.value }))}
+              style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 18, height: 44, flex: 1 }} />
+            {!readOnly && (
+              <button className="btn primary" onClick={saveCutoff} disabled={savingKey === 'late_cutoff'}>
+                {savingKey === 'late_cutoff' ? 'Saving…' : 'Save'}
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 24 }}>
+          <div style={{
+            fontFamily: 'Fraunces, Georgia, serif', fontSize: 20, fontWeight: 500,
+            letterSpacing: -0.3, marginBottom: 4,
+          }}>Face match threshold</div>
+          <div style={{ fontSize: 13, color: 'var(--inkMuted)', marginBottom: 16 }}>
+            Cosine similarity cutoff. Lower = more matches (risk of wrong person).
+            Higher = stricter (more "try again" fails). Recommended: 0.55.
+          </div>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+            <input type="range" min="0.35" max="0.75" step="0.01"
+              value={settings.match_threshold}
+              disabled={readOnly}
+              onChange={e => setSettings(s => ({ ...s, match_threshold: e.target.value }))}
+              style={{ flex: 1 }} />
+            <input type="number" min="0.35" max="0.75" step="0.01"
+              value={settings.match_threshold}
+              disabled={readOnly}
+              onChange={e => setSettings(s => ({ ...s, match_threshold: e.target.value }))}
+              style={{ width: 90, fontFamily: 'JetBrains Mono, Menlo, monospace' }} />
+            {!readOnly && (
+              <button className="btn primary" onClick={saveThreshold} disabled={savingKey === 'match_threshold'}>
+                {savingKey === 'match_threshold' ? 'Saving…' : 'Save'}
+              </button>
+            )}
+          </div>
+          <div style={{ marginTop: 10, fontSize: 11.5, color: 'var(--inkFaint)' }}>
+            0.40 lenient · 0.55 balanced (default) · 0.65 strict
+          </div>
+        </div>
+      </div>
+
+      {/* Partials list + danger zone */}
+      <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 24, marginBottom: 16 }}>
+        <div style={{
+          fontFamily: 'Fraunces, Georgia, serif', fontSize: 20, fontWeight: 500,
+          letterSpacing: -0.3, marginBottom: 4,
+        }}>Partial enrollments</div>
+        <div style={{ fontSize: 13, color: 'var(--inkMuted)', marginBottom: 16 }}>
+          Staff with fewer than 3 face embeddings — they may not match reliably. Ask them to re-enroll from the mobile app.
+        </div>
+        {partialList.length === 0 ? (
+          <div style={{ fontSize: 13, color: 'var(--inkMuted)' }}>
+            {loading ? 'Loading…' : 'None — every enrolled employee has all 3 poses.'}
+          </div>
+        ) : (
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th style={{ width: 80 }}>ID</th>
+                  <th>Name</th>
+                  <th>Role</th>
+                  <th style={{ width: 100 }}>Section</th>
+                  <th style={{ width: 80 }}>Poses</th>
+                </tr>
+              </thead>
+              <tbody>
+                {partialList.map(p => (
+                  <tr key={p.id}>
+                    <td className="id">{p.id}</td>
+                    <td className="name">{p.name}</td>
+                    <td>{p.role}</td>
+                    <td>{SECTION_META[p.section_id]?.label || '—'}</td>
+                    <td>
+                      <span className="status-pill late">{p.count}/3</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Danger zone — owner only */}
+      {can('attendance', 'delete') && (
+        <div style={{
+          background: 'var(--dangerSoft)', border: '1px solid rgba(179, 38, 30, 0.2)',
+          borderRadius: 16, padding: 24,
+        }}>
+          <div style={{
+            fontFamily: 'Fraunces, Georgia, serif', fontSize: 18, fontWeight: 500,
+            letterSpacing: -0.3, marginBottom: 4, color: 'var(--danger)',
+          }}>Danger zone</div>
+          <div style={{ fontSize: 13, color: 'var(--inkSoft)', marginBottom: 16 }}>
+            Delete all face embeddings for every employee. Use this if you want to retrain the kiosk from scratch. Staff will need to re-enroll on the mobile app.
+          </div>
+          <button className="btn danger" onClick={clearAllFaces}>
+            Clear all face data
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ──────────────────────────────────────────────────────────
 // Page router
 // ──────────────────────────────────────────────────────────
 const Page = ({ name }) => {
@@ -3747,6 +3991,7 @@ const Page = ({ name }) => {
   if (name === 'sections')      return <SectionsPage />;
   if (name === 'payslips')      return <PayslipsPage />;
   if (name === 'reports')       return <ReportsPage />;
+  if (name === 'kiosk')         return <KioskSettingsPage />;
   return (
     <div className="empty">
       <h3>Coming soon</h3>
