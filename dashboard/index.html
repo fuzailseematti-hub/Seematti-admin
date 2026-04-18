@@ -2652,6 +2652,272 @@ const VisitorsPage = () => {
 };
 
 // ──────────────────────────────────────────────────────────
+// Sections management — Owner only (HR sees read-only).
+// ──────────────────────────────────────────────────────────
+const SectionsPage = () => {
+  const toast = useToast();
+  const { can } = useContext(AppCtx);
+
+  const [rows, setRows] = useState([]);
+  const [counts, setCounts] = useState({});
+  const [loading, setLoading] = useState(true);
+
+  const [editing, setEditing] = useState(null);
+  const [saving, setSaving] = useState(false);
+
+  const fetchAll = useCallback(async () => {
+    if (!window.sb) return;
+    const [secRes, empRes] = await Promise.all([
+      window.sb.from('sections').select('*').order('sort_order'),
+      window.sb.from('employees').select('section_id').eq('is_active', true),
+    ]);
+    const c = {};
+    (empRes.data || []).forEach(e => {
+      if (e.section_id) c[e.section_id] = (c[e.section_id] || 0) + 1;
+    });
+    setCounts(c);
+    setRows(secRes.data || []);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (!window.sb) return;
+    fetchAll();
+    const ch = window.sb.channel('dash-sections')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sections' }, () => fetchAll())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'employees' }, () => fetchAll())
+      .subscribe();
+    return () => { window.sb.removeChannel(ch); };
+  }, [fetchAll]);
+
+  const startNew = () => {
+    const nextOrder = Math.max(0, ...rows.map(r => r.sort_order || 0)) + 1;
+    setEditing({ id: '', name: '', name_ta: '', monogram: '', sort_order: nextOrder, _new: true });
+  };
+  const startEdit = (row) => setEditing({ ...row, _new: false });
+  const close = () => setEditing(null);
+
+  const save = async () => {
+    if (!editing || saving) return;
+    const payload = {
+      name: editing.name.trim(),
+      name_ta: (editing.name_ta || '').trim() || null,
+      monogram: (editing.monogram || '').trim().toUpperCase().slice(0, 3),
+      sort_order: parseInt(editing.sort_order, 10) || 0,
+    };
+    if (!payload.name) { toast('Name is required'); return; }
+    if (!payload.monogram) { toast('Monogram is required'); return; }
+    setSaving(true);
+    try {
+      if (editing._new) {
+        const id = editing.id.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+        if (!id) { toast('ID is required'); setSaving(false); return; }
+        const { error } = await window.sb.from('sections').insert({ id, ...payload });
+        if (error) {
+          toast(error.message.includes('duplicate') ? 'Section ID already exists' : 'Could not save');
+        } else {
+          toast('Section added');
+          close();
+        }
+      } else {
+        const { error } = await window.sb.from('sections').update(payload).eq('id', editing.id);
+        if (error) toast('Could not save');
+        else { toast('Saved'); close(); }
+      }
+    } finally { setSaving(false); }
+  };
+
+  const move = async (row, delta) => {
+    const idx = rows.findIndex(r => r.id === row.id);
+    const other = rows[idx + delta];
+    if (!other) return;
+    await Promise.all([
+      window.sb.from('sections').update({ sort_order: other.sort_order }).eq('id', row.id),
+      window.sb.from('sections').update({ sort_order: row.sort_order }).eq('id', other.id),
+    ]);
+  };
+
+  const del = async (row) => {
+    if (!can('sections', 'delete')) return;
+    const n = counts[row.id] || 0;
+    if (n > 0) {
+      toast(`Cannot delete — ${n} active employee${n === 1 ? '' : 's'} in this section. Reassign first.`);
+      return;
+    }
+    if (!window.confirm(`Delete section “${row.name}”? This cannot be undone.`)) return;
+    const { error } = await window.sb.from('sections').delete().eq('id', row.id);
+    if (error) toast('Could not delete (check FK constraints).');
+    else toast('Deleted');
+  };
+
+  const readOnly = !can('sections', 'edit');
+
+  return (
+    <div>
+      <div className="stat-strip">
+        <div className="stat"><div className="k">Sections</div><div className="v">{rows.length}</div></div>
+        <div className="stat present"><div className="k">Active staff</div><div className="v">{Object.values(counts).reduce((a, b) => a + b, 0)}</div></div>
+        {rows.slice(0, 3).map(r => (
+          <div key={r.id} className="stat">
+            <div className="k">{r.name}</div>
+            <div className="v">{counts[r.id] || 0}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="toolbar">
+        {readOnly && (
+          <div style={{
+            fontSize: 12, color: 'var(--warning)',
+            background: 'var(--warningSoft)', padding: '8px 12px', borderRadius: 10,
+          }}>
+            Read-only — HR accounts cannot edit sections.
+          </div>
+        )}
+        {!readOnly && can('sections', 'create') && (
+          <button className="btn primary" onClick={startNew} style={{ marginLeft: 'auto' }}>
+            + New section
+          </button>
+        )}
+      </div>
+
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th style={{ width: 70 }}>Order</th>
+              <th style={{ width: 80 }}>ID</th>
+              <th style={{ width: 70 }}>Mono</th>
+              <th>Name</th>
+              <th>Tamil name</th>
+              <th style={{ width: 120 }}>Active staff</th>
+              {!readOnly && <th style={{ width: 240 }}>Actions</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={readOnly ? 6 : 7} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                  {loading ? 'Loading…' : 'No sections.'}
+                </td>
+              </tr>
+            )}
+            {rows.map((r, idx) => (
+              <tr key={r.id}>
+                <td className="muted">{r.sort_order}</td>
+                <td className="id">{r.id}</td>
+                <td>
+                  <div style={{
+                    width: 30, height: 30, borderRadius: 8,
+                    background: 'var(--brandSoft)', color: 'var(--brand)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontFamily: 'Fraunces, Georgia, serif',
+                    fontSize: 14, fontWeight: 600,
+                  }}>{r.monogram}</div>
+                </td>
+                <td className="name">{r.name}</td>
+                <td style={{ fontFamily: 'Inter, Noto Sans Tamil, sans-serif' }}>
+                  {r.name_ta || <span className="muted">—</span>}
+                </td>
+                <td>
+                  <span className="status-pill present">{counts[r.id] || 0} staff</span>
+                </td>
+                {!readOnly && (
+                  <td>
+                    <button className="btn" style={{ height: 28, padding: '0 8px', marginRight: 4 }}
+                      onClick={() => move(r, -1)} disabled={idx === 0}
+                      title="Move up">↑</button>
+                    <button className="btn" style={{ height: 28, padding: '0 8px', marginRight: 6 }}
+                      onClick={() => move(r, 1)} disabled={idx === rows.length - 1}
+                      title="Move down">↓</button>
+                    <button className="btn" style={{ height: 28, padding: '0 10px', marginRight: 6 }}
+                      onClick={() => startEdit(r)}>Edit</button>
+                    {can('sections', 'delete') && (
+                      <button className="btn danger" style={{ height: 28, padding: '0 10px' }}
+                        onClick={() => del(r)}>Delete</button>
+                    )}
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div style={{ marginTop: 14, fontSize: 11.5, color: 'var(--inkFaint)' }}>
+        Section IDs are used as foreign keys on the employees table — once created they cannot be renamed,
+        only the display name and monogram can be edited. Deletion is blocked while any active employees
+        still reference the section.
+      </div>
+
+      <Modal
+        open={!!editing}
+        title={editing?._new ? 'Add section' : `Edit ${editing?.name || ''}`}
+        onClose={close}
+        footer={
+          <>
+            <button className="btn" onClick={close} disabled={saving}>Cancel</button>
+            <button className="btn primary" onClick={save} disabled={saving}>
+              {saving ? 'Saving…' : editing?._new ? 'Add section' : 'Save'}
+            </button>
+          </>
+        }
+      >
+        {editing && (
+          <>
+            <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: 12 }}>
+              <div>
+                <label>Section ID</label>
+                {editing._new ? (
+                  <input
+                    value={editing.id}
+                    onChange={e => setEditing({ ...editing, id: e.target.value.toLowerCase() })}
+                    placeholder="e.g. bridal"
+                    style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }} />
+                ) : (
+                  <input value={editing.id} readOnly
+                    style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', background: 'var(--surfaceAlt)' }} />
+                )}
+              </div>
+              <div>
+                <label>Monogram (1–3 chars)</label>
+                <input
+                  value={editing.monogram}
+                  onChange={e => setEditing({ ...editing, monogram: e.target.value.toUpperCase().slice(0, 3) })}
+                  placeholder="F · C · S · D" maxLength={3}
+                  style={{ textTransform: 'uppercase', fontFamily: 'Fraunces, Georgia, serif' }} />
+              </div>
+            </div>
+            <div className="field-row">
+              <label>Display name</label>
+              <input autoFocus
+                value={editing.name}
+                onChange={e => setEditing({ ...editing, name: e.target.value })}
+                placeholder="e.g. Fancy Section" />
+            </div>
+            <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 140px', gap: 12 }}>
+              <div>
+                <label>Tamil name (optional)</label>
+                <input
+                  value={editing.name_ta || ''}
+                  onChange={e => setEditing({ ...editing, name_ta: e.target.value })}
+                  placeholder="ஃபேன்சி பிரிவு" />
+              </div>
+              <div>
+                <label>Sort order</label>
+                <input type="number"
+                  value={editing.sort_order}
+                  onChange={e => setEditing({ ...editing, sort_order: e.target.value })} />
+              </div>
+            </div>
+          </>
+        )}
+      </Modal>
+    </div>
+  );
+};
+
+// ──────────────────────────────────────────────────────────
 // Page router
 // ──────────────────────────────────────────────────────────
 const Page = ({ name }) => {
@@ -2661,6 +2927,7 @@ const Page = ({ name }) => {
   if (name === 'announcements') return <AnnouncementsPage />;
   if (name === 'tasks')         return <TasksPage />;
   if (name === 'visitors')      return <VisitorsPage />;
+  if (name === 'sections')      return <SectionsPage />;
   return (
     <div className="empty">
       <h3>Coming soon</h3>
