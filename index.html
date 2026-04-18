@@ -227,6 +227,14 @@
     });
   }
 
+  // SHA-256 helper — used by the login screen to verify passwords.
+  window.sha256 = async (text) => {
+    const enc = new TextEncoder().encode(text);
+    const buf = await crypto.subtle.digest('SHA-256', enc);
+    return Array.from(new Uint8Array(buf))
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+  };
+
   // ──────────────────────────────────────────────────────────
   // face-api.js lazy loader + helpers.
   // Models loaded from jsDelivr (cached by the browser after first hit).
@@ -1962,7 +1970,7 @@ const useLoginUsers = () => {
     if (!window.sb) return;
     const { data } = await window.sb
       .from('user_access')
-      .select('employee_id, section_ids, all_sections, employees(id, name, role, section_id, user_type, is_active)')
+      .select('employee_id, section_ids, all_sections, username, password_sha256, employees(id, name, role, section_id, user_type, is_active)')
       .order('employee_id');
     const rows = (data || [])
       .filter(u => u.employees && u.employees.is_active !== false)
@@ -1974,6 +1982,8 @@ const useLoginUsers = () => {
         user_type: u.employees.user_type,
         all_sections: u.all_sections,
         section_ids: u.section_ids || [],
+        username: u.username || null,
+        password_sha256: u.password_sha256 || null,
       }));
     setUsers(rows);
     setLoading(false);
@@ -2006,11 +2016,42 @@ const LoginScreen = () => {
 
   // Which role's picker is currently open.
   const [openRole, setOpenRole] = React.useState(null);
+  // If a user has a password, show a prompt instead of logging in immediately.
+  const [pwdFor, setPwdFor] = React.useState(null); // { role, emp }
+  const [pwdInput, setPwdInput] = React.useState('');
+  const [pwdErr, setPwdErr] = React.useState(false);
+  const [pwdBusy, setPwdBusy] = React.useState(false);
 
-  const signIn = (role, emp) => {
+  const doSignIn = (role, emp) => {
     setUser(role);
     setUserId(emp.id);
     nav.reset(ROLE_HOME[role] || 'ownerHome');
+  };
+
+  const signIn = (role, emp) => {
+    // If this user has a password set, require it before logging in.
+    if (emp.password_sha256) {
+      setPwdFor({ role, emp });
+      setPwdInput('');
+      setPwdErr(false);
+      return;
+    }
+    doSignIn(role, emp);
+  };
+
+  const submitPassword = async (e) => {
+    if (e) e.preventDefault();
+    if (!pwdFor || pwdBusy) return;
+    setPwdBusy(true);
+    setPwdErr(false);
+    try {
+      const hash = await window.sha256(pwdInput);
+      if (hash === pwdFor.emp.password_sha256) {
+        doSignIn(pwdFor.role, pwdFor.emp);
+      } else {
+        setPwdErr(true);
+      }
+    } finally { setPwdBusy(false); }
   };
 
   const handleRoleTap = (role) => {
@@ -2121,6 +2162,73 @@ const LoginScreen = () => {
           textAlign: 'center', letterSpacing: 0.3,
         }}>SEEMAATTI · ADMIN · v0.2</div>
       </div>
+
+      {/* Password sheet — shown when the picked user has a password_sha256 */}
+      {pwdFor && (
+        <div onClick={() => setPwdFor(null)} style={{
+          position: 'absolute', inset: 0,
+          background: 'rgba(11, 13, 14, 0.55)',
+          display: 'flex', alignItems: 'flex-end', zIndex: 200,
+        }}>
+          <form onSubmit={submitPassword}
+            onClick={e => e.stopPropagation()}
+            style={{
+              width: '100%', background: T_.surface,
+              borderRadius: '20px 20px 0 0',
+              padding: '22px 22px 28px',
+              maxHeight: '80%', overflowY: 'auto',
+            }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 18 }}>
+              <Avatar name={pwdFor.emp.name} size={42} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 15, fontWeight: 600, color: T_.ink }}>
+                  {pwdFor.emp.name}
+                </div>
+                <div style={{ fontSize: 12, color: T_.inkMuted, marginTop: 2 }}>
+                  {pwdFor.emp.username ? `@${pwdFor.emp.username}` : ''}
+                  {pwdFor.emp.role ? `  ·  ${pwdFor.emp.role}` : ''}
+                </div>
+              </div>
+              <button type="button" onClick={() => setPwdFor(null)} style={{
+                background: 'none', border: 'none', cursor: 'pointer',
+                color: T_.inkMuted, fontSize: 18, padding: 4,
+              }}>×</button>
+            </div>
+
+            <div style={{
+              fontSize: 11, fontWeight: 600, color: T_.inkMuted,
+              letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 6,
+            }}>Password</div>
+            <input type="password"
+              autoFocus
+              value={pwdInput}
+              onChange={e => { setPwdInput(e.target.value); setPwdErr(false); }}
+              placeholder="Enter your password"
+              style={{
+                width: '100%', padding: '14px 16px', borderRadius: 12,
+                background: T_.bg, border: `1px solid ${pwdErr ? T_.danger : T_.border}`,
+                fontSize: 15, fontFamily: 'inherit', color: T_.ink,
+                boxSizing: 'border-box', outline: 'none', letterSpacing: 2,
+              }} />
+            {pwdErr && (
+              <div style={{
+                fontSize: 12, color: T_.danger, marginTop: 8,
+              }}>Incorrect password — try again</div>
+            )}
+
+            <button type="submit" disabled={pwdBusy || !pwdInput} style={{
+              width: '100%', marginTop: 16, padding: 14, borderRadius: 12,
+              background: T_.maroon, color: '#fff', border: 'none',
+              fontSize: 14, fontWeight: 600, fontFamily: 'inherit',
+              cursor: (pwdBusy || !pwdInput) ? 'not-allowed' : 'pointer',
+              opacity: (pwdBusy || !pwdInput) ? 0.5 : 1,
+              boxShadow: '0 6px 16px -6px rgba(14, 124, 58, 0.45)',
+            }}>
+              {pwdBusy ? 'Checking…' : 'Sign in'}
+            </button>
+          </form>
+        </div>
+      )}
     </div>
   );
 };
