@@ -9,10 +9,9 @@
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="default" />
 <meta name="apple-mobile-web-app-title" content="Seemaatti" />
-<link rel="icon" type="image/png" href="assets/seemaatti-logo.png" />
-<link rel="shortcut icon" type="image/png" href="assets/seemaatti-logo.png" />
-<link rel="apple-touch-icon" href="assets/seemaatti-logo.png" />
-<link rel="apple-touch-icon" sizes="180x180" href="assets/seemaatti-logo.png" />
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png" />
+<link rel="shortcut icon" type="image/png" href="assets/favicon-32.png" />
+<link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png" />
 <link rel="manifest" href="manifest.webmanifest" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -424,8 +423,9 @@ function IOSDevice({
   }, []);
 
   if (isMobile) {
-    // On real phones, skip the mock chrome — no fake notch, status bar, or
-    // home indicator. Let the real iOS/Android UI do its job.
+    // On real phones, skip the mock chrome. Screens already include ~58-80px
+    // top padding — roughly the same as the real safe-area-inset-top — so we
+    // let them sit against the viewport edge rather than double-padding.
     return (
       <div style={{
         width: '100vw', height: '100dvh',
@@ -433,9 +433,6 @@ function IOSDevice({
         background: dark ? '#000' : '#F2F2F7',
         fontFamily: '-apple-system, system-ui, sans-serif',
         WebkitFontSmoothing: 'antialiased',
-        paddingTop: 'env(safe-area-inset-top)',
-        paddingBottom: 'env(safe-area-inset-bottom)',
-        boxSizing: 'border-box',
       }}>
         <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
           {title !== undefined && <IOSNavBar title={title} dark={dark} />}
@@ -1027,7 +1024,7 @@ const TabBar = ({ tabs, active, onChange }) => {
       backdropFilter: 'blur(20px) saturate(180%)',
       WebkitBackdropFilter: 'blur(20px) saturate(180%)',
       borderTop: `1px solid ${T.border}`,
-      padding: '10px 8px 28px',
+      padding: '10px 8px calc(env(safe-area-inset-bottom, 28px) + 10px)',
       display: 'flex', justifyContent: 'space-around',
       zIndex: 30,
     }}>
