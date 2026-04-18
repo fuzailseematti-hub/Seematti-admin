@@ -213,6 +213,7 @@
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
 <script>
   // ──────────────────────────────────────────────────────────
   // Supabase client — publishable anon key, safe to ship.
@@ -225,6 +226,57 @@
       realtime: { params: { eventsPerSecond: 5 } },
     });
   }
+
+  // ──────────────────────────────────────────────────────────
+  // face-api.js lazy loader + helpers.
+  // Models loaded from jsDelivr (cached by the browser after first hit).
+  // ──────────────────────────────────────────────────────────
+  window.FACE_MODELS_URL =
+    'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights';
+
+  window.loadFaceModels = (() => {
+    let promise = null;
+    return () => {
+      if (promise) return promise;
+      promise = (async () => {
+        // Wait for the face-api script to define the global if it hasn't yet.
+        for (let i = 0; i < 200 && !window.faceapi; i++) {
+          await new Promise(r => setTimeout(r, 25));
+        }
+        if (!window.faceapi) throw new Error('face-api.js did not load');
+        const { nets } = window.faceapi;
+        await Promise.all([
+          nets.tinyFaceDetector.loadFromUri(window.FACE_MODELS_URL),
+          nets.faceLandmark68TinyNet.loadFromUri(window.FACE_MODELS_URL),
+          nets.faceRecognitionNet.loadFromUri(window.FACE_MODELS_URL),
+        ]);
+      })();
+      return promise;
+    };
+  })();
+
+  // Detect the single largest face in a media element (video/image) and
+  // return its 128-d descriptor (Float32Array), or null if no face.
+  window.computeFaceDescriptor = async (mediaEl) => {
+    const det = await window.faceapi
+      .detectSingleFace(mediaEl, new window.faceapi.TinyFaceDetectorOptions({
+        inputSize: 320, scoreThreshold: 0.5,
+      }))
+      .withFaceLandmarks(true)
+      .withFaceDescriptor();
+    return det ? Array.from(det.descriptor) : null;
+  };
+
+  // Cosine similarity between two 128-d arrays (both must be same length).
+  window.cosineSim = (a, b) => {
+    let dot = 0, na = 0, nb = 0;
+    for (let i = 0; i < a.length; i++) {
+      dot += a[i] * b[i];
+      na  += a[i] * a[i];
+      nb  += b[i] * b[i];
+    }
+    return dot / (Math.sqrt(na) * Math.sqrt(nb));
+  };
 </script>
 </head>
 <body>
@@ -4509,8 +4561,10 @@ const EnrollJoinerScreen = () => {
   const [details, setDetails] = React.useState({
     name: '', empId: '', section: 'cotton', role: '',
   });
+  // Each shot is null | number[128] (the face descriptor).
   const [shots, setShots] = React.useState([null, null, null]);
   const [capturing, setCapturing] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
 
   const shotConfig = [
     { key: 'front', label: 'Look straight at the camera', ta: 'நேராக பாருங்கள்' },
@@ -4518,27 +4572,25 @@ const EnrollJoinerScreen = () => {
     { key: 'right', label: 'Turn head slightly right',    ta: 'வலதுபுறம் திரும்புங்கள்' },
   ];
 
-  const capture = () => {
-    if (capturing) return;
-    setCapturing(true);
-    setTimeout(() => {
-      const shotIdx = step - 1;
-      setShots(s => s.map((x, i) => i === shotIdx ? shotConfig[shotIdx].key : x));
-      setCapturing(false);
-      if (step < 3) setStep(step + 1);
-      else setStep(4);
-    }, 900);
+  // Called by the capture step once it's produced a real 128-d descriptor.
+  const handleCaptured = (descriptor) => {
+    const shotIdx = step - 1;
+    setShots(s => s.map((x, i) => i === shotIdx ? descriptor : x));
+    if (step < 3) setStep(step + 1);
+    else setStep(4);
   };
 
   const finish = async () => {
-    if (!window.sb) {
-      toast('Offline — cannot save');
-      return;
-    }
-    const empId = (details.empId || '').trim().toUpperCase() || `E${String(Math.floor(Math.random() * 900) + 400).padStart(3, '0')}`;
-    const { error } = await window.sb
-      .from('employees')
-      .insert({
+    if (saving) return;
+    if (!window.sb) { toast('Offline — cannot save'); return; }
+    if (shots.some(s => !s)) { toast('Capture all 3 photos first'); return; }
+
+    setSaving(true);
+    try {
+      const empId = (details.empId || '').trim().toUpperCase()
+        || `E${String(Math.floor(Math.random() * 900) + 400).padStart(3, '0')}`;
+
+      const { error: empErr } = await window.sb.from('employees').insert({
         id:          empId,
         name:        details.name.trim(),
         role:        details.role.trim(),
@@ -4546,12 +4598,32 @@ const EnrollJoinerScreen = () => {
         user_type:   'staff',
         joined_date: new Date().toISOString().slice(0, 10),
       });
-    if (error) {
-      toast(error.message.includes('duplicate') ? 'Employee ID already exists' : 'Could not save — try again');
-      return;
-    }
-    toast(`${details.name} enrolled · Face saved`);
-    setTimeout(() => nav.back(), 700);
+      if (empErr) {
+        toast(empErr.message.includes('duplicate')
+          ? 'Employee ID already exists'
+          : 'Could not save — try again');
+        setSaving(false);
+        return;
+      }
+
+      // Save 3 face embeddings (front/left/right)
+      const poses = ['front', 'left', 'right'];
+      const { error: faceErr } = await window.sb.from('face_embeddings').insert(
+        shots.map((desc, i) => ({
+          employee_id: empId,
+          pose:        poses[i],
+          embedding:   desc,
+        }))
+      );
+      if (faceErr) {
+        toast('Employee saved, but face enrollment failed');
+        setSaving(false);
+        return;
+      }
+
+      toast(`${details.name} enrolled · Face saved`);
+      setTimeout(() => nav.back(), 700);
+    } finally { setSaving(false); }
   };
 
   return (
@@ -4581,9 +4653,8 @@ const EnrollJoinerScreen = () => {
           <EnrollCaptureStep
             shotIdx={step - 1}
             shotConfig={shotConfig[step - 1]}
-            captured={shots[step - 1]}
-            capturing={capturing}
-            onCapture={capture}
+            captured={!!shots[step - 1]}
+            onCaptured={handleCaptured}
             onRetake={() => setShots(s => s.map((x, i) => i === step - 1 ? null : x))}
             allShots={shots}
           />
@@ -4594,6 +4665,7 @@ const EnrollJoinerScreen = () => {
             details={details} shots={shots}
             onEdit={() => setStep(0)}
             onFinish={finish}
+            saving={saving}
           />
         )}
       </div>
@@ -4685,8 +4757,73 @@ const EnrollDetailsStep = ({ details, setDetails, onNext }) => {
   );
 };
 
-const EnrollCaptureStep = ({ shotIdx, shotConfig, captured, capturing, onCapture, onRetake, allShots }) => {
+const EnrollCaptureStep = ({ shotIdx, shotConfig, captured, onCaptured, onRetake, allShots }) => {
   const T_ = window.TOKENS;
+  const videoRef  = React.useRef(null);
+  const [modelsReady, setModelsReady] = React.useState(false);
+  const [cameraErr, setCameraErr]     = React.useState(null);
+  const [busy, setBusy]               = React.useState(false);
+  const [flash, setFlash]             = React.useState(false);
+  const [hint, setHint]               = React.useState('');
+
+  // Load models + open webcam once (front camera preferred on phones).
+  React.useEffect(() => {
+    let streamRef = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        setHint('Loading face models…');
+        await window.loadFaceModels();
+        if (cancelled) return;
+        setModelsReady(true);
+        setHint('Opening camera…');
+        streamRef = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+          audio: false,
+        });
+        if (cancelled) { streamRef.getTracks().forEach(t => t.stop()); return; }
+        if (videoRef.current) {
+          videoRef.current.srcObject = streamRef;
+          await videoRef.current.play().catch(() => {});
+        }
+        setHint('');
+      } catch (err) {
+        console.error(err);
+        setCameraErr(
+          err.name === 'NotAllowedError'
+            ? 'Camera permission denied. Enable it in Safari settings and retry.'
+            : 'Could not open the camera on this device.'
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (streamRef) streamRef.getTracks().forEach(t => t.stop());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const doCapture = async () => {
+    if (!modelsReady || busy) return;
+    setBusy(true);
+    setHint('Detecting face…');
+    try {
+      const desc = await window.computeFaceDescriptor(videoRef.current);
+      if (!desc) {
+        setHint('No face detected — move closer to the camera');
+        setBusy(false);
+        return;
+      }
+      setFlash(true);
+      setTimeout(() => setFlash(false), 350);
+      setHint('');
+      onCaptured(desc);
+    } catch (err) {
+      console.error(err);
+      setHint('Capture failed — try again');
+    } finally { setBusy(false); }
+  };
+
   return (
     <div>
       <div style={{
@@ -4702,31 +4839,30 @@ const EnrollCaptureStep = ({ shotIdx, shotConfig, captured, capturing, onCapture
         background: '#0B0D0E', borderRadius: 18, overflow: 'hidden',
         border: `1px solid ${T_.border}`,
       }}>
-        <div style={{
-          position: 'absolute', top: '50%', left: '50%',
-          transform: `translate(-50%, -50%) ${
-            shotConfig.key === 'left' ? 'rotateY(15deg)' :
-            shotConfig.key === 'right' ? 'rotateY(-15deg)' : ''
-          }`,
-          opacity: captured ? 0.6 : 0.3, transition: 'opacity 200ms',
-        }}>
-          <svg width="160" height="200" viewBox="0 0 160 200" fill="none">
-            <ellipse cx="80" cy="75" rx="40" ry="50" stroke={captured ? '#5BC47E' : '#fff'} strokeWidth="1.5" />
-            <path d="M30 170 Q80 135 130 170 L130 200 L30 200 Z" stroke={captured ? '#5BC47E' : '#fff'} strokeWidth="1.5" fill="none" />
-          </svg>
-        </div>
+        {/* Live webcam feed (mirrored so the preview feels natural on a phone) */}
+        <video ref={videoRef} autoPlay playsInline muted
+          style={{
+            position: 'absolute', inset: 0,
+            width: '100%', height: '100%', objectFit: 'cover',
+            transform: 'scaleX(-1)',
+            opacity: captured ? 0.4 : 1,
+            transition: 'opacity 200ms',
+          }}
+        />
 
+        {/* Oval framing guide */}
         <div style={{
           position: 'absolute', top: '50%', left: '50%',
           transform: 'translate(-50%, -50%)',
           width: '60%', height: '70%', borderRadius: '50%',
-          border: `2px dashed ${captured ? '#5BC47E' : 'rgba(255,255,255,0.3)'}`,
+          border: `2px dashed ${captured ? '#5BC47E' : 'rgba(255,255,255,0.45)'}`,
           transition: 'border-color 200ms',
+          pointerEvents: 'none',
         }} />
 
-        {capturing && (
+        {flash && (
           <div style={{
-            position: 'absolute', inset: 0, background: 'rgba(255,255,255,0.3)',
+            position: 'absolute', inset: 0, background: 'rgba(255,255,255,0.55)',
             animation: 'flash 400ms',
           }} />
         )}
@@ -4735,10 +4871,21 @@ const EnrollCaptureStep = ({ shotIdx, shotConfig, captured, capturing, onCapture
           <div style={{
             position: 'absolute', top: 12, right: 12,
             width: 32, height: 32, borderRadius: '50%',
-            background: 'rgba(14, 124, 58, 0.2)', border: '1.5px solid #5BC47E',
+            background: 'rgba(14, 124, 58, 0.35)', border: '1.5px solid #5BC47E',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
           }}>
             <Icon name="check" size={16} color="#5BC47E" />
+          </div>
+        )}
+
+        {(hint || cameraErr) && (
+          <div style={{
+            position: 'absolute', left: 12, bottom: 12, right: 12,
+            background: 'rgba(11, 13, 14, 0.7)', color: '#fff',
+            padding: '8px 12px', borderRadius: 10, fontSize: 12,
+            backdropFilter: 'blur(6px)', textAlign: 'center',
+          }}>
+            {cameraErr || hint}
           </div>
         )}
 
@@ -4759,7 +4906,7 @@ const EnrollCaptureStep = ({ shotIdx, shotConfig, captured, capturing, onCapture
             {allShots[i] ? (
               <>
                 <svg width="28" height="36" viewBox="0 0 28 36" fill="none">
-                  <ellipse cx="14" cy="14" rx="8" ry="10" stroke="rgba(255,255,255,0.5)" strokeWidth="1.2" />
+                  <ellipse cx="14" cy="14" rx="8" ry="10" stroke="rgba(255,255,255,0.6)" strokeWidth="1.2" />
                 </svg>
                 <div style={{
                   position: 'absolute', bottom: 4, right: 4,
@@ -4786,22 +4933,22 @@ const EnrollCaptureStep = ({ shotIdx, shotConfig, captured, capturing, onCapture
           cursor: 'pointer',
         }}>Retake this photo</button>
       ) : (
-        <button onClick={onCapture} disabled={capturing} style={{
+        <button onClick={doCapture} disabled={busy || !modelsReady || !!cameraErr} style={{
           width: '100%', padding: '14px',
           background: T_.maroon, color: '#fff', border: 'none',
           borderRadius: 14, fontSize: 14, fontWeight: 600,
           cursor: 'pointer', fontFamily: 'inherit',
           boxShadow: '0 6px 16px -6px rgba(139, 35, 35, 0.45)',
-          opacity: capturing ? 0.6 : 1,
+          opacity: (busy || !modelsReady || !!cameraErr) ? 0.5 : 1,
         }}>
-          {capturing ? 'Capturing…' : 'Capture photo'}
+          {busy ? 'Detecting…' : (!modelsReady ? 'Loading models…' : 'Capture photo')}
         </button>
       )}
     </div>
   );
 };
 
-const EnrollReviewStep = ({ details, shots, onEdit, onFinish }) => {
+const EnrollReviewStep = ({ details, shots, onEdit, onFinish, saving }) => {
   const T_ = window.TOKENS;
   return (
     <div>
@@ -4867,14 +5014,15 @@ const EnrollReviewStep = ({ details, shots, onEdit, onFinish }) => {
         </span>
       </div>
 
-      <button onClick={onFinish} style={{
+      <button onClick={onFinish} disabled={saving} style={{
         width: '100%', padding: '14px',
         background: T_.maroon, color: '#fff', border: 'none',
         borderRadius: 14, fontSize: 14, fontWeight: 600,
-        cursor: 'pointer', fontFamily: 'inherit',
+        cursor: saving ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
         boxShadow: '0 6px 16px -6px rgba(139, 35, 35, 0.45)',
+        opacity: saving ? 0.6 : 1,
       }}>
-        Save &amp; enrol
+        {saving ? 'Saving…' : 'Save & enrol'}
       </button>
     </div>
   );
