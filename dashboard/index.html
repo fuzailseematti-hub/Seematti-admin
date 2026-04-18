@@ -2918,6 +2918,475 @@ const SectionsPage = () => {
 };
 
 // ──────────────────────────────────────────────────────────
+// Payslips management — Owner-only writes, HR read-only.
+// ──────────────────────────────────────────────────────────
+const firstOfMonth = (d) => fmtDateISO(new Date(d.getFullYear(), d.getMonth(), 1));
+
+const rupees = (n) => {
+  if (n == null) return '—';
+  return '₹' + Number(n).toLocaleString('en-IN');
+};
+
+const PayslipsPage = () => {
+  const toast = useToast();
+  const { can } = useContext(AppCtx);
+
+  const [month, setMonth] = useState(() => firstOfMonth(new Date()));
+  const [search, setSearch] = useState('');
+  const [sectionFilter, setSectionFilter] = useState('all');
+
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const { rows: employees } = useEmployees();
+
+  const [editing, setEditing] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
+
+  const empById = useMemo(() => {
+    const m = {};
+    employees.forEach(e => { m[e.id] = e; });
+    return m;
+  }, [employees]);
+  const staffList = useMemo(() =>
+    employees.filter(e => e.user_type === 'staff' && e.is_active)
+      .sort((a, b) => a.name.localeCompare(b.name))
+  , [employees]);
+
+  const fetchAll = useCallback(async () => {
+    if (!window.sb) return;
+    const { data } = await window.sb
+      .from('payslips')
+      .select('*')
+      .eq('month', month)
+      .order('employee_id');
+    setRows(data || []);
+    setLoading(false);
+  }, [month]);
+
+  useEffect(() => {
+    if (!window.sb) return;
+    setLoading(true);
+    fetchAll();
+    const ch = window.sb.channel(`dash-payslips-${month}`)
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'payslips', filter: `month=eq.${month}` },
+        () => fetchAll())
+      .subscribe();
+    return () => { window.sb.removeChannel(ch); };
+  }, [fetchAll, month]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return rows.filter(r => {
+      const emp = empById[r.employee_id];
+      if (sectionFilter !== 'all' && emp?.section_id !== sectionFilter) return false;
+      if (q) {
+        const name = (emp?.name || '').toLowerCase();
+        if (!name.includes(q) && !r.employee_id.toLowerCase().includes(q)) return false;
+      }
+      return true;
+    });
+  }, [rows, empById, sectionFilter, search]);
+
+  const totals = useMemo(() => {
+    const gross = filtered.reduce((s, r) => s + (r.gross || 0), 0);
+    const net   = filtered.reduce((s, r) => s + (r.net   || 0), 0);
+    const ded   = filtered.reduce((s, r) => s + (r.deductions || 0), 0);
+    const paid  = filtered.filter(r => r.paid_at).length;
+    return { gross, net, ded, paid };
+  }, [filtered]);
+
+  // Edit helpers — earnings / deduct_items are arrays of { label, amount }
+  const sumItems = (items) => (items || []).reduce((s, i) => s + (Number(i.amount) || 0), 0);
+  const recalc = (draft) => {
+    const g = sumItems(draft.earnings);
+    const d = sumItems(draft.deduct_items);
+    return { ...draft, gross: g, deductions: d, net: g - d };
+  };
+
+  const startNew = (employeeId) => {
+    setEditing(recalc({
+      id: null,
+      employee_id: employeeId || '',
+      month,
+      earnings:     [{ label: 'Basic',            amount: 15000 }, { label: 'HRA', amount: 4500 }],
+      deduct_items: [{ label: 'EPF',              amount: 1800  }, { label: 'Professional tax', amount: 50 }],
+      paid_at: null,
+      bank_last4: '',
+      _new: true,
+    }));
+  };
+  const startEdit = (row) => setEditing({
+    ...row,
+    earnings:     Array.isArray(row.earnings)     ? row.earnings     : [],
+    deduct_items: Array.isArray(row.deduct_items) ? row.deduct_items : [],
+    _new: false,
+  });
+  const close = () => setEditing(null);
+
+  const setItem = (field, idx, key, val) => {
+    setEditing(cur => {
+      const items = [...cur[field]];
+      items[idx] = { ...items[idx], [key]: key === 'amount' ? Number(val) || 0 : val };
+      return recalc({ ...cur, [field]: items });
+    });
+  };
+  const addItem = (field) =>
+    setEditing(cur => recalc({ ...cur, [field]: [...cur[field], { label: '', amount: 0 }] }));
+  const removeItem = (field, idx) =>
+    setEditing(cur => recalc({ ...cur, [field]: cur[field].filter((_, i) => i !== idx) }));
+
+  const save = async () => {
+    if (!editing || saving) return;
+    if (!editing.employee_id) { toast('Pick an employee'); return; }
+    setSaving(true);
+    try {
+      const payload = {
+        employee_id: editing.employee_id,
+        month: editing.month,
+        earnings: editing.earnings.filter(i => i.label && (i.amount > 0)),
+        deduct_items: editing.deduct_items.filter(i => i.label && (i.amount >= 0)),
+        gross: editing.gross,
+        deductions: editing.deductions,
+        net: editing.net,
+        paid_at: editing.paid_at || null,
+        bank_last4: (editing.bank_last4 || '').trim() || null,
+      };
+      if (editing._new) {
+        const { error } = await window.sb.from('payslips').insert(payload);
+        if (error) {
+          toast(error.message.includes('duplicate')
+            ? 'Payslip already exists for this employee this month'
+            : 'Could not save');
+        } else { toast('Payslip created'); close(); }
+      } else {
+        const { error } = await window.sb.from('payslips').update(payload).eq('id', editing.id);
+        if (error) toast('Could not save');
+        else { toast('Saved'); close(); }
+      }
+    } finally { setSaving(false); }
+  };
+
+  const del = async (row) => {
+    if (!can('payslips', 'delete')) return;
+    if (!window.confirm('Delete this payslip?')) return;
+    await window.sb.from('payslips').delete().eq('id', row.id);
+    toast('Deleted');
+  };
+
+  const markPaid = async (row) => {
+    if (!can('payslips', 'edit')) return;
+    await window.sb.from('payslips')
+      .update({ paid_at: row.paid_at ? null : fmtDateISO(new Date()) })
+      .eq('id', row.id);
+  };
+
+  // Bulk generate: one default payslip per active staff who doesn't have one this month
+  const bulkGenerate = async () => {
+    if (!can('payslips', 'create') || bulkBusy) return;
+    const missing = staffList.filter(e => !rows.find(r => r.employee_id === e.id));
+    if (!missing.length) { toast('All active staff already have payslips for this month'); return; }
+    if (!window.confirm(`Generate default payslips for ${missing.length} staff?\n\nEach gets: Basic 15,000 + HRA 4,500 − EPF 1,800 − PT 50 = Net 17,650.\nYou can edit each one after.`)) return;
+    setBulkBusy(true);
+    try {
+      const earnings = [
+        { label: 'Basic', amount: 15000 },
+        { label: 'HRA',   amount: 4500 },
+      ];
+      const deduct_items = [
+        { label: 'EPF',              amount: 1800 },
+        { label: 'Professional tax', amount: 50 },
+      ];
+      const gross = 19500;
+      const ded   = 1850;
+      const net   = gross - ded;
+      const payload = missing.map(e => ({
+        employee_id: e.id,
+        month,
+        earnings,
+        deduct_items,
+        gross, deductions: ded, net,
+      }));
+      const { error } = await window.sb.from('payslips').insert(payload);
+      if (error) toast('Bulk generate failed (see console)');
+      else toast(`Generated ${missing.length} payslips`);
+    } finally { setBulkBusy(false); }
+  };
+
+  const readOnly = !can('payslips', 'edit');
+  const monthLabel = new Date(month + 'T00:00:00').toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+  const coverage = staffList.length ? Math.round((rows.length / staffList.length) * 100) : 0;
+
+  return (
+    <div>
+      <div className="stat-strip">
+        <div className="stat"><div className="k">Payslips</div><div className="v">{filtered.length}</div></div>
+        <div className="stat present"><div className="k">Paid</div><div className="v">{totals.paid}</div></div>
+        <div className="stat"><div className="k">Gross total</div><div className="v" style={{ fontSize: 18 }}>{rupees(totals.gross)}</div></div>
+        <div className="stat absent"><div className="k">Deductions</div><div className="v" style={{ fontSize: 18 }}>{rupees(totals.ded)}</div></div>
+        <div className="stat leave"><div className="k">Net total</div><div className="v" style={{ fontSize: 18 }}>{rupees(totals.net)}</div></div>
+      </div>
+
+      <div className="toolbar">
+        <input type="month" value={month.slice(0, 7)}
+          onChange={e => setMonth(e.target.value + '-01')} />
+
+        <div className="seg">
+          {[{ id: 'all', label: 'All sections' }, ...Object.entries(SECTION_META).map(([k, v]) => ({ id: k, label: v.label }))]
+            .map(s => (
+              <button key={s.id}
+                className={sectionFilter === s.id ? 'active' : ''}
+                onClick={() => setSectionFilter(s.id)}>
+                {s.label}
+              </button>
+            ))}
+        </div>
+
+        <input type="search" placeholder="Search name or ID…"
+          value={search} onChange={e => setSearch(e.target.value)} />
+
+        <div style={{ fontSize: 12, color: 'var(--inkMuted)' }}>
+          Coverage: {rows.length} / {staffList.length} staff ({coverage}%)
+        </div>
+
+        {readOnly && (
+          <div style={{
+            fontSize: 12, color: 'var(--warning)',
+            background: 'var(--warningSoft)', padding: '8px 12px', borderRadius: 10,
+          }}>
+            Read-only — only Owner can edit payslips.
+          </div>
+        )}
+
+        {!readOnly && (
+          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+            <button className="btn" onClick={bulkGenerate} disabled={bulkBusy}
+              title="Create default payslips for all staff who don't have one this month">
+              {bulkBusy ? 'Generating…' : 'Bulk generate'}
+            </button>
+            {can('payslips', 'create') && (
+              <button className="btn primary" onClick={() => startNew('')}>+ New payslip</button>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th style={{ width: 80 }}>ID</th>
+              <th>Employee</th>
+              <th style={{ width: 110 }}>Section</th>
+              <th style={{ width: 120 }}>Gross</th>
+              <th style={{ width: 120 }}>Deductions</th>
+              <th style={{ width: 120 }}>Net</th>
+              <th style={{ width: 120 }}>Paid</th>
+              {!readOnly && <th style={{ width: 240 }}>Actions</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 && (
+              <tr>
+                <td colSpan={readOnly ? 7 : 8} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                  {loading ? 'Loading…' : 'No payslips for this month.'}
+                </td>
+              </tr>
+            )}
+            {filtered.map(r => {
+              const emp = empById[r.employee_id];
+              return (
+                <tr key={r.id}>
+                  <td className="id">{r.employee_id}</td>
+                  <td className="name">
+                    {emp?.name || r.employee_id}
+                    {emp?.role && (
+                      <div style={{ fontSize: 11, color: 'var(--inkMuted)', fontWeight: 400, marginTop: 2 }}>
+                        {emp.role}
+                      </div>
+                    )}
+                  </td>
+                  <td>{SECTION_META[emp?.section_id]?.label || <span className="muted">—</span>}</td>
+                  <td className="muted" style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{rupees(r.gross)}</td>
+                  <td className="muted" style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', color: 'var(--danger)' }}>−{rupees(r.deductions)}</td>
+                  <td style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontWeight: 600 }}>{rupees(r.net)}</td>
+                  <td>
+                    {r.paid_at
+                      ? <span className="status-pill present">{fmtDate(r.paid_at)}</span>
+                      : <span className="status-pill unmarked">Unpaid</span>}
+                  </td>
+                  {!readOnly && (
+                    <td>
+                      <button className="btn" style={{ height: 28, padding: '0 10px', marginRight: 6 }}
+                        onClick={() => markPaid(r)}>
+                        {r.paid_at ? 'Unpay' : 'Mark paid'}
+                      </button>
+                      <button className="btn" style={{ height: 28, padding: '0 10px', marginRight: 6 }}
+                        onClick={() => startEdit(r)}>Edit</button>
+                      {can('payslips', 'delete') && (
+                        <button className="btn danger" style={{ height: 28, padding: '0 10px' }}
+                          onClick={() => del(r)}>Delete</button>
+                      )}
+                    </td>
+                  )}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <div style={{ marginTop: 10, fontSize: 11.5, color: 'var(--inkFaint)' }}>
+        {monthLabel} · {staffList.length} active staff
+        {!readOnly && ' · Bulk generate creates defaults; always review and edit before marking paid.'}
+      </div>
+
+      <Modal
+        open={!!editing}
+        title={editing?._new ? 'New payslip' : `Payslip · ${empById[editing?.employee_id]?.name || editing?.employee_id}`}
+        onClose={close}
+        footer={
+          <>
+            <button className="btn" onClick={close} disabled={saving}>Cancel</button>
+            <button className="btn primary" onClick={save} disabled={saving}>
+              {saving ? 'Saving…' : editing?._new ? 'Create payslip' : 'Save'}
+            </button>
+          </>
+        }
+      >
+        {editing && (
+          <>
+            <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 140px', gap: 12 }}>
+              <div>
+                <label>Employee</label>
+                {editing._new ? (
+                  <select value={editing.employee_id}
+                    onChange={e => setEditing({ ...editing, employee_id: e.target.value })}>
+                    <option value="">— select —</option>
+                    {staffList.map(e => (
+                      <option key={e.id} value={e.id}>{e.name} · {e.id}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input readOnly
+                    value={`${empById[editing.employee_id]?.name || editing.employee_id} · ${editing.employee_id}`}
+                    style={{ background: 'var(--surfaceAlt)' }} />
+                )}
+              </div>
+              <div>
+                <label>Month</label>
+                <input type="month" value={editing.month.slice(0, 7)}
+                  onChange={e => setEditing({ ...editing, month: e.target.value + '-01' })} />
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginBottom: 14 }}>
+              <ItemsEditor
+                title="Earnings"
+                items={editing.earnings}
+                onChange={(idx, key, val) => setItem('earnings', idx, key, val)}
+                onAdd={() => addItem('earnings')}
+                onRemove={(idx) => removeItem('earnings', idx)}
+                total={editing.gross}
+                totalColor="var(--ink)"
+              />
+              <ItemsEditor
+                title="Deductions"
+                items={editing.deduct_items}
+                onChange={(idx, key, val) => setItem('deduct_items', idx, key, val)}
+                onAdd={() => addItem('deduct_items')}
+                onRemove={(idx) => removeItem('deduct_items', idx)}
+                total={editing.deductions}
+                totalColor="var(--danger)"
+              />
+            </div>
+
+            <div style={{
+              background: 'var(--brandSoft)', borderRadius: 12, padding: 14,
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              marginBottom: 16,
+            }}>
+              <div style={{ fontSize: 12, color: 'var(--brand)', fontWeight: 600, letterSpacing: 0.5, textTransform: 'uppercase' }}>
+                Net pay
+              </div>
+              <div style={{
+                fontFamily: 'Fraunces, Georgia, serif', fontSize: 26,
+                fontWeight: 600, letterSpacing: -0.5, color: 'var(--brand)',
+              }}>
+                {rupees(editing.net)}
+              </div>
+            </div>
+
+            <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
+                <label>Paid on (optional)</label>
+                <input type="date"
+                  value={editing.paid_at || ''}
+                  onChange={e => setEditing({ ...editing, paid_at: e.target.value || null })} />
+              </div>
+              <div>
+                <label>Bank last 4 digits</label>
+                <input
+                  value={editing.bank_last4 || ''}
+                  onChange={e => setEditing({ ...editing, bank_last4: e.target.value.replace(/\D/g, '').slice(0, 4) })}
+                  placeholder="4521"
+                  style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }} />
+              </div>
+            </div>
+          </>
+        )}
+      </Modal>
+    </div>
+  );
+};
+
+const ItemsEditor = ({ title, items, onChange, onAdd, onRemove, total, totalColor }) => (
+  <div>
+    <label style={{ marginBottom: 8 }}>{title}</label>
+    <div style={{
+      border: '1px solid var(--border)', borderRadius: 10,
+      background: 'var(--bg)', padding: 10,
+    }}>
+      {(items || []).map((it, i) => (
+        <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 110px 32px', gap: 6, marginBottom: 6 }}>
+          <input
+            value={it.label}
+            onChange={e => onChange(i, 'label', e.target.value)}
+            placeholder="Label" />
+          <input type="number"
+            value={it.amount}
+            onChange={e => onChange(i, 'amount', e.target.value)}
+            placeholder="0"
+            style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', textAlign: 'right' }} />
+          <button
+            onClick={() => onRemove(i)}
+            className="btn"
+            style={{ height: 38, width: 32, padding: 0, color: 'var(--danger)' }}
+            title="Remove">×</button>
+        </div>
+      ))}
+      <button className="btn" onClick={onAdd} style={{ width: '100%', height: 32, marginTop: 4 }}>
+        + Add line
+      </button>
+      <div style={{
+        display: 'flex', justifyContent: 'space-between',
+        paddingTop: 10, marginTop: 10, borderTop: '1px solid var(--border)',
+      }}>
+        <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.4, textTransform: 'uppercase', color: 'var(--inkMuted)' }}>
+          Total
+        </span>
+        <span style={{
+          fontFamily: 'JetBrains Mono, Menlo, monospace',
+          fontWeight: 700, color: totalColor,
+        }}>{rupees(total)}</span>
+      </div>
+    </div>
+  </div>
+);
+
+// ──────────────────────────────────────────────────────────
 // Page router
 // ──────────────────────────────────────────────────────────
 const Page = ({ name }) => {
@@ -2928,6 +3397,7 @@ const Page = ({ name }) => {
   if (name === 'tasks')         return <TasksPage />;
   if (name === 'visitors')      return <VisitorsPage />;
   if (name === 'sections')      return <SectionsPage />;
+  if (name === 'payslips')      return <PayslipsPage />;
   return (
     <div className="empty">
       <h3>Coming soon</h3>
