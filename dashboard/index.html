@@ -3777,7 +3777,7 @@ const KioskSettingsPage = () => {
   const toast = useToast();
   const { can } = useContext(AppCtx);
 
-  const [settings, setSettings] = useState({ late_cutoff: '10:00', match_threshold: '0.55' });
+  const [settings, setSettings] = useState({ late_cutoff: '10:00', match_threshold: '0.55', kiosk_pin: '0000' });
   const [loading, setLoading] = useState(true);
   const [savingKey, setSavingKey] = useState(null);
 
@@ -3787,12 +3787,12 @@ const KioskSettingsPage = () => {
   const fetchAll = useCallback(async () => {
     if (!window.sb) return;
     const [setRes, staffRes, facesRes] = await Promise.all([
-      window.sb.from('settings').select('*').in('key', ['late_cutoff', 'match_threshold']),
+      window.sb.from('settings').select('*').in('key', ['late_cutoff', 'match_threshold', 'kiosk_pin']),
       window.sb.from('employees').select('id, name, role, section_id')
         .eq('user_type', 'staff').eq('is_active', true),
       window.sb.from('face_embeddings').select('employee_id'),
     ]);
-    const s = { late_cutoff: '10:00', match_threshold: '0.55' };
+    const s = { late_cutoff: '10:00', match_threshold: '0.55', kiosk_pin: '0000' };
     (setRes.data || []).forEach(r => { s[r.key] = r.value; });
     setSettings(s);
 
@@ -3912,6 +3912,40 @@ const KioskSettingsPage = () => {
           <div style={{ marginTop: 10, fontSize: 11.5, color: 'var(--inkFaint)' }}>
             0.40 lenient · 0.55 balanced (default) · 0.65 strict
           </div>
+        </div>
+      </div>
+
+      {/* Kiosk PIN */}
+      <div style={{
+        background: 'var(--surface)', border: '1px solid var(--border)',
+        borderRadius: 16, padding: 24, marginBottom: 16,
+      }}>
+        <div style={{
+          fontFamily: 'Fraunces, Georgia, serif', fontSize: 20, fontWeight: 500,
+          letterSpacing: -0.3, marginBottom: 4,
+        }}>Kiosk PIN</div>
+        <div style={{ fontSize: 13, color: 'var(--inkMuted)', marginBottom: 16 }}>
+          Needed to <strong>launch</strong> the kiosk from the app's login screen and to <strong>exit</strong> kiosk mode.
+          Keep it short so staff can remember it, but not something easy to guess.
+        </div>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+          <input type="text" inputMode="numeric"
+            value={settings.kiosk_pin}
+            disabled={readOnly}
+            onChange={e => setSettings(s => ({ ...s, kiosk_pin: e.target.value }))}
+            placeholder="0000"
+            maxLength={12}
+            style={{
+              fontFamily: 'JetBrains Mono, Menlo, monospace',
+              fontSize: 18, height: 44, flex: 1, letterSpacing: 4, textAlign: 'center',
+            }} />
+          {!readOnly && (
+            <button className="btn primary"
+              onClick={() => writeSetting('kiosk_pin', (settings.kiosk_pin || '').trim() || '0000')}
+              disabled={savingKey === 'kiosk_pin'}>
+              {savingKey === 'kiosk_pin' ? 'Saving…' : 'Save'}
+            </button>
+          )}
         </div>
       </div>
 
