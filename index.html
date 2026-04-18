@@ -1944,8 +1944,8 @@ Object.assign(window, {
 const ROLE_HOME = {
   owner:      'ownerHome',
   hr:         'hrHome',
-  manager:    'hrHome',    // managers use the HR-style home for now
-  supervisor: 'hrHome',    // supervisors too
+  manager:    'managerHome',
+  supervisor: 'managerHome',
 };
 
 const ROLE_UI = {
@@ -4325,6 +4325,343 @@ const WeekStat = ({ label, value, tone }) => {
 window.HRHomeScreen = HRHomeScreen;
 
 
+// ─────────────────────────────────────────────────────────────
+// Manager / Supervisor Home — focused on what they actually do:
+// see their sections' attendance, finish today's checklist, finish
+// today's tasks. No HR tools, no approval flows, no directory.
+// ─────────────────────────────────────────────────────────────
+const ManagerHomeScreen = () => {
+  const { nav, user, userId, userAccess, setLang, lang } = useApp();
+  const T_ = window.TOKENS;
+  const M = window.MOCK;
+
+  const hasAll  = !!(userAccess && userAccess.all_sections);
+  const allowed = hasAll ? null : (userAccess?.section_ids || []);
+
+  // Attendance + sections
+  const live = window.useLiveAttendance ? window.useLiveAttendance() : { attendance: null, sections: null };
+  const scopedSections = (live.sections || []).filter(s => hasAll || allowed.includes(s.id));
+  const totals = scopedSections.reduce((acc, s) => ({
+    total:   acc.total   + (s.staff   || 0),
+    present: acc.present + (s.present || 0),
+    late:    acc.late    + (s.late    || 0),
+    absent:  acc.absent  + (s.absent  || 0),
+    onLeave: acc.onLeave + (s.onLeave || 0),
+  }), { total: 0, present: 0, late: 0, absent: 0, onLeave: 0 });
+  const marked = totals.present + totals.late + totals.absent + totals.onLeave;
+  const unmarked = Math.max(0, totals.total - marked);
+  const pct = totals.total ? Math.round((totals.present / totals.total) * 100) : 0;
+
+  // Today's checklist progress (scoped to the user's sections + company-wide)
+  const today = new Date().toISOString().slice(0, 10);
+  const [chk, setChk]   = React.useState({ total: 0, done: 0 });
+  const [tsk, setTsk]   = React.useState({ total: 0, done: 0 });
+
+  React.useEffect(() => {
+    if (!window.sb) return;
+    let cancelled = false;
+    const refresh = async () => {
+      const { data: cData } = await window.sb.from('tasks')
+        .select('id, done, section_id')
+        .in('scope', ['checklist', 'owner'])
+        .eq('due_date', today);
+      const checklistRows = (cData || []).filter(t =>
+        hasAll || t.section_id === null || (allowed || []).includes(t.section_id)
+      );
+      if (!cancelled) setChk({
+        total: checklistRows.length,
+        done:  checklistRows.filter(r => r.done).length,
+      });
+
+      if (userId) {
+        const { data: tData } = await window.sb.from('tasks')
+          .select('id, done')
+          .in('scope', ['personal', 'staff'])
+          .eq('due_date', today)
+          .eq('assignee_id', userId);
+        if (!cancelled) setTsk({
+          total: (tData || []).length,
+          done:  (tData || []).filter(r => r.done).length,
+        });
+      }
+    };
+    refresh();
+    const ch = window.sb.channel('mgr-home-tasks')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'tasks', filter: `due_date=eq.${today}` },
+        () => refresh())
+      .subscribe();
+    return () => { cancelled = true; window.sb.removeChannel(ch); };
+  }, [today, userId, hasAll, allowed ? allowed.join(',') : '']);
+
+  // Latest announcements (always global)
+  const { items: anns } = window.useLiveAnnouncements
+    ? window.useLiveAnnouncements()
+    : { items: [] };
+  const notices = anns.slice(0, 2);
+
+  // Greeting
+  const { employee: me } = window.useLiveStaffEmployee
+    ? window.useLiveStaffEmployee(userId || 'E001')
+    : { employee: null };
+  const firstName = (me?.name || 'there').split(' ')[0];
+  const roleLabel = user === 'manager' ? 'Manager' : 'Supervisor';
+  const scopeChip = hasAll
+    ? 'All sections'
+    : (allowed && allowed.length
+        ? allowed.map(id => SECTION_LABEL[id] || id).join(' · ')
+        : 'No sections assigned');
+  const hour = new Date().getHours();
+  const greet = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+
+  return (
+    <div style={{ background: T_.bg, paddingBottom: 90 }}>
+      {/* Header */}
+      <div style={{ padding: 'var(--screen-top) 20px 0' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <img src={LOGO_SRC} alt="Seemaatti" style={{ height: 30, width: 'auto', display: 'block' }} />
+            <div>
+              <div style={{ fontSize: 10, color: T_.inkFaint, lineHeight: 1, letterSpacing: 0.6, textTransform: 'uppercase', fontWeight: 700 }}>
+                {roleLabel}
+              </div>
+              <div style={{ fontSize: 11, color: T_.inkMuted, marginTop: 2 }}>
+                {new Date().toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}
+              </div>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <IconBtn name="bell" onClick={() => nav.go('announcements')} badge={null} />
+          </div>
+        </div>
+
+        {/* Greeting */}
+        <div style={{
+          fontFamily: 'Fraunces, Georgia, serif',
+          fontSize: 26, fontWeight: 500, color: T_.ink,
+          letterSpacing: -0.5, lineHeight: 1.2,
+        }}>
+          {greet}, <span style={{ color: T_.maroon }}>{firstName}</span>.
+        </div>
+        <div style={{ fontSize: 12.5, color: T_.inkMuted, marginTop: 6 }}>
+          {scopeChip}
+        </div>
+      </div>
+
+      {/* Today's attendance snapshot */}
+      <div style={{ padding: '18px 16px 0' }}>
+        <div style={{
+          background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 18,
+          padding: 18,
+        }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14,
+          }}>
+            <div>
+              <div style={{
+                fontSize: 10.5, fontWeight: 700, letterSpacing: 0.6,
+                textTransform: 'uppercase', color: T_.inkMuted,
+              }}>My team today</div>
+              <div style={{
+                fontFamily: 'Fraunces, Georgia, serif',
+                fontSize: 28, fontWeight: 600, color: T_.ink, letterSpacing: -0.6,
+                marginTop: 2, lineHeight: 1,
+              }}>
+                {totals.present}<span style={{ color: T_.inkMuted, fontSize: 16 }}> / {totals.total}</span>
+              </div>
+              <div style={{ fontSize: 12, color: T_.inkMuted, marginTop: 4 }}>
+                {pct}% present
+              </div>
+            </div>
+            <AttendanceRing pct={pct} size={68} />
+          </div>
+
+          <div style={{
+            display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8,
+            padding: '12px 0 0', borderTop: `1px solid ${T_.borderSoft}`,
+          }}>
+            <ManagerStat label="Late"     value={totals.late}    color={T_.warning} />
+            <ManagerStat label="Absent"   value={totals.absent}  color={T_.danger} />
+            <ManagerStat label="Leave"    value={totals.onLeave} color={T_.info} />
+            <ManagerStat label="Unmarked" value={unmarked}       color={T_.inkMuted} />
+          </div>
+
+          {/* Per-section breakdown */}
+          {scopedSections.length > 1 && (
+            <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${T_.borderSoft}` }}>
+              {scopedSections.map(s => (
+                <div key={s.id} style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  padding: '6px 0', fontSize: 12.5,
+                }}>
+                  <div style={{ color: T_.ink, fontWeight: 500 }}>{SECTION_LABEL[s.id] || s.id}</div>
+                  <div style={{ color: T_.inkMuted }}>
+                    {s.present} / {s.staff}
+                    {' '}
+                    <span style={{
+                      fontSize: 11, fontWeight: 700,
+                      color: (s.staff && (s.present / s.staff) >= 0.9) ? T_.success
+                           : (s.staff && (s.present / s.staff) >= 0.85) ? T_.warning : T_.danger,
+                    }}>
+                      · {s.staff ? Math.round((s.present / s.staff) * 100) : 0}%
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+            <button onClick={() => nav.go('attendance')} style={{
+              flex: 1, padding: '10px 14px',
+              background: T_.surfaceAlt, border: 'none', borderRadius: 12,
+              color: T_.ink, fontSize: 12.5, fontWeight: 600,
+              cursor: 'pointer', fontFamily: 'inherit',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+            }}>
+              View roster <Icon name="chevron" size={14} />
+            </button>
+            {userAccess && userAccess.can_edit_attendance && (
+              <button onClick={() => nav.go('markAttendance')} style={{
+                flex: 1, padding: '10px 14px',
+                background: T_.maroon, border: 'none', borderRadius: 12,
+                color: '#fff', fontSize: 12.5, fontWeight: 600,
+                cursor: 'pointer', fontFamily: 'inherit',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+              }}>
+                Mark attendance
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Checklist + Tasks side by side */}
+      <div style={{
+        padding: '14px 16px 0',
+        display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10,
+      }}>
+        <ProgressCard
+          title="Checklist"
+          subtitle={chk.total === 0 ? 'No items today' : (chk.total - chk.done > 0 ? `${chk.total - chk.done} pending` : 'All done')}
+          done={chk.done}
+          total={chk.total}
+          tone={T_.maroon}
+          onClick={() => nav.go('checklist')}
+        />
+        <ProgressCard
+          title="My tasks"
+          subtitle={tsk.total === 0 ? 'Nothing assigned' : (tsk.total - tsk.done > 0 ? `${tsk.total - tsk.done} to do` : 'All caught up')}
+          done={tsk.done}
+          total={tsk.total}
+          tone={T_.gold}
+          onClick={() => nav.go('tasks')}
+        />
+      </div>
+
+      {/* Notices */}
+      {notices.length > 0 && (
+        <div style={{ padding: '20px 16px 0' }}>
+          <div style={{
+            fontSize: 10.5, fontWeight: 700, letterSpacing: 0.6,
+            textTransform: 'uppercase', color: T_.inkMuted,
+            padding: '0 4px 10px',
+          }}>
+            What's new
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {notices.map(n => (
+              <button key={n.id} onClick={() => nav.go('announcements')} style={{
+                background: n.pinned ? T_.goldSoft : T_.surface,
+                border: `1px solid ${n.pinned ? T_.goldSoft : T_.border}`,
+                borderRadius: 14, padding: 12,
+                display: 'flex', alignItems: 'center', gap: 10,
+                cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left', width: '100%',
+              }}>
+                <div style={{
+                  width: 34, height: 34, borderRadius: 10,
+                  background: n.pinned ? T_.gold : T_.surfaceAlt,
+                  color: n.pinned ? '#fff' : T_.inkMuted,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  flexShrink: 0,
+                }}>
+                  <Icon name="megaphone" size={16} />
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{
+                    fontSize: 13, fontWeight: 600, color: T_.ink,
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>{n.title}</div>
+                  <div style={{ fontSize: 11, color: T_.inkMuted, marginTop: 2 }}>
+                    {n.by} · {n.at}
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const ManagerStat = ({ label, value, color }) => {
+  const T_ = window.TOKENS;
+  return (
+    <div style={{ textAlign: 'center' }}>
+      <div style={{
+        fontFamily: 'Fraunces, Georgia, serif',
+        fontSize: 20, fontWeight: 600, letterSpacing: -0.5, color, lineHeight: 1,
+      }}>{value}</div>
+      <div style={{
+        fontSize: 10, color: T_.inkMuted, marginTop: 4, letterSpacing: 0.3,
+        textTransform: 'uppercase', fontWeight: 600,
+      }}>{label}</div>
+    </div>
+  );
+};
+
+const ProgressCard = ({ title, subtitle, done, total, tone, onClick }) => {
+  const T_ = window.TOKENS;
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  const bg = tone === T_.gold ? T_.goldSoft : T_.maroonSoft;
+  return (
+    <button onClick={onClick} style={{
+      background: T_.surface, border: `1px solid ${T_.border}`,
+      borderRadius: 14, padding: 14, textAlign: 'left',
+      fontFamily: 'inherit', cursor: 'pointer',
+    }}>
+      <div style={{
+        fontSize: 10.5, fontWeight: 700, letterSpacing: 0.6,
+        textTransform: 'uppercase', color: T_.inkMuted,
+      }}>{title}</div>
+      <div style={{
+        fontFamily: 'Fraunces, Georgia, serif',
+        fontSize: 22, fontWeight: 600, color: T_.ink, letterSpacing: -0.5,
+        marginTop: 6, lineHeight: 1,
+      }}>
+        {done}<span style={{ fontSize: 14, color: T_.inkMuted }}> / {total || 0}</span>
+      </div>
+      <div style={{
+        height: 6, background: T_.surfaceAlt, borderRadius: 3,
+        overflow: 'hidden', marginTop: 10,
+      }}>
+        <div style={{
+          width: `${pct}%`, height: '100%',
+          background: pct === 100 ? T_.success : tone,
+          transition: 'width 300ms',
+        }} />
+      </div>
+      <div style={{ fontSize: 11.5, color: T_.inkMuted, marginTop: 8 }}>
+        {subtitle}
+      </div>
+    </button>
+  );
+};
+
+window.ManagerHomeScreen = ManagerHomeScreen;
+
+
 // ========== components/screen-mark-attendance.jsx ==========
 // Manual Attendance — HR taps through the roster each morning and
 // sets each person's status. Because most staff don't have phones.
@@ -6402,6 +6739,7 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     visitors:        makeScreen('VisitorsScreen'),
     settings:        makeScreen('SettingsScreen'),
     checklist:       makeScreen('ChecklistScreen'),
+    managerHome:     makeScreen('ManagerHomeScreen'),
   };
 
   const screenTitles = {
@@ -6421,6 +6759,7 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     enroll:         '14 Enroll Joiner',
     settings:       '15 Settings',
     checklist:      '16 Checklist',
+    managerHome:    '17 Manager Home',
   };
 
   const tabs = [
@@ -6436,8 +6775,8 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
       const homeMap = {
         owner: 'ownerHome',
         hr: 'hrHome',
-        manager: 'hrHome',
-        supervisor: 'hrHome',
+        manager: 'managerHome',
+        supervisor: 'managerHome',
         staff: 'staffHome',
       };
       nav.reset(homeMap[user] || 'ownerHome');
@@ -6527,7 +6866,7 @@ const REQUIRED = [
   'LoginScreen','OwnerHomeScreen','StaffHomeScreen','AttendanceScreen',
   'LeavesScreen','ApplyLeaveScreen','TasksScreen','PayslipScreen',
   'AnnouncementsScreen','VisitorsScreen','HRHomeScreen','MarkAttendanceScreen',
-  'KioskScannerScreen','EnrollJoinerScreen','SettingsScreen','ChecklistScreen',
+  'KioskScannerScreen','EnrollJoinerScreen','SettingsScreen','ChecklistScreen','ManagerHomeScreen',
   'AppCtx','IOSDevice','TabBar','Toast','TOKENS','MOCK',
 ];
 const mountWhenReady = (attempts = 0) => {
