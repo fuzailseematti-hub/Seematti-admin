@@ -3922,24 +3922,20 @@ window.MarkAttendanceScreen = MarkAttendanceScreen;
 const KioskScannerScreen = () => {
   const { nav } = useApp();
 
-  const [clockedIn, setClockedIn] = React.useState(new Set([
-    'E01','E02','E03','E04','E06','E07','E09','E11','E12',
-  ]));
-  const [recent, setRecent] = React.useState([
-    { id: 'E12', name: 'Bhuvana P.',    section: 'Cotton', dir: 'in', time: '9:20' },
-    { id: 'E09', name: 'Gayathri K.',   section: 'Silk',   dir: 'in', time: '9:30' },
-    { id: 'E03', name: 'Priya Lakshmi', section: 'Fancy',  dir: 'in', time: '9:42' },
-  ]);
-  const [phase, setPhase] = React.useState('idle');
-  const [current, setCurrent] = React.useState(null);
+  const [clockedIn, setClockedIn] = React.useState(new Set());
+  const [recent, setRecent]       = React.useState([]);
+  const [phase, setPhase]         = React.useState('idle');
+  const [current, setCurrent]     = React.useState(null);
 
+  // Queue of test employees for the 'Simulate next person' button.
+  // In real hardware the face-recognition pipeline would produce this.
   const queue = React.useRef([
-    { id: 'E04', name: 'Deepa S.',     section: 'Silk',   role: 'Sales Associate', confidence: 0.94 },
-    { id: 'E15', name: 'Divya P.',     section: 'Cotton', role: 'Trainee',         confidence: 0.91 },
-    { id: 'E08', name: 'Anitha R.',    section: 'Silk',   role: 'Sales Associate', confidence: 0.96 },
-    { id: 'E10', name: 'Murali T.',    section: 'Dhoti',  role: 'Packer',          confidence: 0.89 },
-    { id: 'E02', name: 'Meena S.',     section: 'Silk',   role: 'Sales Associate', confidence: 0.97 },
-    { id: 'E14', name: 'Shanmugam R.', section: 'Dhoti',  role: 'Packer',          confidence: 0.92 },
+    { id: 'E004', name: 'Deepa S.',     section: 'Silk',   role: 'Sales Associate', confidence: 0.94 },
+    { id: 'E015', name: 'Divya P.',     section: 'Cotton', role: 'Trainee',         confidence: 0.91 },
+    { id: 'E008', name: 'Anitha R.',    section: 'Silk',   role: 'Sales Associate', confidence: 0.96 },
+    { id: 'E010', name: 'Murali T.',    section: 'Dhoti',  role: 'Packer',          confidence: 0.89 },
+    { id: 'E006', name: 'Meena S.',     section: 'Silk',   role: 'Sales Associate', confidence: 0.97 },
+    { id: 'E014', name: 'Shanmugam R.', section: 'Dhoti',  role: 'Packer',          confidence: 0.92 },
   ]);
   const queueIdx = React.useRef(0);
 
@@ -3955,6 +3951,62 @@ const KioskScannerScreen = () => {
     return () => clearInterval(t);
   }, []);
 
+  // Pull today's clocked-in set and recent scans from the DB on mount
+  // and keep them fresh via the realtime subscription.
+  React.useEffect(() => {
+    if (!window.sb) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const fetchLive = async () => {
+      const { data } = await window.sb
+        .from('attendance')
+        .select('employee_id, status, punch_in_time, punch_out_time, updated_at, employees(name, section_id)')
+        .eq('date', today)
+        .in('status', ['present','late'])
+        .order('updated_at', { ascending: false });
+      const rows = data || [];
+      const inSet = new Set(rows.filter(r => !r.punch_out_time).map(r => r.employee_id));
+      setClockedIn(inSet);
+      setRecent(rows.slice(0, 6).map(r => ({
+        id:      r.employee_id,
+        name:    r.employees?.name || r.employee_id,
+        section: SECTION_LABEL[r.employees?.section_id] || r.employees?.section_id || '—',
+        dir:     r.punch_out_time ? 'out' : 'in',
+        time:    fmtTime(r.punch_out_time || r.punch_in_time) || '',
+      })));
+    };
+    fetchLive();
+    const channel = window.sb
+      .channel('kiosk-live')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'attendance' },
+        () => { fetchLive(); })
+      .subscribe();
+    return () => { window.sb.removeChannel(channel); };
+  }, []);
+
+  const persistScan = async (emp, dir) => {
+    if (!window.sb) return;
+    const n = new Date();
+    const today = n.toISOString().slice(0, 10);
+    const hh = String(n.getHours()).padStart(2, '0');
+    const mm = String(n.getMinutes()).padStart(2, '0');
+    const stamp = `${hh}:${mm}:00`;
+    if (dir === 'in') {
+      await window.sb.from('attendance').upsert({
+        employee_id:   emp.id,
+        date:          today,
+        status:        n.getHours() >= 10 ? 'late' : 'present',
+        punch_in_time: stamp,
+        source:        'kiosk',
+      }, { onConflict: 'employee_id,date' });
+    } else {
+      await window.sb.from('attendance')
+        .update({ punch_out_time: stamp })
+        .eq('employee_id', emp.id)
+        .eq('date', today);
+    }
+  };
+
   const triggerScan = () => {
     if (phase !== 'idle') return;
     const next = queue.current[queueIdx.current % queue.current.length];
@@ -3966,6 +4018,9 @@ const KioskScannerScreen = () => {
     setTimeout(() => {
       setPhase('matched');
       const dir = clockedIn.has(next.id) ? 'out' : 'in';
+      persistScan(next, dir);
+      // The realtime subscription will refresh clockedIn + recent shortly;
+      // do an optimistic local update so the UI confirmation feels instant.
       const hh = new Date().getHours() % 12 || 12;
       const mm = String(new Date().getMinutes()).padStart(2, '0');
       setRecent(r => [{ ...next, dir, time: `${hh}:${mm}` }, ...r].slice(0, 6));
