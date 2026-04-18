@@ -1624,6 +1624,7 @@ const Icon = ({ name, size = 20, color = 'currentColor', strokeWidth = 1.75 }) =
     moon:       <><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></>,
     sun:        <><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M5 19l1.5-1.5M17.5 6.5L19 5"/></>,
     store:      <><path d="M3 9l1.5-5h15L21 9M3 9v11h18V9M3 9h18"/><path d="M9 20v-6h6v6"/></>,
+    suitcase:   <><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V4a1 1 0 011-1h6a1 1 0 011 1v3M3 12h18"/></>,
     phone:      <><path d="M5 4c0-.6.4-1 1-1h3l2 5-2 1a12 12 0 0 0 6 6l1-2 5 2v3c0 .6-.4 1-1 1-9.4 0-15-5.6-15-15z"/></>,
   };
   return (
@@ -4543,7 +4544,7 @@ const HRHomeScreen = () => {
             onClick={() => nav.go('enroll')}
           />
           <HRTile
-            icon="leaf" tone="brand"
+            icon="suitcase" tone="brand"
             title="Apply for leave"
             value="My"
             sub="Submit your own request"
@@ -4875,7 +4876,7 @@ const ManagerHomeScreen = () => {
           cursor: 'pointer',
           display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
         }}>
-          <Icon name="leaf" size={16} color={T_.maroon} />
+          <Icon name="suitcase" size={16} color={T_.maroon} />
           Apply for leave
         </button>
         <button onClick={() => nav.go('leaves')} style={{
