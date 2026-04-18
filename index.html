@@ -171,6 +171,16 @@
     background: #fff; color: #1A1613;
   }
 
+  /* Screen-header top padding.
+     Desktop: fixed values sized for the fake dynamic island in the mock frame.
+     Mobile: collapse to the real safe-area inset + a tiny breathing room. */
+  :root {
+    --screen-top: 58px;
+    --screen-top-md: 60px;
+    --screen-top-sm: 56px;
+    --screen-top-lg: 80px;
+  }
+
   @media (max-width: 900px) {
     .sidePanel { display: none; }
     /* Kill flex centering on mobile — otherwise the IOSDevice (100dvh) gets
@@ -189,6 +199,12 @@
       gap: 0; padding: 0;
       width: 100%; height: 100%;
       max-width: none; max-height: none;
+    }
+    :root {
+      --screen-top:    calc(env(safe-area-inset-top, 0px) + 6px);
+      --screen-top-md: calc(env(safe-area-inset-top, 0px) + 6px);
+      --screen-top-sm: calc(env(safe-area-inset-top, 0px) + 6px);
+      --screen-top-lg: calc(env(safe-area-inset-top, 0px) + 20px);
     }
   }
 </style>
@@ -998,7 +1014,7 @@ const Button = ({ children, variant = 'primary', size = 'md', icon, onClick, sty
 const ScreenHeader = ({ back, title, subtitle, trailing }) => {
   const { nav } = useApp();
   return (
-    <div style={{ padding: 'calc(max(env(safe-area-inset-top), 46px) + 14px) 20px 16px', background: T.bg }}>
+    <div style={{ padding: 'var(--screen-top-md) 20px 16px', background: T.bg }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: back ? 14 : 0 }}>
         {back && (
           <button onClick={() => nav.back()} style={{
@@ -1195,7 +1211,7 @@ const LoginScreen = () => {
     <div style={{
       height: '100%', display: 'flex', flexDirection: 'column',
       background: `linear-gradient(180deg, ${T_.bg} 0%, ${T_.surfaceAlt} 100%)`,
-      padding: 'calc(max(env(safe-area-inset-top), 46px) + 34px) 28px 40px', boxSizing: 'border-box',
+      padding: 'var(--screen-top-lg) 28px 40px', boxSizing: 'border-box',
     }}>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
         {/* Brand — real logo lockup */}
@@ -1304,7 +1320,7 @@ const OwnerHomeScreen = () => {
   return (
     <div style={{ background: T_.bg, paddingBottom: 90 }}>
       {/* Header strip */}
-      <div style={{ padding: 'calc(max(env(safe-area-inset-top), 46px) + 12px) 20px 0' }}>
+      <div style={{ padding: 'var(--screen-top) 20px 0' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <img src={LOGO_SRC} alt="Seemaatti" style={{ height: 34, width: 'auto', display: 'block' }} />
@@ -1641,7 +1657,7 @@ const StaffHomeScreen = () => {
   return (
     <div style={{ background: T_.bg, paddingBottom: 90 }}>
       {/* Header */}
-      <div style={{ padding: 'calc(max(env(safe-area-inset-top), 46px) + 12px) 20px 0' }}>
+      <div style={{ padding: 'var(--screen-top) 20px 0' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <Avatar name={M.staff.name} size={38} />
@@ -2664,7 +2680,7 @@ const HRHomeScreen = () => {
   return (
     <div style={{ background: T_.bg, paddingBottom: 90 }}>
       {/* Header */}
-      <div style={{ padding: 'calc(max(env(safe-area-inset-top), 46px) + 12px) 20px 0' }}>
+      <div style={{ padding: 'var(--screen-top) 20px 0' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <img src={LOGO_SRC} alt="Seemaatti" style={{ height: 34, width: 'auto', display: 'block' }} />
@@ -3309,7 +3325,7 @@ const KioskScannerScreen = () => {
     }}>
       {/* Top bar */}
       <div style={{
-        padding: 'calc(max(env(safe-area-inset-top), 46px) + 10px) 20px 16px', display: 'flex',
+        padding: 'var(--screen-top-sm) 20px 16px', display: 'flex',
         alignItems: 'flex-start', justifyContent: 'space-between',
       }}>
         <div>
@@ -4020,7 +4036,7 @@ const SettingsScreen = () => {
 
   return (
     <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 120 }}>
-      <div style={{ padding: 'calc(max(env(safe-area-inset-top), 46px) + 12px) 20px 0' }}>
+      <div style={{ padding: 'var(--screen-top) 20px 0' }}>
         <div style={{
           fontSize: 11, letterSpacing: 1.2, textTransform: 'uppercase',
           color: T_.inkMuted, fontWeight: 600,
