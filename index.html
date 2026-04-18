@@ -4135,11 +4135,24 @@ const KioskScannerScreen = () => {
 
   const [clockedIn, setClockedIn] = React.useState(new Set());
   const [recent, setRecent]       = React.useState([]);
-  const [phase, setPhase]         = React.useState('idle');
+  const [phase, setPhase]         = React.useState('idle'); // idle | detecting | matching | matched | unknown
   const [current, setCurrent]     = React.useState(null);
 
-  // Queue of test employees for the 'Simulate next person' button.
-  // In real hardware the face-recognition pipeline would produce this.
+  // Live runtime state
+  const videoRef   = React.useRef(null);
+  const [cameraReady, setCameraReady]   = React.useState(false);
+  const [modelsReady, setModelsReady]   = React.useState(false);
+  const [cameraErr, setCameraErr]       = React.useState(null);
+  const [totalStaff, setTotalStaff]     = React.useState(0);
+  const [faces, setFaces] = React.useState([]);   // [{employee_id, pose, embedding, employees: {name, role, section_id}}]
+  const [threshold, setThreshold]       = React.useState(0.55);
+  const [lateCutoff, setLateCutoff]     = React.useState('10:00');
+
+  // Cooldown so the same face doesn't re-trigger instantly.
+  const lastMatch = React.useRef({ id: null, at: 0 });
+
+  // Queue of fake matches for the Simulate button (keeps the demo usable
+  // even without enrolled faces).
   const queue = React.useRef([
     { id: 'E004', name: 'Deepa S.',     section: 'Silk',   role: 'Sales Associate', confidence: 0.94 },
     { id: 'E015', name: 'Divya P.',     section: 'Cotton', role: 'Trainee',         confidence: 0.91 },
@@ -4160,6 +4173,38 @@ const KioskScannerScreen = () => {
   React.useEffect(() => {
     const t = setInterval(() => setPulse(p => (p + 1) % 100), 40);
     return () => clearInterval(t);
+  }, []);
+
+  // Load face-api models + open the webcam.
+  React.useEffect(() => {
+    let stream = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        await window.loadFaceModels();
+        if (cancelled) return;
+        setModelsReady(true);
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+          audio: false,
+        });
+        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play().catch(() => {});
+        }
+        setCameraReady(true);
+      } catch (err) {
+        console.error(err);
+        setCameraErr(err.name === 'NotAllowedError'
+          ? 'Camera permission denied — enable it in Settings.'
+          : 'Could not open camera.');
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (stream) stream.getTracks().forEach(t => t.stop());
+    };
   }, []);
 
   // Pull today's clocked-in set and recent scans from the DB on mount
@@ -4195,6 +4240,48 @@ const KioskScannerScreen = () => {
     return () => { window.sb.removeChannel(channel); };
   }, []);
 
+  // Load enrolled face embeddings and settings (+ staff count for the tally).
+  React.useEffect(() => {
+    if (!window.sb) return;
+    const fetchFaces = async () => {
+      const { data } = await window.sb
+        .from('face_embeddings')
+        .select('employee_id, pose, embedding, employees(name, role, section_id, is_active)');
+      // Only keep active staff.
+      const active = (data || []).filter(r => r.employees?.is_active !== false);
+      setFaces(active);
+    };
+    const fetchMeta = async () => {
+      const [{ count }, { data: set }] = await Promise.all([
+        window.sb.from('employees').select('*', { count: 'exact', head: true })
+          .eq('user_type', 'staff').eq('is_active', true),
+        window.sb.from('settings').select('key, value')
+          .in('key', ['late_cutoff', 'match_threshold']),
+      ]);
+      setTotalStaff(count || 0);
+      (set || []).forEach(s => {
+        if (s.key === 'late_cutoff')     setLateCutoff(s.value);
+        if (s.key === 'match_threshold') setThreshold(parseFloat(s.value) || 0.55);
+      });
+    };
+    fetchFaces();
+    fetchMeta();
+    const ch = window.sb.channel('kiosk-faces')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'face_embeddings' }, () => fetchFaces())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'employees' },       () => { fetchFaces(); fetchMeta(); })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'settings' },        () => fetchMeta())
+      .subscribe();
+    return () => { window.sb.removeChannel(ch); };
+  }, []);
+
+  const isLate = React.useCallback(() => {
+    const n = new Date();
+    const [h, m] = (lateCutoff || '10:00').split(':').map(x => parseInt(x, 10));
+    const cutoff = h * 60 + (m || 0);
+    const nowMins = n.getHours() * 60 + n.getMinutes();
+    return nowMins >= cutoff;
+  }, [lateCutoff]);
+
   const persistScan = async (emp, dir) => {
     if (!window.sb) return;
     const n = new Date();
@@ -4206,7 +4293,7 @@ const KioskScannerScreen = () => {
       await window.sb.from('attendance').upsert({
         employee_id:   emp.id,
         date:          today,
-        status:        n.getHours() >= 10 ? 'late' : 'present',
+        status:        isLate() ? 'late' : 'present',
         punch_in_time: stamp,
         source:        'kiosk',
       }, { onConflict: 'employee_id,date' });
@@ -4218,30 +4305,81 @@ const KioskScannerScreen = () => {
     }
   };
 
-  const triggerScan = () => {
+  // Run the match outcome UI (shared by real + simulated matches).
+  const showMatchUI = React.useCallback((emp) => {
+    setCurrent(emp);
+    setPhase('matching');
+    const dir = clockedIn.has(emp.id) ? 'out' : 'in';
+    persistScan(emp, dir);
+    setTimeout(() => setPhase('matched'), 300);
+    const hh = new Date().getHours() % 12 || 12;
+    const mm = String(new Date().getMinutes()).padStart(2, '0');
+    setRecent(r => [{ ...emp, dir, time: `${hh}:${mm}` }, ...r].slice(0, 6));
+    setClockedIn(s => {
+      const ns = new Set(s);
+      if (dir === 'in') ns.add(emp.id); else ns.delete(emp.id);
+      return ns;
+    });
+    setTimeout(() => { setPhase('idle'); setCurrent(null); }, 4200);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clockedIn, lateCutoff]);
+
+  // Real-face matching loop — active only while phase is idle.
+  React.useEffect(() => {
+    if (!modelsReady || !cameraReady || phase !== 'idle') return;
+    if (faces.length === 0) return; // nobody enrolled — nothing to match
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        const v = videoRef.current;
+        if (v && v.readyState >= 2) {
+          // Throttle: re-match the same person at most once every 6 seconds.
+          const desc = await window.computeFaceDescriptor(v);
+          if (desc) {
+            let best = { id: null, name: null, sim: -1, emp: null };
+            for (const f of faces) {
+              const sim = window.cosineSim(desc, f.embedding);
+              if (sim > best.sim) {
+                best = {
+                  id: f.employee_id,
+                  sim,
+                  emp: {
+                    id: f.employee_id,
+                    name: f.employees?.name || f.employee_id,
+                    role: f.employees?.role || '',
+                    section: SECTION_LABEL[f.employees?.section_id] || '',
+                    confidence: sim,
+                  },
+                };
+              }
+            }
+            if (best.sim >= threshold) {
+              const nowT = Date.now();
+              if (best.id !== lastMatch.current.id || (nowT - lastMatch.current.at) > 6000) {
+                lastMatch.current = { id: best.id, at: nowT };
+                setPhase('detecting');
+                showMatchUI(best.emp);
+                return;
+              }
+            }
+          }
+        }
+      } catch (_) { /* swallow per-tick errors */ }
+      setTimeout(tick, 500);
+    };
+    const handle = setTimeout(tick, 300);
+    return () => { cancelled = true; clearTimeout(handle); };
+  }, [modelsReady, cameraReady, phase, faces, threshold, showMatchUI]);
+
+  // Legacy Simulate button — cycles through the mock queue regardless of
+  // enrolled faces. Useful for demos and when the camera is unavailable.
+  const triggerSimulate = () => {
     if (phase !== 'idle') return;
     const next = queue.current[queueIdx.current % queue.current.length];
     queueIdx.current++;
-
-    setCurrent(next);
     setPhase('detecting');
-    setTimeout(() => setPhase('matching'), 700);
-    setTimeout(() => {
-      setPhase('matched');
-      const dir = clockedIn.has(next.id) ? 'out' : 'in';
-      persistScan(next, dir);
-      // The realtime subscription will refresh clockedIn + recent shortly;
-      // do an optimistic local update so the UI confirmation feels instant.
-      const hh = new Date().getHours() % 12 || 12;
-      const mm = String(new Date().getMinutes()).padStart(2, '0');
-      setRecent(r => [{ ...next, dir, time: `${hh}:${mm}` }, ...r].slice(0, 6));
-      setClockedIn(s => {
-        const ns = new Set(s);
-        if (dir === 'in') ns.add(next.id); else ns.delete(next.id);
-        return ns;
-      });
-    }, 1500);
-    setTimeout(() => { setPhase('idle'); setCurrent(null); }, 4200);
+    setTimeout(() => showMatchUI(next), 600);
   };
 
   const direction = current && clockedIn.has(current.id) ? 'out' : 'in';
@@ -4285,7 +4423,9 @@ const KioskScannerScreen = () => {
 
       {/* Camera frame */}
       <div style={{ flex: 1, padding: '0 20px', position: 'relative' }}>
-        <KioskCameraFrame phase={phase} current={current} pulse={pulse} />
+        <KioskCameraFrame phase={phase} current={current} pulse={pulse}
+          videoRef={videoRef} cameraErr={cameraErr}
+          enrolledCount={faces.length ? new Set(faces.map(f => f.employee_id)).size : 0} />
       </div>
 
       {/* Instruction + bilingual prompt / match confirm */}
@@ -4345,7 +4485,7 @@ const KioskScannerScreen = () => {
             fontSize: 20, fontWeight: 500, marginTop: 2, letterSpacing: -0.4,
             fontFeatureSettings: '"tnum"',
           }}>
-            {clockedIn.size}<span style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)' }}> / 312</span>
+            {clockedIn.size}<span style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)' }}> / {totalStaff || '—'}</span>
           </div>
         </div>
         <div style={{ display: 'flex', gap: 6 }}>
@@ -4378,23 +4518,23 @@ const KioskScannerScreen = () => {
         }}>
           <Icon name="close" size={12} /> Exit kiosk
         </button>
-        <button onClick={triggerScan} disabled={phase !== 'idle'} style={{
-          background: phase === 'idle' ? '#8B2323' : 'rgba(255,255,255,0.08)',
-          border: 'none', borderRadius: 10, padding: '10px 16px',
-          color: '#fff', fontSize: 12, fontWeight: 600,
+        <button onClick={triggerSimulate} disabled={phase !== 'idle'} style={{
+          background: phase === 'idle' ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.04)',
+          border: '1px solid rgba(255,255,255,0.15)', borderRadius: 10, padding: '10px 16px',
+          color: 'rgba(255,255,255,0.7)', fontSize: 11, fontWeight: 600,
           cursor: phase === 'idle' ? 'pointer' : 'default',
           fontFamily: 'inherit', letterSpacing: 0.3,
           display: 'flex', alignItems: 'center', gap: 6,
-          opacity: phase === 'idle' ? 1 : 0.5,
+          opacity: phase === 'idle' ? 1 : 0.4,
         }}>
-          <Icon name="sparkle" size={12} /> Simulate next person
+          <Icon name="sparkle" size={12} /> Simulate (demo)
         </button>
       </div>
     </div>
   );
 };
 
-const KioskCameraFrame = ({ phase, current, pulse }) => {
+const KioskCameraFrame = ({ phase, current, pulse, videoRef, cameraErr, enrolledCount }) => {
   const ringColor =
     phase === 'matched' ? '#0E7C3A' :
     phase === 'detecting' || phase === 'matching' ? '#E8C65A' :
@@ -4416,6 +4556,38 @@ const KioskCameraFrame = ({ phase, current, pulse }) => {
         : 'inset 0 0 60px rgba(0,0,0,0.5)',
       transition: 'box-shadow 300ms, border-color 300ms',
     }}>
+      {/* Live webcam feed — mirrored so the preview looks natural. */}
+      {videoRef && (
+        <video ref={videoRef} autoPlay playsInline muted
+          style={{
+            position: 'absolute', inset: 0,
+            width: '100%', height: '100%', objectFit: 'cover',
+            transform: 'scaleX(-1)',
+            opacity: phase === 'matched' ? 0.2 : 0.85,
+            transition: 'opacity 300ms',
+          }} />
+      )}
+      {/* Camera error badge */}
+      {cameraErr && (
+        <div style={{
+          position: 'absolute', left: 16, right: 16, top: 16,
+          padding: '10px 12px', borderRadius: 10,
+          background: 'rgba(179, 38, 30, 0.2)', border: '1px solid rgba(179, 38, 30, 0.4)',
+          color: '#ffd9d3', fontSize: 11.5, textAlign: 'center',
+        }}>{cameraErr}</div>
+      )}
+      {/* Enrolled count badge */}
+      {!cameraErr && phase === 'idle' && (
+        <div style={{
+          position: 'absolute', left: 12, top: 12,
+          padding: '3px 8px', borderRadius: 999,
+          background: 'rgba(11, 13, 14, 0.55)', color: 'rgba(255,255,255,0.7)',
+          fontSize: 9.5, fontWeight: 700, letterSpacing: 0.4, textTransform: 'uppercase',
+          backdropFilter: 'blur(6px)',
+        }}>
+          {enrolledCount ? `${enrolledCount} enrolled` : 'No faces enrolled'}
+        </div>
+      )}
       <div style={{
         position: 'absolute', inset: 0,
         background: 'radial-gradient(circle at 50% 45%, rgba(255,255,255,0.04) 0%, transparent 50%)',
