@@ -5369,13 +5369,6 @@ const AdvanceReceiptsPrint = ({ rows, onClose }) => {
     day: 'numeric', month: 'long', year: 'numeric',
   });
 
-  React.useEffect(() => {
-    // Auto-trigger the browser print dialog shortly after mount. User
-    // can still tap the button to reprint.
-    const t = setTimeout(() => window.print(), 350);
-    return () => clearTimeout(t);
-  }, []);
-
   const fmt = (iso) => iso
     ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
     : '—';

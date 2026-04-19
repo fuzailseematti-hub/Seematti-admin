@@ -8277,11 +8277,6 @@ const MobileAdvanceReceiptsPrint = ({ rows, onClose }) => {
     ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
     : '—';
 
-  React.useEffect(() => {
-    const t = setTimeout(() => window.print(), 350);
-    return () => clearTimeout(t);
-  }, []);
-
   return (
     <>
       <style>{`
@@ -8309,17 +8304,22 @@ const MobileAdvanceReceiptsPrint = ({ rows, onClose }) => {
           z-index: 3;
         }
         .m-adv-print-bar .title {
-          flex: 1; font-family: 'Fraunces', Georgia, serif;
-          font-size: 15px; font-weight: 500; letter-spacing: -0.3px;
+          flex: 1; min-width: 0;
+          font-family: 'Fraunces', Georgia, serif;
+          font-size: 14px; font-weight: 500; letter-spacing: -0.3px;
+          overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
         }
         .m-adv-print-bar button {
-          background: #fff; color: #1A1613;
-          border: none; padding: 7px 12px; border-radius: 8px;
-          font-size: 12.5px; font-weight: 600; cursor: pointer;
+          background: #0E7C3A; color: #fff;
+          border: none; padding: 9px 16px; border-radius: 10px;
+          font-size: 13px; font-weight: 700; cursor: pointer;
           font-family: inherit;
+          box-shadow: 0 4px 12px -4px rgba(14, 124, 58, 0.6);
         }
         .m-adv-print-bar button.secondary {
           background: rgba(255,255,255,0.14); color: #fff;
+          box-shadow: none;
+          font-weight: 600;
         }
         .m-adv-print-grid {
           max-width: 794px;
