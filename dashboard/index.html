@@ -1289,8 +1289,10 @@ const EmployeesPage = () => {
 
   // ── Excel upload — bulk-update salary records ─────────────
   // Auto-detects the sheet format (Silks new-joined vs EPF/ESI) from
-  // its header row. Match-by-name is fuzzy (lowercase, trimmed); an
-  // exact Employee-ID or Employee-Code match wins if present in the sheet.
+  // its header row. Rows that match an existing employee become updates;
+  // rows that don't match become new-employee creations. Match-by-name
+  // is fuzzy (lowercase, trimmed); Employee-ID or Employee-Code wins if
+  // present in the sheet.
   const onEmployeeExcelPicked = async (file) => {
     if (!file) return;
     if (typeof window.XLSX === 'undefined') {
@@ -1309,7 +1311,17 @@ const EmployeesPage = () => {
       all.forEach(e => { if (e.employee_code) codeIdx[String(e.employee_code).trim().toUpperCase()] = e; });
 
       const updates = []; // { employee, patch, source }
-      const unmatched = []; // { name, source }
+      const creates = []; // { newId, record, source }
+      const unmatched = []; // { name, source, reason }
+      // Seed the next-ID counter so bulk-creates don't collide.
+      const existingNums = all.map(e => {
+        const m = (e.id || '').match(/^E(\d+)$/i);
+        return m ? parseInt(m[1], 10) : -1;
+      }).filter(n => n >= 0);
+      let nextNum = (existingNums.length ? Math.max(...existingNums) : 0) + 1;
+      const allocId = () => 'E' + String(nextNum++).padStart(3, '0');
+      const usedCreateKeys = new Set(); // prevent duplicate rows across sheets
+
       const norm = (s) => (s == null ? '' : String(s).trim());
       const lower = (s) => norm(s).toLowerCase();
       const getCell = (row, keys) => {
@@ -1328,7 +1340,7 @@ const EmployeesPage = () => {
         const looksLikeEsi = headers.some(h =>
           /tmb account|esi no|epf no|uan no|n\.basics/i.test(h));
         const looksLikeNewJoined = headers.some(h =>
-          /^no$/i.test(h)) && headers.some(h =>
+          /^no$/i.test(h) || /employee code/i.test(h)) && headers.some(h =>
           /ஊர்|^town$|peyar|^name$|பெயர்|சம்பளம்|^salary$/i.test(h));
 
         rows.forEach(r => {
@@ -1341,54 +1353,80 @@ const EmployeesPage = () => {
           if (idCell)   emp = idIdx[norm(idCell).toUpperCase()];
           if (!emp && codeCell) emp = codeIdx[norm(codeCell).toUpperCase()];
           if (!emp && name) emp = nameIdx[lower(name)];
-          if (!emp) { unmatched.push({ name: name || norm(codeCell), source: sheetName }); return; }
 
-          const patch = {};
-          // Always pick up employee_code and company if present in any sheet
-          if (codeCell) patch.employee_code = norm(codeCell);
+          // Collect the common fields that apply to both update and create.
+          const fields = {};
+          if (codeCell) fields.employee_code = norm(codeCell);
           const company = norm(getCell(r, ['COMPANY', 'Company']));
-          if (company) patch.company = company;
+          if (company) fields.company = company;
 
           if (looksLikeEsi) {
-            patch.salary_type    = 'esi_pf';
+            fields.salary_type = 'esi_pf';
             const salary = Number(getCell(r, ['SALARY', 'Salary'])) || 0;
-            if (salary) patch.monthly_salary = salary;
+            if (salary) fields.monthly_salary = salary;
             const hra = Number(getCell(r, ['HRA'])) || 0;
-            if (hra) patch.hra = hra;
+            if (hra) fields.hra = hra;
             // The ESI sheet has two W.A. columns (stored value then paid
             // value). Prefer the first non-empty one.
             const wa = Number(getCell(r, ['W.A.', 'WA'])) || 0;
-            if (wa) patch.wa = wa;
+            if (wa) fields.wa = wa;
             const tmb = norm(getCell(r, ['TMB ACCOUNT NO.', 'TMB']));
-            if (tmb) patch.tmb_account_no = tmb;
+            if (tmb) fields.tmb_account_no = tmb;
             const esiNo = norm(getCell(r, ['ESI NO.', 'ESI No', 'ESI']));
-            if (esiNo) patch.esi_no = esiNo;
+            if (esiNo) fields.esi_no = esiNo;
             const epfNo = norm(getCell(r, ['EPF NO', 'EPF No']));
-            if (epfNo) patch.epf_no = epfNo;
+            if (epfNo) fields.epf_no = epfNo;
             const uanNo = norm(getCell(r, ['UAN NO.', 'UAN']));
-            if (uanNo) patch.uan_no = uanNo;
+            if (uanNo) fields.uan_no = uanNo;
             const designation = norm(getCell(r, ['DESIGNATION', 'Designation']));
-            if (designation) patch.role = designation;
+            if (designation) fields.role = designation;
           } else if (looksLikeNewJoined) {
-            patch.salary_type = 'new_joined';
+            fields.salary_type = 'new_joined';
             const salary = Number(getCell(r, ['சம்பளம்', 'Salary', 'SALARY'])) || 0;
-            if (salary) patch.monthly_salary = salary;
+            if (salary) fields.monthly_salary = salary;
             const town = norm(getCell(r, ['ஊர்', 'Town', 'CITY', 'City']));
-            if (town) patch.city = town;
+            if (town) fields.city = town;
           } else {
             return; // unrecognised sheet, skip silently
           }
-          if (Object.keys(patch).length > 0) {
-            updates.push({ employee: emp, patch, source: sheetName });
+
+          if (emp) {
+            if (Object.keys(fields).length > 0) {
+              updates.push({ employee: emp, patch: fields, source: sheetName });
+            }
+            return;
           }
+
+          // No match → create a new employee. Name is required.
+          if (!name) {
+            unmatched.push({ name: norm(codeCell) || '(blank)', source: sheetName, reason: 'no name' });
+            return;
+          }
+          // De-dupe if the same name appears on both sheets.
+          const dedupeKey = lower(name);
+          if (usedCreateKeys.has(dedupeKey)) return;
+          usedCreateKeys.add(dedupeKey);
+
+          const newId = idCell ? norm(idCell).toUpperCase() : allocId();
+          const record = {
+            id: newId,
+            name,
+            user_type: 'staff',
+            is_active: true,
+            joined_date: new Date().toISOString().slice(0, 10),
+            section_id: 'fancy',
+            ...fields,
+          };
+          if (!record.role) record.role = 'Staff';
+          creates.push({ newId, record, source: sheetName });
         });
       });
 
-      if (!updates.length && !unmatched.length) {
+      if (!updates.length && !creates.length && !unmatched.length) {
         toast('No recognisable employee rows in this file');
         return;
       }
-      setUploadPreview({ updates, unmatched, filename: file.name });
+      setUploadPreview({ updates, creates, unmatched, filename: file.name });
     } catch (err) {
       console.error(err);
       toast('Could not parse file (see console)');
@@ -1408,7 +1446,25 @@ const EmployeesPage = () => {
           .update(u.patch).eq('id', u.employee.id);
         if (error) { fail++; console.error(error); } else ok++;
       }
-      toast(`Updated ${ok}${fail ? ` · ${fail} failed` : ''}`);
+      let created = 0, createFail = 0;
+      if (uploadPreview.creates?.length) {
+        // Insert in chunks of 100 to stay friendly to the API.
+        const chunks = [];
+        for (let i = 0; i < uploadPreview.creates.length; i += 100) {
+          chunks.push(uploadPreview.creates.slice(i, i + 100));
+        }
+        for (const chunk of chunks) {
+          const { error } = await window.sb.from('employees')
+            .insert(chunk.map(c => c.record));
+          if (error) { createFail += chunk.length; console.error(error); }
+          else created += chunk.length;
+        }
+      }
+      const parts = [];
+      if (created) parts.push(`Created ${created}`);
+      if (ok) parts.push(`Updated ${ok}`);
+      if (fail + createFail) parts.push(`${fail + createFail} failed`);
+      toast(parts.join(' · ') || 'No changes');
       setUploadPreview(null);
     } finally { setUploadBusy(false); }
   };
@@ -1464,16 +1520,21 @@ const EmployeesPage = () => {
       [],
       ['How to use this file:'],
       ['1.  Replace the SAMPLE rows with your real employees.'],
-      ['2.  The uploader matches rows by EMPLOYEE CODE first, then EMPLOYEE NAME.'],
-      ['3.  Keep the column headers exactly as-is. The first sheet is for'],
+      ['2.  Matching:'],
+      ['       • If EMPLOYEE CODE or EMPLOYEE NAME matches an existing'],
+      ['         employee → the row becomes an UPDATE.'],
+      ['       • If no match is found → a NEW employee is CREATED with an'],
+      ['         auto-assigned ID (E001, E002, …).'],
+      ['3.  The EMPLOYEE NAME column is required for new employees.'],
+      ['4.  Keep the column headers exactly as-is. The first sheet is for'],
       ['    ESI / PF employees, the second for new-joined employees.'],
-      ['4.  You only need to fill the columns that matter to you — leave the'],
+      ['5.  You only need to fill the columns that matter to you — leave the'],
       ['    computed columns (TOTAL, N.BASICS, P.BASICS, WAGES, NET WAGES, etc.)'],
       ['    blank if you like. The dashboard recomputes them on payslip generation.'],
-      ['5.  The ESI / PF sheet has two W.A. columns — fill only the first.'],
-      ['6.  Empty rows between real data are fine; they are skipped.'],
+      ['6.  The ESI / PF sheet has two W.A. columns — fill only the first.'],
+      ['7.  Empty rows between real data are fine; they are skipped.'],
       [],
-      ['Salary fields updated by upload:'],
+      ['Fields read by the uploader:'],
       ['   ESI / PF sheet → employee_code, company, monthly_salary, HRA, W.A.,'],
       ['                     TMB a/c, ESI no., EPF no., UAN no., designation.'],
       ['   New-joined sheet → employee_code, company, monthly_salary, city (from Town).'],
@@ -1926,8 +1987,15 @@ const EmployeesPage = () => {
           <>
             <button className="btn" onClick={() => setUploadPreview(null)} disabled={uploadBusy}>Cancel</button>
             <button className="btn primary" onClick={applyUpload}
-              disabled={uploadBusy || !uploadPreview?.updates.length}>
-              {uploadBusy ? 'Updating…' : `Apply ${uploadPreview?.updates.length || 0} update${uploadPreview?.updates.length === 1 ? '' : 's'}`}
+              disabled={uploadBusy || !(uploadPreview?.updates.length || uploadPreview?.creates?.length)}>
+              {uploadBusy ? 'Applying…' : (() => {
+                const c = uploadPreview?.creates?.length || 0;
+                const u = uploadPreview?.updates?.length || 0;
+                if (c && u) return `Create ${c} · Update ${u}`;
+                if (c)      return `Create ${c} employee${c === 1 ? '' : 's'}`;
+                if (u)      return `Update ${u} employee${u === 1 ? '' : 's'}`;
+                return 'Nothing to apply';
+              })()}
             </button>
           </>
         }
@@ -1935,16 +2003,62 @@ const EmployeesPage = () => {
         {uploadPreview && (
           <>
             <div style={{
-              display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10,
+              display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10,
               padding: 12, background: 'var(--bg)', borderRadius: 10,
               border: '1px solid var(--border)', marginBottom: 14,
             }}>
+              <DetailField label="Will create" value={String(uploadPreview.creates?.length || 0)} />
               <DetailField label="Will update" value={String(uploadPreview.updates.length)} />
-              <DetailField label="Unmatched names" value={String(uploadPreview.unmatched.length)} />
+              <DetailField label="Skipped" value={String(uploadPreview.unmatched.length)} />
               <DetailField label="Sheets" value={
-                [...new Set([...uploadPreview.updates.map(u => u.source), ...uploadPreview.unmatched.map(u => u.source)])].join(', ') || '—'
+                [...new Set([
+                  ...uploadPreview.updates.map(u => u.source),
+                  ...(uploadPreview.creates || []).map(u => u.source),
+                  ...uploadPreview.unmatched.map(u => u.source),
+                ])].join(', ') || '—'
               } />
             </div>
+
+            {uploadPreview.creates?.length > 0 && (
+              <>
+                <div style={{
+                  fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase',
+                  color: 'var(--brand)', marginBottom: 6,
+                }}>New employees</div>
+                <div style={{ maxHeight: 260, overflow: 'auto', border: '1px solid var(--border)', borderRadius: 10, marginBottom: 14 }}>
+                  <table className="data" style={{ fontSize: 12 }}>
+                    <thead>
+                      <tr>
+                        <th style={{ width: 80 }}>ID</th>
+                        <th style={{ width: 90 }}>Code</th>
+                        <th>Name</th>
+                        <th style={{ width: 90 }}>Type</th>
+                        <th>Fields</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {uploadPreview.creates.map((u, i) => (
+                        <tr key={i}>
+                          <td className="id">{u.newId}</td>
+                          <td className="id">{u.record.employee_code || '—'}</td>
+                          <td className="name">{u.record.name}</td>
+                          <td>
+                            <span className={`status-pill ${u.record.salary_type === 'esi_pf' ? 'leave' : 'unmarked'}`}>
+                              {u.record.salary_type === 'esi_pf' ? 'ESI / PF' : 'New joined'}
+                            </span>
+                          </td>
+                          <td style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 11 }}>
+                            {Object.entries(u.record)
+                              .filter(([k]) => !['id', 'name', 'salary_type', 'user_type', 'is_active', 'joined_date', 'section_id'].includes(k))
+                              .map(([k, v]) => `${k}=${v}`).join(' · ') || '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
 
             {uploadPreview.updates.length > 0 && (
               <>
@@ -1990,7 +2104,7 @@ const EmployeesPage = () => {
                 <div style={{
                   fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase',
                   color: 'var(--warning)', marginBottom: 6,
-                }}>Unmatched — these rows were skipped</div>
+                }}>Skipped — blank name or unrecognised row</div>
                 <div style={{
                   maxHeight: 150, overflow: 'auto', border: '1px solid var(--border)',
                   borderRadius: 10, padding: 10, background: 'var(--warningSoft)',
@@ -2003,8 +2117,8 @@ const EmployeesPage = () => {
                   ))}
                 </div>
                 <div style={{ fontSize: 11, color: 'var(--inkFaint)', marginTop: 6 }}>
-                  Tip: the matcher checks the <strong>employee name</strong> (and Employee ID if present).
-                  Fix typos on the Employees page or in the Excel, then re-upload.
+                  Rows without an employee name (e.g. total / header rows) are skipped.
+                  To create an employee, the <strong>EMPLOYEE NAME</strong> column must be filled.
                 </div>
               </>
             )}
