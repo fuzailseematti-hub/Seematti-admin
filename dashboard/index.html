@@ -1317,6 +1317,7 @@ const EmployeesPage = () => {
       const updates = []; // { employee, patch, source }
       const creates = []; // { newId, record, source }
       const unmatched = []; // { name, source, reason }
+      const sheetDiag = []; // { sheetName, headers, sampleRow } — visible in modal
       // Seed the next-ID counter so bulk-creates don't collide.
       const existingNums = all.map(e => {
         const m = (e.id || '').match(/^E(\d+)$/i);
@@ -1351,6 +1352,10 @@ const EmployeesPage = () => {
         const rows = window.XLSX.utils.sheet_to_json(ws, { defval: '' });
         if (!rows.length) return;
         const headers = Object.keys(rows[0]).map(h => h.trim());
+        // Capture diagnostics for the modal: headers + first non-empty row.
+        const firstWithName = rows.find(r =>
+          Object.values(r).some(v => v !== '' && v != null));
+        sheetDiag.push({ sheetName, headers, sampleRow: firstWithName || rows[0] });
         const looksLikeEsi = headers.some(h =>
           /tmb account|esi no|epf no|uan no|n\.basics/i.test(h));
         const looksLikeNewJoined = headers.some(h =>
@@ -1442,7 +1447,7 @@ const EmployeesPage = () => {
         toast('No recognisable employee rows in this file');
         return;
       }
-      setUploadPreview({ updates, creates, unmatched, filename: file.name });
+      setUploadPreview({ updates, creates, unmatched, sheetDiag, filename: file.name });
     } catch (err) {
       console.error(err);
       toast('Could not parse file (see console)');
@@ -2137,6 +2142,30 @@ const EmployeesPage = () => {
                   To create an employee, the <strong>EMPLOYEE NAME</strong> column must be filled.
                 </div>
               </>
+            )}
+
+            {uploadPreview.sheetDiag?.length > 0 && (
+              <details style={{ marginTop: 14 }}>
+                <summary style={{
+                  fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase',
+                  color: 'var(--inkMuted)', cursor: 'pointer', padding: '4px 0',
+                }}>Sheet diagnostics — what the parser sees</summary>
+                {uploadPreview.sheetDiag.map((d, i) => (
+                  <div key={i} style={{
+                    border: '1px solid var(--border)', borderRadius: 10,
+                    padding: 10, marginTop: 8, background: 'var(--surfaceAlt)',
+                    fontSize: 11, fontFamily: 'JetBrains Mono, Menlo, monospace',
+                  }}>
+                    <div style={{ fontWeight: 700, marginBottom: 4 }}>Sheet: "{d.sheetName}"</div>
+                    <div style={{ marginBottom: 6, color: 'var(--inkSoft)' }}>
+                      Headers ({d.headers.length}): {d.headers.map(h => `"${h}"`).join(', ')}
+                    </div>
+                    <div style={{ color: 'var(--inkSoft)' }}>
+                      First row: {Object.entries(d.sampleRow).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' · ')}
+                    </div>
+                  </div>
+                ))}
+              </details>
             )}
           </>
         )}
