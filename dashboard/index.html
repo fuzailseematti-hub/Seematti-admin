@@ -1328,9 +1328,19 @@ const EmployeesPage = () => {
 
       const norm = (s) => (s == null ? '' : String(s).trim());
       const lower = (s) => norm(s).toLowerCase();
+      // Strip everything except letters and digits so "S.NO", "S. No.",
+      // "Sl.No", "S/N" etc. all collapse to the same key.
+      const slug  = (s) => String(s == null ? '' : s).replace(/[^a-z0-9]/gi, '').toLowerCase();
       const getCell = (row, keys) => {
+        // 1. Exact (case-insensitive, trimmed) match — fastest, safest.
         for (const k of keys) {
           const hit = Object.keys(row).find(key => key.trim().toLowerCase() === k.toLowerCase());
+          if (hit && row[hit] !== '' && row[hit] != null) return row[hit];
+        }
+        // 2. Lenient slug match for headers with stray punctuation/whitespace.
+        const slugKeys = keys.map(slug);
+        for (let i = 0; i < slugKeys.length; i++) {
+          const hit = Object.keys(row).find(key => slug(key) === slugKeys[i]);
           if (hit && row[hit] !== '' && row[hit] != null) return row[hit];
         }
         return null;
@@ -1351,7 +1361,8 @@ const EmployeesPage = () => {
           // Skip total rows, blank rows.
           const idCell   = getCell(r, ['Employee ID', 'ID', 'EMPLOYEE ID']);
           const codeCell = getCell(r, ['EMPLOYEE CODE', 'Employee Code', 'EMP CODE', 'CODE',
-                                       'S.NO', 'S NO', 'SNO', 'S.NO.', 'NO']);
+                                       'S.NO', 'S NO', 'SNO', 'S.NO.', 'NO',
+                                       'SL.NO', 'SLNO', 'SL NO', 'SERIAL NO', 'SERIAL NUMBER']);
           const name = norm(getCell(r, ['EMPLOYEE NAME', 'Name', 'பெயர்', 'பெயர']));
           if (!name && !idCell && !codeCell) return;
           let emp = null;
