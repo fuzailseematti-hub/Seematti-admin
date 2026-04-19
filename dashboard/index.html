@@ -769,7 +769,7 @@ const useEmployees = () => {
     if (!window.sb) return;
     const { data } = await window.sb
       .from('employees')
-      .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city, salary_type, monthly_salary, hra, wa, tmb_account_no, esi_no, epf_no, uan_no')
+      .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city, employee_code, company, salary_type, monthly_salary, hra, wa, tmb_account_no, esi_no, epf_no, uan_no')
       .eq('is_active', true)
       .order('id');
     setRows(data || []);
@@ -1140,7 +1140,7 @@ const EmployeesPage = () => {
     if (!window.sb) return;
     const [empRes, faceRes] = await Promise.all([
       window.sb.from('employees')
-        .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city, salary_type, monthly_salary, hra, wa, tmb_account_no, esi_no, epf_no, uan_no')
+        .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city, employee_code, company, salary_type, monthly_salary, hra, wa, tmb_account_no, esi_no, epf_no, uan_no')
         .order('id'),
       window.sb.from('face_embeddings').select('employee_id'),
     ]);
