@@ -7708,6 +7708,11 @@ const AdvancesScreen = () => {
   const [filing, setFiling]   = React.useState(null);
   const [detail, setDetail]   = React.useState(null);
   const [saving, setSaving]   = React.useState(false);
+  const [selected, setSelected] = React.useState(new Set());
+  const [bulkBusy, setBulkBusy] = React.useState(false);
+
+  // Clear selection when the tab changes.
+  React.useEffect(() => { setSelected(new Set()); }, [statusFilter]);
 
   const [people, setPeople] = React.useState([]);
   React.useEffect(() => {
@@ -7845,6 +7850,71 @@ const AdvancesScreen = () => {
           ))}
         </div>
 
+        {/* Bulk approval bar — owner on Pending tab only */}
+        {statusFilter === 'pending' && canApprove && filtered.length > 0 && (() => {
+          const pendingIds = filtered.filter(r => r.status === 'pending').map(r => r.id);
+          const allPicked = pendingIds.length > 0 && pendingIds.every(id => selected.has(id));
+          return (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12,
+              padding: '10px 12px', borderRadius: 12,
+              background: selected.size > 0 ? T_.ink : T_.surfaceAlt,
+              border: `1px solid ${selected.size > 0 ? T_.ink : T_.border}`,
+              color: selected.size > 0 ? '#fff' : T_.inkSoft,
+            }}>
+              <button onClick={() => setSelected(allPicked ? new Set() : new Set(pendingIds))}
+                style={{
+                  background: 'none', border: 'none', cursor: 'pointer',
+                  fontSize: 12.5, fontWeight: 600,
+                  color: selected.size > 0 ? '#fff' : T_.inkSoft, fontFamily: 'inherit',
+                  display: 'inline-flex', alignItems: 'center', gap: 6,
+                }}>
+                <span style={{
+                  width: 18, height: 18, borderRadius: 5,
+                  background: allPicked ? '#fff' : 'transparent',
+                  border: `1.5px solid ${selected.size > 0 ? 'rgba(255,255,255,0.6)' : T_.inkMuted}`,
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                }}>
+                  {allPicked && <Icon name="check" size={12} color={T_.ink} strokeWidth={2.5} />}
+                </span>
+                {allPicked ? 'Deselect all' : 'Select all'}
+              </button>
+              <div style={{ flex: 1, fontSize: 12, textAlign: 'center', opacity: 0.8 }}>
+                {selected.size > 0 ? `${selected.size} selected` : `${pendingIds.length} pending`}
+              </div>
+              <button disabled={selected.size === 0 || bulkBusy}
+                onClick={async () => {
+                  if (selected.size === 0) return;
+                  if (!window.confirm(`Approve ${selected.size} advance request${selected.size === 1 ? '' : 's'} with the amounts and months as requested?`)) return;
+                  setBulkBusy(true);
+                  try {
+                    const chosen = filtered.filter(r => selected.has(r.id));
+                    await Promise.all(chosen.map(r => decide({
+                      id: r.id,
+                      action: 'approved',
+                      amount: r.amount_requested,
+                      months: r.months_total,
+                      note: null,
+                      deciderId: userId,
+                    })));
+                    toast(`Approved ${chosen.length} advance${chosen.length === 1 ? '' : 's'}`);
+                    setSelected(new Set());
+                  } finally { setBulkBusy(false); }
+                }}
+                style={{
+                  padding: '8px 14px', borderRadius: 10, border: 'none',
+                  background: selected.size > 0 ? T_.success : 'rgba(255,255,255,0.15)',
+                  color: '#fff', fontSize: 12.5, fontWeight: 700,
+                  fontFamily: 'inherit',
+                  cursor: (selected.size === 0 || bulkBusy) ? 'not-allowed' : 'pointer',
+                  opacity: (selected.size === 0 || bulkBusy) ? 0.5 : 1,
+                }}>
+                {bulkBusy ? 'Approving…' : selected.size > 0 ? `Approve ${selected.size}` : 'Approve'}
+              </button>
+            </div>
+          );
+        })()}
+
         {filtered.length === 0 && !loading && (
           <div style={{
             background: T_.surface, border: `1px dashed ${T_.border}`,
@@ -7864,13 +7934,35 @@ const AdvancesScreen = () => {
           <div style={{
             display: 'flex', flexDirection: 'column', gap: 10,
           }}>
-            {filtered.map(r => (
-              <button key={r.id} onClick={() => openDetail(r)} style={{
-                background: T_.surface, border: `1px solid ${T_.border}`,
+            {filtered.map(r => {
+              const isSelectable = r.status === 'pending' && canApprove;
+              const isSelected   = selected.has(r.id);
+              return (
+              <div key={r.id} onClick={() => openDetail(r)} style={{
+                background: isSelected ? T_.maroonSoft : T_.surface,
+                border: `1px solid ${isSelected ? T_.maroon : T_.border}`,
                 borderRadius: 14, padding: 14,
-                textAlign: 'left', fontFamily: 'inherit', cursor: 'pointer',
+                fontFamily: 'inherit', cursor: 'pointer',
                 display: 'flex', alignItems: 'flex-start', gap: 12,
               }}>
+                {isSelectable && (
+                  <button onClick={(e) => {
+                    e.stopPropagation();
+                    setSelected(s => {
+                      const n = new Set(s);
+                      n.has(r.id) ? n.delete(r.id) : n.add(r.id);
+                      return n;
+                    });
+                  }} style={{
+                    width: 22, height: 22, borderRadius: 7, marginTop: 8,
+                    background: isSelected ? T_.maroon : 'transparent',
+                    border: isSelected ? 'none' : `1.5px solid ${T_.border}`,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    cursor: 'pointer', flexShrink: 0,
+                  }}>
+                    {isSelected && <Icon name="check" size={14} color="#fff" strokeWidth={2.5} />}
+                  </button>
+                )}
                 <Avatar name={r.employees.name} size={38} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
@@ -7905,8 +7997,9 @@ const AdvancesScreen = () => {
                     }}>{r.reason}</div>
                   )}
                 </div>
-              </button>
-            ))}
+              </div>
+              );
+            })}
           </div>
         )}
       </div>
