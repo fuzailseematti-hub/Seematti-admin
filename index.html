@@ -1245,7 +1245,7 @@ const useLiveAdvances = () => {
     if (!window.sb) return;
     const { data } = await window.sb
       .from('advances')
-      .select('*, employees!advances_employee_id_fkey(name, role, section_id)')
+      .select('*, employees!advances_employee_id_fkey(name, role, section_id), decider:employees!advances_decided_by_fkey(id, name)')
       .order('created_at', { ascending: false });
     setItems((data || []).filter(r => r.employees));
     setLoading(false);
@@ -8282,20 +8282,38 @@ const MobileAdvanceReceiptsPrint = ({ rows, onClose }) => {
       <style>{`
         @media print {
           @page { size: A4; margin: 10mm; }
-          html, body { background: #fff !important; }
-          /* Hide everything, then re-show only the print tree. */
+          html, body {
+            background: #fff !important;
+            display: block !important;
+            width: 100% !important;
+            margin: 0 !important; padding: 0 !important;
+            overflow: visible !important;
+            min-width: 0 !important; max-width: none !important;
+            height: auto !important; min-height: 0 !important; max-height: none !important;
+          }
           body * { visibility: hidden !important; }
           .m-adv-print-root, .m-adv-print-root * { visibility: visible !important; }
           .m-adv-print-root {
-            position: absolute !important;
-            left: 0 !important; top: 0 !important;
-            width: 100% !important; height: auto !important;
+            position: static !important;
+            display: block !important;
+            width: 100% !important;
+            margin: 0 !important; padding: 0 !important;
             background: #fff !important;
             overflow: visible !important;
           }
           .m-adv-print-bar { display: none !important; }
-          .m-adv-print-grid { padding: 0 !important; margin: 0 !important; max-width: none !important; }
-          .m-adv-receipt { page-break-inside: avoid; break-inside: avoid; }
+          .m-adv-print-grid {
+            display: block !important;
+            width: 100% !important;
+            margin: 0 !important; padding: 0 !important;
+            max-width: none !important;
+          }
+          .m-adv-receipt {
+            width: 100% !important;
+            margin-bottom: 6px !important;
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
+          }
         }
         .m-adv-print-root {
           position: fixed; inset: 0;
@@ -8379,7 +8397,7 @@ const MobileAdvanceReceiptsPrint = ({ rows, onClose }) => {
         }
         .m-adv-receipt .sigs {
           margin-top: auto;
-          display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px;
+          display: grid; grid-template-columns: 1fr 1fr; gap: 32px;
           padding-top: 6px;
           border-top: 1px dashed #bbb;
         }
@@ -8441,8 +8459,8 @@ const MobileAdvanceReceiptsPrint = ({ rows, onClose }) => {
                   </div>
                 </div>
                 <div>
-                  <div className="k">Status</div>
-                  <div className="v" style={{ textTransform: 'capitalize' }}>{r.status}</div>
+                  <div className="k">Approved by</div>
+                  <div className="v">{r.decider?.name || '—'}</div>
                 </div>
               </div>
               {r.reason && (
@@ -8456,9 +8474,8 @@ const MobileAdvanceReceiptsPrint = ({ rows, onClose }) => {
                 </div>
               )}
               <div className="sigs">
-                <div>Employee</div>
-                <div>HR</div>
-                <div>Owner</div>
+                <div>Employee signature</div>
+                <div>Owner signature</div>
               </div>
             </div>
           ))}
