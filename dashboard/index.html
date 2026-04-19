@@ -749,7 +749,7 @@ const useEmployees = () => {
     if (!window.sb) return;
     const { data } = await window.sb
       .from('employees')
-      .select('id, name, role, section_id, user_type, is_active, joined_date')
+      .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city')
       .eq('is_active', true)
       .order('id');
     setRows(data || []);
@@ -1117,7 +1117,7 @@ const EmployeesPage = () => {
     if (!window.sb) return;
     const [empRes, faceRes] = await Promise.all([
       window.sb.from('employees')
-        .select('id, name, role, section_id, user_type, is_active, joined_date')
+        .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city')
         .order('id'),
       window.sb.from('face_embeddings').select('employee_id'),
     ]);
@@ -1200,7 +1200,7 @@ const EmployeesPage = () => {
   const startNew = () => setEditing({
     id: '', name: '', role: '', section_id: 'fancy',
     user_type: 'staff', is_active: true, joined_date: new Date().toISOString().slice(0, 10),
-    phone: '',
+    phone: '', city: '',
     _new: true, _suggestedId: nextId(),
   });
   const startEdit = (row) => setEditing({ ...row, _new: false });
@@ -1216,6 +1216,7 @@ const EmployeesPage = () => {
       is_active: !!editing.is_active,
       joined_date: editing.joined_date || null,
       phone: (editing.phone || '').trim() || null,
+      city: (editing.city || '').trim() || null,
     };
     if (!payload.name) { toast('Name is required'); return; }
     if (!payload.role) { toast('Role is required'); return; }
@@ -1504,12 +1505,22 @@ const EmployeesPage = () => {
 
             <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
               <div>
+                <label>City / town</label>
+                <input
+                  value={editing.city || ''}
+                  onChange={e => setEditing({ ...editing, city: e.target.value })}
+                  placeholder="e.g. Kumbakonam" />
+              </div>
+              <div>
                 <label>Phone (optional)</label>
                 <input
                   value={editing.phone || ''}
                   onChange={e => setEditing({ ...editing, phone: e.target.value })}
                   placeholder="+91 ..." />
               </div>
+            </div>
+
+            <div className="field-row">
               <div>
                 <label>Active</label>
                 <label className="checkbox-row" style={{ cursor: 'pointer' }}>
@@ -1615,6 +1626,7 @@ const EmployeeDetailModal = ({ employee, faceCount, onClose, onEdit, onCleared }
           <DetailField label="Section" value={sectionLabel} />
           <DetailField label="Joined" value={fmtDate(employee.joined_date)} />
           <DetailField label="Phone" value={employee.phone || '—'} mono />
+          <DetailField label="City / town" value={employee.city || '—'} />
         </div>
 
         {/* Face enrollment card */}
@@ -4928,7 +4940,7 @@ const AdvancesPage = () => {
     if (!window.sb) return;
     const [advRes, empRes] = await Promise.all([
       window.sb.from('advances')
-        .select('*, employees!advances_employee_id_fkey(id, name, role, section_id, user_type), decider:employees!advances_decided_by_fkey(id, name)')
+        .select('*, employees!advances_employee_id_fkey(id, name, role, section_id, user_type, city), decider:employees!advances_decided_by_fkey(id, name)')
         .order('created_at', { ascending: false }),
       window.sb.from('employees')
         .select('id, name, role, section_id, user_type')
@@ -5529,7 +5541,10 @@ const AdvanceReceiptsPrint = ({ rows, onClose }) => {
               <div className="row">
                 <div>
                   <div className="k">Employee</div>
-                  <div className="v">{r.employees?.name || '—'} · {r.employee_id}</div>
+                  <div className="v">
+                    {r.employees?.name || '—'} · {r.employee_id}
+                    {r.employees?.city ? ` · ${r.employees.city}` : ''}
+                  </div>
                 </div>
                 <div>
                   <div className="k">Role</div>

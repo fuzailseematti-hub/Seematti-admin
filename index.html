@@ -1245,7 +1245,7 @@ const useLiveAdvances = () => {
     if (!window.sb) return;
     const { data } = await window.sb
       .from('advances')
-      .select('*, employees!advances_employee_id_fkey(name, role, section_id), decider:employees!advances_decided_by_fkey(id, name)')
+      .select('*, employees!advances_employee_id_fkey(name, role, section_id, city), decider:employees!advances_decided_by_fkey(id, name)')
       .order('created_at', { ascending: false });
     setItems((data || []).filter(r => r.employees));
     setLoading(false);
@@ -3352,7 +3352,7 @@ const EmployeeDetailSheet = ({ employeeId, onClose }) => {
     if (!window.sb || !employeeId) return;
     const [empRes, faceRes] = await Promise.all([
       window.sb.from('employees')
-        .select('id, name, role, section_id, user_type, is_active, joined_date, phone')
+        .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city')
         .eq('id', employeeId).maybeSingle(),
       window.sb.from('face_embeddings').select('pose').eq('employee_id', employeeId),
     ]);
@@ -3441,6 +3441,7 @@ const EmployeeDetailSheet = ({ employeeId, onClose }) => {
               <MobileDetailField label="User type" value={(emp.user_type || 'staff').toUpperCase()} />
               <MobileDetailField label="Joined" value={emp.joined_date || '—'} />
               <MobileDetailField label="Phone" value={emp.phone || '—'} mono />
+              <MobileDetailField label="City" value={emp.city || '—'} />
               <MobileDetailField label="Section" value={SECTION_LABEL[emp.section_id] || '—'} />
             </div>
 
@@ -3545,6 +3546,7 @@ const MobileEmployeeEditSheet = ({ employee, onClose, onSaved }) => {
     role: employee.role || '',
     section_id: employee.section_id || '',
     phone: employee.phone || '',
+    city: employee.city || '',
     is_active: !!employee.is_active,
     joined_date: employee.joined_date || '',
   });
@@ -3566,6 +3568,7 @@ const MobileEmployeeEditSheet = ({ employee, onClose, onSaved }) => {
         role: form.role.trim(),
         section_id: form.section_id || null,
         phone: form.phone.trim() || null,
+        city: form.city.trim() || null,
         is_active: !!form.is_active,
         joined_date: form.joined_date || null,
       }).eq('id', employee.id);
@@ -3609,6 +3612,11 @@ const MobileEmployeeEditSheet = ({ employee, onClose, onSaved }) => {
         <FieldLabel>Phone</FieldLabel>
         <input value={form.phone} onChange={e => setForm(f => ({ ...f, phone: e.target.value }))}
           placeholder="+91 …" style={enrollInputStyle(T_)} />
+        <div style={{ height: 12 }} />
+
+        <FieldLabel>City / town</FieldLabel>
+        <input value={form.city} onChange={e => setForm(f => ({ ...f, city: e.target.value }))}
+          placeholder="e.g. Kumbakonam" style={enrollInputStyle(T_)} />
         <div style={{ height: 12 }} />
 
         <FieldLabel>Joined date</FieldLabel>
@@ -8437,7 +8445,10 @@ const MobileAdvanceReceiptsPrint = ({ rows, onClose }) => {
               <div className="row">
                 <div>
                   <div className="k">Employee</div>
-                  <div className="v">{r.employees?.name || '—'} · {r.employee_id}</div>
+                  <div className="v">
+                    {r.employees?.name || '—'} · {r.employee_id}
+                    {r.employees?.city ? ` · ${r.employees.city}` : ''}
+                  </div>
                 </div>
                 <div>
                   <div className="k">Role</div>
