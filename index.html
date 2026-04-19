@@ -8277,7 +8277,7 @@ const MobileAdvanceReceiptsPrint = ({ rows, onClose }) => {
     ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
     : '—';
 
-  return (
+  return ReactDOM.createPortal(
     <>
       <style>{`
         @media print {
@@ -8291,8 +8291,8 @@ const MobileAdvanceReceiptsPrint = ({ rows, onClose }) => {
             min-width: 0 !important; max-width: none !important;
             height: auto !important; min-height: 0 !important; max-height: none !important;
           }
-          body * { visibility: hidden !important; }
-          .m-adv-print-root, .m-adv-print-root * { visibility: visible !important; }
+          /* Hide every direct child of body except the portaled print root. */
+          body > *:not(.m-adv-print-root) { display: none !important; }
           .m-adv-print-root {
             position: static !important;
             display: block !important;
@@ -8300,6 +8300,7 @@ const MobileAdvanceReceiptsPrint = ({ rows, onClose }) => {
             margin: 0 !important; padding: 0 !important;
             background: #fff !important;
             overflow: visible !important;
+            z-index: auto !important;
           }
           .m-adv-print-bar { display: none !important; }
           .m-adv-print-grid {
@@ -8481,7 +8482,8 @@ const MobileAdvanceReceiptsPrint = ({ rows, onClose }) => {
           ))}
         </div>
       </div>
-    </>
+    </>,
+    document.body
   );
 };
 

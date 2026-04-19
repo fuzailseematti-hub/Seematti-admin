@@ -5373,7 +5373,7 @@ const AdvanceReceiptsPrint = ({ rows, onClose }) => {
     ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
     : '—';
 
-  return (
+  return ReactDOM.createPortal(
     <>
       <style>{`
         @media print {
@@ -5387,8 +5387,7 @@ const AdvanceReceiptsPrint = ({ rows, onClose }) => {
             min-width: 0 !important; max-width: none !important;
             height: auto !important; min-height: 0 !important; max-height: none !important;
           }
-          body * { visibility: hidden !important; }
-          .advance-print-root, .advance-print-root * { visibility: visible !important; }
+          body > *:not(.advance-print-root) { display: none !important; }
           .advance-print-root {
             position: static !important;
             display: block !important;
@@ -5396,6 +5395,7 @@ const AdvanceReceiptsPrint = ({ rows, onClose }) => {
             margin: 0 !important; padding: 0 !important;
             background: #fff !important;
             overflow: visible !important;
+            z-index: auto !important;
           }
           .advance-print-toolbar { display: none !important; }
           .advance-print-grid {
@@ -5571,7 +5571,8 @@ const AdvanceReceiptsPrint = ({ rows, onClose }) => {
           ))}
         </div>
       </div>
-    </>
+    </>,
+    document.body
   );
 };
 
