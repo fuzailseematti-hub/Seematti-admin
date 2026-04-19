@@ -4920,6 +4920,7 @@ const AdvancesPage = () => {
   const [filing, setFiling] = useState(null);      // new advance form
   const [detail, setDetail] = useState(null);      // selected row to view/decide
   const [saving, setSaving] = useState(false);
+  const [printing, setPrinting] = useState(false); // print preview on
 
   const [employees, setEmployees] = useState([]);
 
@@ -5083,11 +5084,17 @@ const AdvancesPage = () => {
         </div>
         <input type="search" placeholder="Search name, ID, or reason…"
           value={search} onChange={e => setSearch(e.target.value)} />
-        {can('advances', 'create') && (
-          <button className="btn primary" onClick={startFile} style={{ marginLeft: 'auto' }}>
-            + File advance
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          <button className="btn"
+            onClick={() => setPrinting(true)}
+            disabled={!filtered.some(r => r.status === 'approved' || r.status === 'completed')}
+            title="Print approved advance receipts (filtered)">
+            🖨 Print receipts
           </button>
-        )}
+          {can('advances', 'create') && (
+            <button className="btn primary" onClick={startFile}>+ File advance</button>
+          )}
+        </div>
       </div>
 
       <div className="table-wrap">
@@ -5339,7 +5346,212 @@ const AdvancesPage = () => {
           </>
         )}
       </Modal>
+
+      {printing && (
+        <AdvanceReceiptsPrint
+          rows={filtered.filter(r => r.status === 'approved' || r.status === 'completed')}
+          onClose={() => setPrinting(false)}
+        />
+      )}
     </div>
+  );
+};
+
+// ──────────────────────────────────────────────────────────
+// Print view: approved advance receipts laid out 6 per A4 page.
+// Each receipt is keep-together (page-break-inside: avoid), so nothing
+// splits mid-card. Fewer than 6 → the page just has trailing whitespace.
+// ──────────────────────────────────────────────────────────
+const AdvanceReceiptsPrint = ({ rows, onClose }) => {
+  const today = new Date().toLocaleDateString('en-GB', {
+    day: 'numeric', month: 'long', year: 'numeric',
+  });
+
+  React.useEffect(() => {
+    // Auto-trigger the browser print dialog shortly after mount. User
+    // can still tap the button to reprint.
+    const t = setTimeout(() => window.print(), 350);
+    return () => clearTimeout(t);
+  }, []);
+
+  const fmt = (iso) => iso
+    ? new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+    : '—';
+
+  return (
+    <>
+      <style>{`
+        @media print {
+          @page { size: A4; margin: 10mm; }
+          html, body { background: #fff !important; }
+          body > *:not(.advance-print-root) { display: none !important; }
+          .advance-print-root { position: static !important; background: #fff !important; }
+          .advance-print-toolbar { display: none !important; }
+          .advance-print-grid { padding: 0 !important; max-width: none !important; }
+          .advance-receipt { page-break-inside: avoid; break-inside: avoid; }
+        }
+        .advance-print-root {
+          position: fixed; inset: 0;
+          background: #eceae5;
+          z-index: 9999;
+          overflow-y: auto;
+        }
+        .advance-print-toolbar {
+          position: sticky; top: 0;
+          background: #1A1613; color: #fff;
+          padding: 14px 24px;
+          display: flex; align-items: center; gap: 12px;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+          z-index: 2;
+        }
+        .advance-print-toolbar .title {
+          font-family: 'Fraunces', Georgia, serif;
+          font-size: 16px; font-weight: 500; letter-spacing: -0.3px;
+          flex: 1;
+        }
+        .advance-print-toolbar button {
+          background: #fff; color: #1A1613;
+          border: none; padding: 8px 14px; border-radius: 8px;
+          font-size: 13px; font-weight: 600; cursor: pointer;
+          font-family: inherit;
+        }
+        .advance-print-toolbar button.secondary {
+          background: rgba(255,255,255,0.12); color: #fff;
+        }
+        .advance-print-grid {
+          max-width: 794px;
+          margin: 20px auto;
+          padding: 0 12px;
+          display: flex; flex-direction: column; gap: 6px;
+        }
+        .advance-receipt {
+          background: #fff;
+          border: 1px solid #1A1613;
+          padding: 14px 18px;
+          height: 1.65in;
+          box-sizing: border-box;
+          display: flex; flex-direction: column;
+          font-family: 'Inter', system-ui, sans-serif;
+          color: #1A1613;
+        }
+        .advance-receipt .hdr {
+          display: flex; align-items: center; justify-content: space-between;
+          border-bottom: 1px dashed #bbb;
+          padding-bottom: 6px;
+        }
+        .advance-receipt .hdr .brand {
+          font-family: 'Fraunces', Georgia, serif;
+          font-weight: 600; font-size: 14px; letter-spacing: -0.3px;
+        }
+        .advance-receipt .hdr .kind {
+          font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase;
+          color: #777; font-weight: 700;
+        }
+        .advance-receipt .hdr .date {
+          font-size: 10px; color: #555;
+          font-family: 'JetBrains Mono', Menlo, monospace;
+        }
+        .advance-receipt .row {
+          display: flex; justify-content: space-between; gap: 14px;
+          margin-top: 6px;
+        }
+        .advance-receipt .row .k {
+          font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px;
+          color: #777; font-weight: 700;
+        }
+        .advance-receipt .row .v {
+          font-size: 12.5px; color: #1A1613; font-weight: 500;
+        }
+        .advance-receipt .amount {
+          font-family: 'Fraunces', Georgia, serif;
+          font-size: 20px; font-weight: 600; letter-spacing: -0.5px;
+          color: #0A5A29;
+        }
+        .advance-receipt .sigs {
+          margin-top: auto;
+          display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px;
+          padding-top: 8px;
+          border-top: 1px dashed #bbb;
+        }
+        .advance-receipt .sigs > div {
+          font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px;
+          color: #777; font-weight: 700;
+          border-top: 1px solid #1A1613;
+          padding-top: 4px; margin-top: 20px;
+          text-align: center;
+        }
+      `}</style>
+      <div className="advance-print-root">
+        <div className="advance-print-toolbar">
+          <div className="title">
+            Advance receipts — {rows.length} record{rows.length === 1 ? '' : 's'} · {today}
+          </div>
+          <button className="secondary" onClick={onClose}>Close</button>
+          <button onClick={() => window.print()}>🖨 Print</button>
+        </div>
+        <div className="advance-print-grid">
+          {rows.length === 0 && (
+            <div style={{
+              padding: 30, textAlign: 'center', background: '#fff',
+              border: '1px dashed #999', color: '#555', fontSize: 13,
+            }}>
+              No approved advances to print.
+            </div>
+          )}
+          {rows.map(r => (
+            <div key={r.id} className="advance-receipt">
+              <div className="hdr">
+                <div className="brand">Seemaatti · Mayiladuthurai</div>
+                <div className="kind">Advance receipt</div>
+                <div className="date">{fmt(r.decided_at || r.created_at)}</div>
+              </div>
+              <div className="row">
+                <div>
+                  <div className="k">Employee</div>
+                  <div className="v">{r.employees?.name || '—'} · {r.employee_id}</div>
+                </div>
+                <div>
+                  <div className="k">Role</div>
+                  <div className="v">{r.employees?.role || '—'}{r.employees?.section_id ? ` · ${SECTION_META[r.employees.section_id]?.label || r.employees.section_id}` : ''}</div>
+                </div>
+              </div>
+              <div className="row">
+                <div>
+                  <div className="k">Amount approved</div>
+                  <div className="amount">{rupees(r.amount_approved)}</div>
+                </div>
+                <div>
+                  <div className="k">Repayment</div>
+                  <div className="v">
+                    {rupees(r.monthly_deduction)} × {r.months_total} mo
+                    {r.months_deducted > 0 && <> · <span style={{color:'#555'}}>{r.months_deducted} paid</span></>}
+                  </div>
+                </div>
+                <div>
+                  <div className="k">Status</div>
+                  <div className="v" style={{ textTransform: 'capitalize' }}>{r.status}</div>
+                </div>
+              </div>
+              {r.reason && (
+                <div className="row">
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="k">Reason</div>
+                    <div className="v" style={{
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}>{r.reason}</div>
+                  </div>
+                </div>
+              )}
+              <div className="sigs">
+                <div>Employee signature</div>
+                <div>HR signature</div>
+                <div>Owner signature</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
   );
 };
 
