@@ -99,7 +99,10 @@
   /* App shell */
   .shell {
     display: grid;
-    grid-template-columns: 240px 1fr;
+    /* minmax(0, 1fr) stops wide tables from stretching the whole
+       grid and forcing a body-level horizontal scroll; instead the
+       .table-wrap below scrolls on its own. */
+    grid-template-columns: 240px minmax(0, 1fr);
     height: 100vh;
   }
   .sidebar {
@@ -180,6 +183,9 @@
   /* Main content */
   .main {
     overflow-y: auto;
+    /* Needed inside a grid cell so wide children (tables, long
+       toolbars) don't push the parent column wider. */
+    min-width: 0;
     background: var(--bg);
   }
   .topbar {
@@ -294,10 +300,20 @@
   /* Table */
   .table-wrap {
     background: var(--surface); border: 1px solid var(--border);
-    border-radius: 14px; overflow: hidden;
+    border-radius: 14px;
+    /* Let wide tables scroll horizontally inside their wrapper
+       (was overflow: hidden, which just clipped the right edge). */
+    overflow-x: auto;
+    overflow-y: visible;
+    -webkit-overflow-scrolling: touch; /* iOS momentum */
+    overscroll-behavior-x: contain;
+    scroll-behavior: smooth;
   }
   table.data {
-    width: 100%; border-collapse: collapse;
+    /* width:100% for tables that fit; min-width:max-content lets
+       wider tables grow past the wrapper and trigger the scroll. */
+    width: 100%; min-width: max-content;
+    border-collapse: collapse;
   }
   table.data th {
     font-size: 10.5px; font-weight: 700; letter-spacing: 0.5px;
