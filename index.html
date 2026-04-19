@@ -1235,6 +1235,70 @@ const useLiveLeaves = () => {
 window.useLiveLeaves = useLiveLeaves;
 
 // ──────────────────────────────────────────────────────────
+// Live advances hook — same pattern as leaves. Joined with employees.
+// ──────────────────────────────────────────────────────────
+const useLiveAdvances = () => {
+  const [items, setItems]     = React.useState([]);
+  const [loading, setLoading] = React.useState(true);
+
+  const fetchAll = React.useCallback(async () => {
+    if (!window.sb) return;
+    const { data } = await window.sb
+      .from('advances')
+      .select('*, employees(name, role, section_id)')
+      .order('created_at', { ascending: false });
+    setItems((data || []).filter(r => r.employees));
+    setLoading(false);
+  }, []);
+
+  React.useEffect(() => {
+    if (!window.sb) return;
+    fetchAll();
+    const ch = window.sb.channel('live-advances')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'advances' },
+        () => fetchAll())
+      .subscribe();
+    return () => { window.sb.removeChannel(ch); };
+  }, [fetchAll]);
+
+  const file = React.useCallback(async ({ employeeId, amount, months, reason, filedBy }) => {
+    if (!window.sb) return;
+    return await window.sb.from('advances').insert({
+      employee_id: employeeId,
+      amount_requested: amount,
+      months_total: months,
+      reason: reason || null,
+      status: 'pending',
+      filed_by: filedBy || null,
+    });
+  }, []);
+
+  const decide = React.useCallback(async ({ id, action, amount, months, note, deciderId }) => {
+    if (!window.sb) return;
+    const patch = {
+      status: action,
+      decided_by: deciderId || null,
+      decided_at: new Date().toISOString(),
+      owner_note: (note || '').trim() || null,
+    };
+    if (action === 'approved') {
+      patch.amount_approved = amount;
+      patch.months_total = months;
+      patch.monthly_deduction = Math.ceil(amount / months);
+    }
+    return await window.sb.from('advances').update(patch).eq('id', id);
+  }, []);
+
+  const cancel = React.useCallback(async (id) => {
+    if (!window.sb) return;
+    return await window.sb.from('advances').update({ status: 'cancelled' }).eq('id', id);
+  }, []);
+
+  return { items, loading, file, decide, cancel };
+};
+window.useLiveAdvances = useLiveAdvances;
+
+// ──────────────────────────────────────────────────────────
 // Live tasks hook — filtered by scope ('owner' or 'staff') and
 // optionally assignee. Exposes toggle(id, done) for checkbox taps.
 // ──────────────────────────────────────────────────────────
@@ -2423,6 +2487,10 @@ const OwnerHomeScreen = () => {
   // Live counts for 'Needs your attention' cards
   const { items: liveLeaves } = window.useLiveLeaves ? window.useLiveLeaves() : { items: [] };
   const pendingLeaves = liveLeaves.filter(l => l.status === 'pending').length;
+  const { items: liveAdvances } = window.useLiveAdvances
+    ? window.useLiveAdvances()
+    : { items: [] };
+  const pendingAdvances = liveAdvances.filter(a => a.status === 'pending').length;
   const { tasks: openingTasks } = window.useLiveTasks
     ? window.useLiveTasks({ scope: 'owner' })
     : { tasks: [] };
@@ -2529,6 +2597,17 @@ const OwnerHomeScreen = () => {
             subtitle={pendingLeaves ? 'Awaiting your approval' : 'All caught up'}
             onClick={() => nav.go('leaves')}
           />
+          {pendingAdvances > 0 && (
+            <AttentionCard
+              icon="wallet" tone="warning"
+              title={`${pendingAdvances} advance request${pendingAdvances === 1 ? '' : 's'}`}
+              subtitle="Awaiting your approval"
+              onClick={() => {
+                window.__advancesFilter = 'pending';
+                nav.go('advances');
+              }}
+            />
+          )}
           <AttentionCard
             icon="tasks" tone="brand"
             title={t('openingTask')}
@@ -4880,6 +4959,10 @@ const HRHomeScreen = () => {
 
   const { items: hrAnns } = window.useLiveAnnouncements ? window.useLiveAnnouncements() : { items: [] };
   const hrAnnCount = hrAnns.length || M.announcements.length;
+  const { items: hrAdvances } = window.useLiveAdvances
+    ? window.useLiveAdvances()
+    : { items: [] };
+  const hrPendingAdvances = hrAdvances.filter(a => a.status === 'pending').length;
   const hrSectionCount = hasAll
     ? (live.sections ? live.sections.length : (M.floors || []).length)
     : (allowed?.length || 0);
@@ -5090,6 +5173,13 @@ const HRHomeScreen = () => {
             value="My"
             sub="Submit your own request"
             onClick={() => nav.go('applyLeave')}
+          />
+          <HRTile
+            icon="wallet" tone="info"
+            title="Advances"
+            value={hrPendingAdvances || 0}
+            sub={hrPendingAdvances ? `${hrPendingAdvances} awaiting owner` : 'File or review'}
+            onClick={() => nav.go('advances')}
           />
           <HRTile
             icon="bell" tone="neutral"
@@ -7579,6 +7669,479 @@ const ChecklistScreen = () => {
 window.ChecklistScreen = ChecklistScreen;
 
 
+// ─────────────────────────────────────────────────────────────
+// Advances screen — list + file + review. HR files, Owner decides.
+// ─────────────────────────────────────────────────────────────
+const ADV_TONE_MOBILE = {
+  pending:   'warning',
+  approved:  'success',
+  rejected:  'danger',
+  completed: 'info',
+  cancelled: 'neutral',
+};
+
+const fmtRupees = (n) => {
+  if (n == null) return '—';
+  return '₹' + Number(n).toLocaleString('en-IN');
+};
+
+const AdvancesScreen = () => {
+  const { user, userId, toast, nav } = useApp();
+  const T_ = window.TOKENS;
+  const canFile    = user === 'hr' || user === 'owner';
+  const canApprove = user === 'owner';
+
+  const { items, loading, file, decide, cancel } = window.useLiveAdvances
+    ? window.useLiveAdvances()
+    : { items: [], loading: false, file: async () => {}, decide: async () => {}, cancel: async () => {} };
+
+  const [statusFilter, setStatusFilter] = React.useState(
+    () => (window.__advancesFilter || 'pending')
+  );
+  React.useEffect(() => {
+    if (window.__advancesFilter) {
+      setStatusFilter(window.__advancesFilter);
+      delete window.__advancesFilter;
+    }
+  }, []);
+
+  const [filing, setFiling]   = React.useState(null);
+  const [detail, setDetail]   = React.useState(null);
+  const [saving, setSaving]   = React.useState(false);
+
+  const [people, setPeople] = React.useState([]);
+  React.useEffect(() => {
+    if (!window.sb || !canFile) return;
+    let cancelled = false;
+    (async () => {
+      const { data } = await window.sb.from('employees')
+        .select('id, name, role, section_id, user_type')
+        .eq('is_active', true)
+        .neq('user_type', 'owner')
+        .order('name');
+      if (!cancelled) setPeople(data || []);
+    })();
+    return () => { cancelled = true; };
+  }, [canFile]);
+
+  const filtered = React.useMemo(() =>
+    items.filter(r => statusFilter === 'all' || r.status === statusFilter),
+    [items, statusFilter]);
+
+  const counts = React.useMemo(() => ({
+    pending:   items.filter(i => i.status === 'pending').length,
+    approved:  items.filter(i => i.status === 'approved').length,
+    completed: items.filter(i => i.status === 'completed').length,
+    rejected:  items.filter(i => i.status === 'rejected').length,
+    all:       items.length,
+    outstanding: items
+      .filter(i => i.status === 'approved')
+      .reduce((s, r) => s + Math.max(0, r.months_total - r.months_deducted) * (r.monthly_deduction || 0), 0),
+  }), [items]);
+
+  const startFile = () => setFiling({
+    employee_id: '',
+    amount: 5000,
+    months: 2,
+    reason: '',
+  });
+
+  const submitFile = async () => {
+    if (!filing || saving) return;
+    if (!filing.employee_id) { toast('Pick an employee'); return; }
+    const amt = parseInt(filing.amount, 10);
+    const mo  = parseInt(filing.months, 10);
+    if (!amt || amt <= 0)  { toast('Amount must be > 0'); return; }
+    if (!mo  || mo  <= 0)  { toast('Months must be > 0'); return; }
+    setSaving(true);
+    try {
+      await file({
+        employeeId: filing.employee_id,
+        amount: amt,
+        months: mo,
+        reason: (filing.reason || '').trim(),
+        filedBy: userId || null,
+      });
+      toast('Advance request filed');
+      setFiling(null);
+    } finally { setSaving(false); }
+  };
+
+  const openDetail = (row) => setDetail({
+    ...row,
+    _amount: row.amount_approved ?? row.amount_requested,
+    _months: row.months_total,
+    _note:   row.owner_note || '',
+  });
+
+  const submitDecision = async (action) => {
+    if (!detail || saving || !canApprove) return;
+    const amt = parseInt(detail._amount, 10);
+    const mo  = parseInt(detail._months, 10);
+    if (action === 'approved') {
+      if (!amt || amt <= 0) { toast('Amount must be > 0'); return; }
+      if (!mo  || mo  <= 0) { toast('Months must be > 0'); return; }
+    }
+    setSaving(true);
+    try {
+      await decide({ id: detail.id, action, amount: amt, months: mo, note: detail._note, deciderId: userId });
+      toast(action === 'approved' ? 'Advance approved' : 'Advance rejected');
+      setDetail(null);
+    } finally { setSaving(false); }
+  };
+
+  const fmtRemaining = (r) => {
+    if (r.status !== 'approved') return '—';
+    const mLeft = Math.max(0, r.months_total - r.months_deducted);
+    return `${fmtRupees(mLeft * (r.monthly_deduction || 0))} · ${mLeft}/${r.months_total} mo`;
+  };
+
+  return (
+    <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 90 }}>
+      <ScreenHeader back title="Advances"
+        subtitle={`${counts.pending} pending · ${fmtRupees(counts.outstanding)} outstanding`}
+        trailing={canFile ? (
+          <button onClick={startFile} style={{
+            height: 34, padding: '0 12px', borderRadius: 10,
+            background: T_.maroon, color: '#fff', border: 'none',
+            fontSize: 12, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer',
+            display: 'inline-flex', alignItems: 'center', gap: 4,
+          }}>
+            <Icon name="plus" size={12} /> File
+          </button>
+        ) : null}
+      />
+
+      <div style={{ padding: '0 16px' }}>
+        {/* Status tabs */}
+        <div style={{
+          display: 'flex', gap: 6, padding: 4, background: T_.surfaceAlt,
+          borderRadius: 12, overflowX: 'auto', marginBottom: 14,
+        }}>
+          {[
+            { id: 'pending',   label: `Pending · ${counts.pending}` },
+            { id: 'approved',  label: `Approved · ${counts.approved}` },
+            { id: 'completed', label: `Done · ${counts.completed}` },
+            { id: 'rejected',  label: `Rejected · ${counts.rejected}` },
+            { id: 'all',       label: `All · ${counts.all}` },
+          ].map(s => (
+            <button key={s.id} onClick={() => setStatusFilter(s.id)}
+              style={{
+                padding: '8px 12px', borderRadius: 8, border: 'none',
+                background: statusFilter === s.id ? T_.surface : 'transparent',
+                color: statusFilter === s.id ? T_.ink : T_.inkMuted,
+                fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap',
+                fontFamily: 'inherit', cursor: 'pointer',
+                boxShadow: statusFilter === s.id ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
+              }}>{s.label}</button>
+          ))}
+        </div>
+
+        {filtered.length === 0 && !loading && (
+          <div style={{
+            background: T_.surface, border: `1px dashed ${T_.border}`,
+            borderRadius: 14, padding: '30px 20px', textAlign: 'center',
+          }}>
+            <div style={{
+              fontFamily: 'Fraunces, Georgia, serif', fontSize: 18,
+              fontWeight: 500, color: T_.ink, marginBottom: 4,
+            }}>No advances</div>
+            <div style={{ fontSize: 12.5, color: T_.inkMuted }}>
+              {canFile ? 'Tap File to start a new request.' : 'Nothing in this view.'}
+            </div>
+          </div>
+        )}
+
+        {filtered.length > 0 && (
+          <div style={{
+            display: 'flex', flexDirection: 'column', gap: 10,
+          }}>
+            {filtered.map(r => (
+              <button key={r.id} onClick={() => openDetail(r)} style={{
+                background: T_.surface, border: `1px solid ${T_.border}`,
+                borderRadius: 14, padding: 14,
+                textAlign: 'left', fontFamily: 'inherit', cursor: 'pointer',
+                display: 'flex', alignItems: 'flex-start', gap: 12,
+              }}>
+                <Avatar name={r.employees.name} size={38} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                    <div style={{ fontSize: 13.5, fontWeight: 600, color: T_.ink }}>
+                      {r.employees.name}
+                    </div>
+                    <Pill tone={ADV_TONE_MOBILE[r.status]} size="sm">{r.status}</Pill>
+                  </div>
+                  <div style={{ fontSize: 11.5, color: T_.inkMuted, marginTop: 2 }}>
+                    {r.employees.role}
+                    {r.employees.section_id && ` · ${SECTION_LABEL[r.employees.section_id]}`}
+                  </div>
+                  <div style={{
+                    display: 'flex', gap: 14, marginTop: 8, alignItems: 'baseline', flexWrap: 'wrap',
+                  }}>
+                    <div style={{
+                      fontFamily: 'Fraunces, Georgia, serif',
+                      fontSize: 22, fontWeight: 600, color: T_.ink, letterSpacing: -0.5, lineHeight: 1,
+                    }}>
+                      {fmtRupees(r.amount_approved ?? r.amount_requested)}
+                    </div>
+                    <div style={{ fontSize: 11.5, color: T_.inkMuted }}>
+                      {r.status === 'approved'
+                        ? <>Remaining <strong style={{ color: T_.ink }}>{fmtRemaining(r)}</strong></>
+                        : <>Requested · {r.months_total} mo</>}
+                    </div>
+                  </div>
+                  {r.reason && (
+                    <div style={{
+                      fontSize: 12, color: T_.inkMuted, marginTop: 6,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}>{r.reason}</div>
+                  )}
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* File sheet */}
+      {filing && (
+        <div onClick={() => setFiling(null)} style={{
+          position: 'absolute', inset: 0, background: 'rgba(11, 13, 14, 0.55)',
+          display: 'flex', alignItems: 'flex-end', zIndex: 150,
+        }}>
+          <div onClick={e => e.stopPropagation()} style={{
+            width: '100%', background: T_.surface, borderRadius: '20px 20px 0 0',
+            padding: 20, maxHeight: '90%', overflowY: 'auto',
+          }}>
+            <div style={{
+              fontFamily: 'Fraunces, Georgia, serif', fontSize: 20,
+              fontWeight: 500, color: T_.ink, letterSpacing: -0.3, marginBottom: 14,
+            }}>File advance</div>
+
+            <FieldLabel>Employee</FieldLabel>
+            <select value={filing.employee_id}
+              onChange={e => setFiling({ ...filing, employee_id: e.target.value })}
+              style={{ ...enrollInputStyle(T_), cursor: 'pointer' }}>
+              <option value="">— pick —</option>
+              {people.map(p => (
+                <option key={p.id} value={p.id}>
+                  {p.name} · {p.id}
+                  {p.role ? ` · ${p.role}` : ''}
+                </option>
+              ))}
+            </select>
+            <div style={{ height: 14 }} />
+
+            <FieldLabel>Amount (₹)</FieldLabel>
+            <input type="number" min="1" value={filing.amount}
+              onChange={e => setFiling({ ...filing, amount: e.target.value })}
+              style={{ ...enrollInputStyle(T_), fontFamily: 'JetBrains Mono, Menlo, monospace' }} />
+            <div style={{ height: 14 }} />
+
+            <FieldLabel>Repay over (months)</FieldLabel>
+            <input type="number" min="1" max="24" value={filing.months}
+              onChange={e => setFiling({ ...filing, months: e.target.value })}
+              style={enrollInputStyle(T_)} />
+            {(() => {
+              const amt = parseInt(filing.amount, 10) || 0;
+              const mo  = parseInt(filing.months, 10) || 0;
+              if (!amt || !mo) return null;
+              return (
+                <div style={{ fontSize: 11.5, color: T_.inkMuted, marginTop: 6 }}>
+                  ~ {fmtRupees(Math.ceil(amt / mo))} deducted per month
+                </div>
+              );
+            })()}
+            <div style={{ height: 14 }} />
+
+            <FieldLabel>Reason</FieldLabel>
+            <textarea value={filing.reason}
+              onChange={e => setFiling({ ...filing, reason: e.target.value })}
+              placeholder="e.g. Medical emergency for mother"
+              style={{
+                width: '100%', minHeight: 80, padding: 12, borderRadius: 12,
+                background: T_.bg, border: `1px solid ${T_.border}`,
+                fontSize: 14, color: T_.ink, fontFamily: 'inherit',
+                boxSizing: 'border-box', resize: 'vertical', outline: 'none',
+              }} />
+
+            <div style={{
+              fontSize: 12, color: T_.info, background: T_.infoSoft,
+              padding: 10, borderRadius: 10, marginTop: 14,
+            }}>
+              The Owner reviews every request and may adjust the approved amount or repayment period.
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
+              <button onClick={() => setFiling(null)} disabled={saving}
+                style={{
+                  flex: 1, padding: 12, borderRadius: 12,
+                  background: T_.surface, border: `1px solid ${T_.border}`,
+                  color: T_.ink, fontSize: 13, fontWeight: 600,
+                  fontFamily: 'inherit', cursor: 'pointer',
+                }}>Cancel</button>
+              <button onClick={submitFile} disabled={saving}
+                style={{
+                  flex: 1.2, padding: 12, borderRadius: 12,
+                  background: T_.maroon, color: '#fff', border: 'none',
+                  fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
+                  cursor: saving ? 'not-allowed' : 'pointer',
+                  opacity: saving ? 0.6 : 1,
+                }}>{saving ? 'Filing…' : 'Submit for approval'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Detail / decide sheet */}
+      {detail && (
+        <div onClick={() => setDetail(null)} style={{
+          position: 'absolute', inset: 0, background: 'rgba(11, 13, 14, 0.55)',
+          display: 'flex', alignItems: 'flex-end', zIndex: 150,
+        }}>
+          <div onClick={e => e.stopPropagation()} style={{
+            width: '100%', background: T_.surface, borderRadius: '20px 20px 0 0',
+            padding: 20, maxHeight: '90%', overflowY: 'auto',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
+              <Avatar name={detail.employees.name} size={48} />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 16, fontWeight: 600, color: T_.ink }}>
+                  {detail.employees.name}
+                </div>
+                <div style={{ fontSize: 12, color: T_.inkMuted, marginTop: 2 }}>
+                  {detail.employees.role}
+                  {detail.employees.section_id && ` · ${SECTION_LABEL[detail.employees.section_id]}`}
+                </div>
+              </div>
+              <Pill tone={ADV_TONE_MOBILE[detail.status]} size="sm">{detail.status}</Pill>
+            </div>
+
+            <div style={{
+              background: T_.bg, border: `1px solid ${T_.border}`,
+              borderRadius: 14, padding: 14, marginBottom: 14,
+              display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10,
+            }}>
+              <MobileDetailField label="Requested" value={fmtRupees(detail.amount_requested)} mono />
+              <MobileDetailField label="Months" value={String(detail.months_total)} />
+              {detail.amount_approved != null && (
+                <>
+                  <MobileDetailField label="Approved" value={fmtRupees(detail.amount_approved)} mono />
+                  <MobileDetailField label="Per month" value={fmtRupees(detail.monthly_deduction)} mono />
+                </>
+              )}
+              {detail.status === 'approved' && (
+                <>
+                  <MobileDetailField label="Paid so far"
+                    value={`${detail.months_deducted} / ${detail.months_total}`} />
+                  <MobileDetailField label="Remaining"
+                    value={fmtRupees(Math.max(0, detail.months_total - detail.months_deducted) * (detail.monthly_deduction || 0))}
+                    mono />
+                </>
+              )}
+              {detail.reason && (
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <MobileDetailField label="Reason" value={detail.reason} />
+                </div>
+              )}
+              {detail.owner_note && detail.status !== 'pending' && (
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <MobileDetailField label="Owner's note" value={detail.owner_note} />
+                </div>
+              )}
+            </div>
+
+            {/* Owner decision form (pending + owner) */}
+            {detail.status === 'pending' && canApprove && (
+              <>
+                <FieldLabel>Approved amount (₹)</FieldLabel>
+                <input type="number" min="1" value={detail._amount}
+                  onChange={e => setDetail({ ...detail, _amount: e.target.value })}
+                  style={{ ...enrollInputStyle(T_), fontFamily: 'JetBrains Mono, Menlo, monospace' }} />
+                <div style={{ height: 12 }} />
+
+                <FieldLabel>Months</FieldLabel>
+                <input type="number" min="1" max="24" value={detail._months}
+                  onChange={e => setDetail({ ...detail, _months: e.target.value })}
+                  style={enrollInputStyle(T_)} />
+                {(() => {
+                  const amt = parseInt(detail._amount, 10) || 0;
+                  const mo  = parseInt(detail._months, 10) || 0;
+                  if (!amt || !mo) return null;
+                  return (
+                    <div style={{ fontSize: 11.5, color: T_.inkMuted, marginTop: 6 }}>
+                      {fmtRupees(Math.ceil(amt / mo))} / month for {mo} mo
+                    </div>
+                  );
+                })()}
+                <div style={{ height: 12 }} />
+
+                <FieldLabel>Note to HR (optional)</FieldLabel>
+                <textarea value={detail._note}
+                  onChange={e => setDetail({ ...detail, _note: e.target.value })}
+                  placeholder="e.g. Approved at ₹6k instead of ₹10k due to recent advance"
+                  style={{
+                    width: '100%', minHeight: 70, padding: 12, borderRadius: 12,
+                    background: T_.bg, border: `1px solid ${T_.border}`,
+                    fontSize: 13.5, color: T_.ink, fontFamily: 'inherit',
+                    boxSizing: 'border-box', resize: 'vertical', outline: 'none',
+                  }} />
+
+                <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
+                  <button onClick={() => setDetail(null)} disabled={saving} style={{
+                    flex: 1, padding: 12, borderRadius: 12,
+                    background: T_.surface, border: `1px solid ${T_.border}`,
+                    color: T_.ink, fontSize: 13, fontWeight: 600,
+                    fontFamily: 'inherit', cursor: 'pointer',
+                  }}>Close</button>
+                  <button onClick={() => submitDecision('rejected')} disabled={saving}
+                    style={{
+                      flex: 1, padding: 12, borderRadius: 12,
+                      background: T_.surface, border: `1px solid ${T_.border}`,
+                      color: T_.danger, fontSize: 13, fontWeight: 600,
+                      fontFamily: 'inherit', cursor: saving ? 'not-allowed' : 'pointer',
+                    }}>Reject</button>
+                  <button onClick={() => submitDecision('approved')} disabled={saving}
+                    style={{
+                      flex: 1.2, padding: 12, borderRadius: 12,
+                      background: T_.success, color: '#fff', border: 'none',
+                      fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
+                      cursor: saving ? 'not-allowed' : 'pointer',
+                      opacity: saving ? 0.6 : 1,
+                    }}>{saving ? 'Saving…' : 'Approve'}</button>
+                </div>
+              </>
+            )}
+
+            {/* Read-only path for non-owner or non-pending */}
+            {!(detail.status === 'pending' && canApprove) && (
+              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                {detail.status === 'pending' && canFile && (
+                  <button onClick={async () => { await cancel(detail.id); toast('Cancelled'); setDetail(null); }}
+                    style={{
+                      flex: 1, padding: 12, borderRadius: 12,
+                      background: T_.surface, border: `1px solid ${T_.border}`,
+                      color: T_.danger, fontSize: 13, fontWeight: 600,
+                      fontFamily: 'inherit', cursor: 'pointer',
+                    }}>Cancel request</button>
+                )}
+                <button onClick={() => setDetail(null)} style={{
+                  flex: 1, padding: 12, borderRadius: 12,
+                  background: T_.maroon, color: '#fff', border: 'none',
+                  fontSize: 13, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer',
+                }}>Close</button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+window.AdvancesScreen = AdvancesScreen;
+
+
 // ========== mount ==========
 
 const W = (n) => window[n];
@@ -7748,6 +8311,7 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     settings:        makeScreen('SettingsScreen'),
     checklist:       makeScreen('ChecklistScreen'),
     managerHome:     makeScreen('ManagerHomeScreen'),
+    advances:        makeScreen('AdvancesScreen'),
   };
 
   const screenTitles = {
@@ -7768,6 +8332,7 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     settings:       '15 Settings',
     checklist:      '16 Checklist',
     managerHome:    '17 Manager Home',
+    advances:       '18 Advances',
   };
 
   const tabs = [
@@ -7875,7 +8440,7 @@ const REQUIRED = [
   'LoginScreen','OwnerHomeScreen','StaffHomeScreen','AttendanceScreen',
   'LeavesScreen','ApplyLeaveScreen','TasksScreen','PayslipScreen',
   'AnnouncementsScreen','VisitorsScreen','HRHomeScreen','MarkAttendanceScreen',
-  'KioskScannerScreen','EnrollJoinerScreen','SettingsScreen','ChecklistScreen','ManagerHomeScreen',
+  'KioskScannerScreen','EnrollJoinerScreen','SettingsScreen','ChecklistScreen','ManagerHomeScreen','AdvancesScreen',
   'AppCtx','IOSDevice','TabBar','Toast','TOKENS','MOCK',
 ];
 const mountWhenReady = (attempts = 0) => {
