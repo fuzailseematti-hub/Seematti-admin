@@ -461,6 +461,8 @@
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<!-- SheetJS for the Payslips .xlsx export (two sheets matching the Silks + EPF/ESI templates). -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
   // ──────────────────────────────────────────────────────────
   // Supabase client (same project as the mobile app).
@@ -3576,6 +3578,8 @@ const PayslipsPage = () => {
   const [editing, setEditing] = useState(null);
   const [saving, setSaving] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [printing, setPrinting] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   const empById = useMemo(() => {
     const m = {};
@@ -3968,6 +3972,130 @@ const PayslipsPage = () => {
     } finally { setBulkBusy(false); }
   };
 
+  // Build an .xlsx with two sheets matching the templates the Owner
+  // supplied. One sheet per salary_type. Uses the SheetJS CDN loaded
+  // in <head>. New-joined rows follow the Silks template (English
+  // headers); ESI/PF rows follow the EPF & ESI template.
+  const exportExcel = async () => {
+    if (exporting) return;
+    if (typeof window.XLSX === 'undefined') {
+      toast('Excel library still loading, try again in a second');
+      return;
+    }
+    if (!filtered.length) { toast('Nothing to export for this month'); return; }
+    setExporting(true);
+    try {
+      const newJoinedHeader = [
+        'No', 'Town', 'Name', 'Days', 'P.DAYS', 'L.DAYS', 'TOTAL', 'Salary',
+        'Bonus', 'Amount', 'BONUS', 'Dues', 'Credit', 'SIGNATURE', 'ADVANCE',
+      ];
+      const esiHeader = [
+        'S.NO', 'TMB ACCOUNT NO.', 'ESI NO.', 'EPF NO', 'UAN NO.',
+        'EMPLOYEE NAME', 'DESIGNATION',
+        'SALARY', 'HRA', 'W.A.', 'TOTAL', 'DA', 'N.BASICS',
+        'DAYS', 'P.DAYS', 'L.D.',
+        'P.BASICS', 'P.DA', 'WAGES', 'P.HRA', 'L.D.S', 'W.A.',
+        'Total', 'BONUS', 'INCENTIVE',
+        'EPF WAGES', 'ESI WAGES', 'diff. 2%',
+        'EPF 12%', 'ESI 0.75%', 'ESI/EPF', 'NET WAGES',
+      ];
+
+      const njRows = [];
+      const esiRows = [];
+      filtered.forEach(r => {
+        const emp = empById[r.employee_id];
+        const rowType = r.salary_type || emp?.salary_type || 'new_joined';
+        const days = r.days_in_month || daysInMonthIso(r.month);
+        const pDays = num(r.p_days);
+        const lDays = num(r.l_days);
+        if (rowType === 'new_joined') {
+          njRows.push([
+            njRows.length + 1,
+            emp?.city || '',
+            emp?.name || r.employee_id,
+            days,
+            pDays,
+            lDays,
+            pDays + lDays,
+            num(r.monthly_salary),
+            '',                             // போனஸ் (empty — BONUS flows in the English column instead)
+            num(r.amount),
+            num(r.bonus),
+            num(r.dues),
+            num(r.credit),
+            '',                             // SIGNATURE (printed blank)
+            num(r.advance_amt),
+          ]);
+        } else {
+          // Re-run the compute so the exported figures are exact — the
+          // stored gross/deductions/net won't split the statutory pieces
+          // out for us.
+          const c = computeEsiPf({
+            salary:    num(r.monthly_salary),
+            hra:       num(r.hra ?? emp?.hra),
+            wa:        num(r.wa  ?? emp?.wa),
+            da:        num(da),
+            days,
+            p_days:    pDays,
+            l_days:    lDays,
+            bonus:     num(r.bonus),
+            incentive: num(r.credit),
+            diff_pct:  num(r.diff_pct),
+            advance:   num(r.advance_amt),
+          });
+          esiRows.push([
+            esiRows.length + 1,
+            emp?.tmb_account_no || '',
+            emp?.esi_no || '',
+            emp?.epf_no || '',
+            emp?.uan_no || '',
+            emp?.name || r.employee_id,
+            emp?.role || '',
+            num(r.monthly_salary),
+            num(r.hra ?? emp?.hra),
+            num(r.wa  ?? emp?.wa),
+            num(r.monthly_salary) - num(r.hra ?? emp?.hra) - num(r.wa ?? emp?.wa),  // TOTAL
+            num(da),
+            c.n_basics,
+            days,
+            pDays,
+            lDays,
+            c.p_basics,
+            c.p_da,
+            c.wages,
+            c.p_hra,
+            c.ld_s,
+            c.wa_paid,
+            c.total,
+            num(r.bonus),
+            num(r.credit),                   // INCENTIVE column
+            c.epf_wages,
+            c.esi_wages,
+            num(r.diff_pct),
+            c.epf_12,
+            c.esi_075,
+            c.esi_epf,
+            c.net_wages - num(r.advance_amt),
+          ]);
+        }
+      });
+
+      const wb = window.XLSX.utils.book_new();
+      if (njRows.length) {
+        const ws = window.XLSX.utils.aoa_to_sheet([newJoinedHeader, ...njRows]);
+        window.XLSX.utils.book_append_sheet(wb, ws, 'New joined');
+      }
+      if (esiRows.length) {
+        const ws = window.XLSX.utils.aoa_to_sheet([esiHeader, ...esiRows]);
+        window.XLSX.utils.book_append_sheet(wb, ws, 'EPF & ESI');
+      }
+      if (!wb.SheetNames.length) { toast('Nothing to export'); return; }
+      const filename = `payslips_${month.slice(0, 7)}.xlsx`;
+      window.XLSX.writeFile(wb, filename);
+      toast(`Exported ${njRows.length + esiRows.length} payslip${njRows.length + esiRows.length === 1 ? '' : 's'}`);
+    } finally { setExporting(false); }
+  };
+
   const readOnly = !can('payslips', 'edit');
   const monthLabel = new Date(month + 'T00:00:00').toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
   const coverage = eligibleList.length ? Math.round((rows.length / eligibleList.length) * 100) : 0;
@@ -4028,21 +4156,31 @@ const PayslipsPage = () => {
           </div>
         )}
 
-        {!readOnly && (
-          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-            <button className="btn" onClick={() => bulkGenerate('new_joined')} disabled={bulkBusy}
-              title="Create payslips for every active 'new joined' employee who doesn't have one this month">
-              {bulkBusy ? 'Generating…' : 'Bulk: New joined'}
-            </button>
-            <button className="btn" onClick={() => bulkGenerate('esi_pf')} disabled={bulkBusy}
-              title="Create payslips for every active ESI/PF employee who doesn't have one this month">
-              {bulkBusy ? 'Generating…' : 'Bulk: ESI / PF'}
-            </button>
-            {can('payslips', 'create') && (
-              <button className="btn primary" onClick={() => startNew('')}>+ New payslip</button>
-            )}
-          </div>
-        )}
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button className="btn" onClick={() => setPrinting(true)} disabled={!filtered.length}
+            title="Print receipt cards for every payslip in this view (advance-receipt style)">
+            🖨 Print
+          </button>
+          <button className="btn" onClick={exportExcel} disabled={!filtered.length || exporting}
+            title="Download an .xlsx with two sheets matching the Silks + EPF/ESI templates">
+            {exporting ? 'Exporting…' : '↓ Excel'}
+          </button>
+          {!readOnly && (
+            <>
+              <button className="btn" onClick={() => bulkGenerate('new_joined')} disabled={bulkBusy}
+                title="Create payslips for every active 'new joined' employee who doesn't have one this month">
+                {bulkBusy ? 'Generating…' : 'Bulk: New joined'}
+              </button>
+              <button className="btn" onClick={() => bulkGenerate('esi_pf')} disabled={bulkBusy}
+                title="Create payslips for every active ESI/PF employee who doesn't have one this month">
+                {bulkBusy ? 'Generating…' : 'Bulk: ESI / PF'}
+              </button>
+              {can('payslips', 'create') && (
+                <button className="btn primary" onClick={() => startNew('')}>+ New payslip</button>
+              )}
+            </>
+          )}
+        </div>
       </div>
 
       <div className="table-wrap">
@@ -4154,6 +4292,16 @@ const PayslipsPage = () => {
           />
         )}
       </Modal>
+
+      {printing && (
+        <PayslipReceiptsPrint
+          rows={filtered}
+          empById={empById}
+          da={da}
+          monthLabel={monthLabel}
+          onClose={() => setPrinting(false)}
+        />
+      )}
     </div>
   );
 };
@@ -4369,6 +4517,297 @@ const PayslipEditor = ({ editing, emp, eligibleList, attendance, da, daysInMonth
         </div>
       </div>
     </>
+  );
+};
+
+// ──────────────────────────────────────────────────────────
+// Payslip print view — one receipt card per row, 3 per A4 page.
+// Mirrors AdvanceReceiptsPrint: portal outside the React tree so
+// the print CSS can hide the rest of the app.
+// ──────────────────────────────────────────────────────────
+const PayslipReceiptsPrint = ({ rows, empById, da, monthLabel, onClose }) => {
+  const today = new Date().toLocaleDateString('en-GB', {
+    day: 'numeric', month: 'long', year: 'numeric',
+  });
+
+  return ReactDOM.createPortal(
+    <>
+      <style>{`
+        @media print {
+          @page { size: A4; margin: 10mm; }
+          html, body {
+            background: #fff !important;
+            display: block !important;
+            width: 100% !important;
+            margin: 0 !important; padding: 0 !important;
+            overflow: visible !important;
+            min-width: 0 !important; max-width: none !important;
+            height: auto !important; min-height: 0 !important; max-height: none !important;
+          }
+          body > *:not(.payslip-print-root) { display: none !important; }
+          .payslip-print-root {
+            position: static !important;
+            display: block !important;
+            width: 100% !important;
+            margin: 0 !important; padding: 0 !important;
+            background: #fff !important;
+            overflow: visible !important;
+            z-index: auto !important;
+          }
+          .payslip-print-toolbar { display: none !important; }
+          .payslip-print-grid {
+            display: block !important;
+            width: 100% !important;
+            margin: 0 !important; padding: 0 !important;
+            max-width: none !important;
+          }
+          .payslip-receipt {
+            width: 100% !important;
+            margin-bottom: 6px !important;
+            page-break-inside: avoid !important;
+            break-inside: avoid !important;
+          }
+        }
+        .payslip-print-root {
+          position: fixed; inset: 0;
+          background: #eceae5;
+          z-index: 9999;
+          overflow-y: auto;
+        }
+        .payslip-print-toolbar {
+          position: sticky; top: 0;
+          background: #1A1613; color: #fff;
+          padding: 14px 24px;
+          display: flex; align-items: center; gap: 12px;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+          z-index: 2;
+        }
+        .payslip-print-toolbar .title {
+          font-family: 'Fraunces', Georgia, serif;
+          font-size: 16px; font-weight: 500; letter-spacing: -0.3px;
+          flex: 1;
+        }
+        .payslip-print-toolbar button {
+          background: #fff; color: #1A1613;
+          border: none; padding: 8px 14px; border-radius: 8px;
+          font-size: 13px; font-weight: 600; cursor: pointer;
+          font-family: inherit;
+        }
+        .payslip-print-toolbar button.secondary {
+          background: rgba(255,255,255,0.12); color: #fff;
+        }
+        .payslip-print-grid {
+          max-width: 794px;
+          margin: 20px auto;
+          padding: 0 12px;
+          display: flex; flex-direction: column; gap: 6px;
+        }
+        .payslip-receipt {
+          background: #fff;
+          border: 1px solid #1A1613;
+          padding: 12px 16px;
+          height: 3.4in;
+          box-sizing: border-box;
+          display: flex; flex-direction: column;
+          font-family: 'Inter', system-ui, sans-serif;
+          color: #1A1613;
+        }
+        .payslip-receipt .hdr {
+          display: flex; align-items: center; justify-content: space-between;
+          border-bottom: 1px dashed #bbb;
+          padding-bottom: 6px;
+        }
+        .payslip-receipt .hdr .brand {
+          font-family: 'Fraunces', Georgia, serif;
+          font-weight: 600; font-size: 14px; letter-spacing: -0.3px;
+        }
+        .payslip-receipt .hdr .kind {
+          font-size: 9.5px; letter-spacing: 1px; text-transform: uppercase;
+          color: #777; font-weight: 700;
+        }
+        .payslip-receipt .hdr .date {
+          font-size: 10px; color: #555;
+          font-family: 'JetBrains Mono', Menlo, monospace;
+        }
+        .payslip-receipt .rowline {
+          display: flex; justify-content: space-between; gap: 14px;
+          margin-top: 5px;
+        }
+        .payslip-receipt .k {
+          font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px;
+          color: #777; font-weight: 700;
+        }
+        .payslip-receipt .v {
+          font-size: 11.5px; color: #1A1613; font-weight: 500;
+        }
+        .payslip-receipt table.bd {
+          width: 100%; border-collapse: collapse; margin-top: 6px;
+          font-size: 10.5px;
+          font-family: 'JetBrains Mono', Menlo, monospace;
+        }
+        .payslip-receipt table.bd td {
+          padding: 2px 0;
+        }
+        .payslip-receipt table.bd td.l { color: #555; }
+        .payslip-receipt table.bd td.r { text-align: right; color: #1A1613; font-weight: 500; }
+        .payslip-receipt table.bd td.neg { color: #8a1c1c; }
+        .payslip-receipt .netbar {
+          margin-top: auto;
+          display: flex; align-items: center; justify-content: space-between;
+          padding: 6px 10px; background: #f6f2ea;
+          border: 1px solid #1A1613;
+          margin-top: 6px;
+        }
+        .payslip-receipt .netbar .label {
+          font-size: 10px; text-transform: uppercase; letter-spacing: 0.7px;
+          color: #1A1613; font-weight: 700;
+        }
+        .payslip-receipt .netbar .amount {
+          font-family: 'Fraunces', Georgia, serif;
+          font-size: 20px; font-weight: 600; letter-spacing: -0.5px;
+          color: #0A5A29;
+        }
+        .payslip-receipt .sigs {
+          display: grid; grid-template-columns: 1fr 1fr; gap: 40px;
+          padding-top: 6px;
+        }
+        .payslip-receipt .sigs > div {
+          font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px;
+          color: #777; font-weight: 700;
+          border-top: 1px solid #1A1613;
+          padding-top: 4px; margin-top: 16px;
+          text-align: center;
+        }
+      `}</style>
+      <div className="payslip-print-root">
+        <div className="payslip-print-toolbar">
+          <div className="title">
+            Payslips — {monthLabel} · {rows.length} record{rows.length === 1 ? '' : 's'} · printed {today}
+          </div>
+          <button className="secondary" onClick={onClose}>Close</button>
+          <button onClick={() => window.print()}>🖨 Print</button>
+        </div>
+        <div className="payslip-print-grid">
+          {rows.length === 0 && (
+            <div style={{
+              padding: 30, textAlign: 'center', background: '#fff',
+              border: '1px dashed #999', color: '#555', fontSize: 13,
+            }}>
+              No payslips to print.
+            </div>
+          )}
+          {rows.map(r => {
+            const emp = empById[r.employee_id];
+            const rowType = r.salary_type || emp?.salary_type || 'new_joined';
+            const days = r.days_in_month || daysInMonthIso(r.month);
+            const isEsi = rowType === 'esi_pf';
+            const breakdown = isEsi
+              ? computeEsiPf({
+                  salary:    num(r.monthly_salary),
+                  hra:       num(r.hra ?? emp?.hra),
+                  wa:        num(r.wa  ?? emp?.wa),
+                  da:        num(da),
+                  days,
+                  p_days:    num(r.p_days),
+                  l_days:    num(r.l_days),
+                  bonus:     num(r.bonus),
+                  incentive: num(r.credit),
+                  diff_pct:  num(r.diff_pct),
+                  advance:   num(r.advance_amt),
+                })
+              : null;
+            return (
+              <div key={r.id} className="payslip-receipt">
+                <div className="hdr">
+                  <div className="brand">Seemaatti · Mayiladuthurai</div>
+                  <div className="kind">Payslip · {isEsi ? 'ESI / PF' : 'New joined'}</div>
+                  <div className="date">{monthLabel}</div>
+                </div>
+                <div className="rowline">
+                  <div>
+                    <div className="k">Employee</div>
+                    <div className="v">
+                      {emp?.name || '—'} · {r.employee_id}
+                      {emp?.city ? ` · ${emp.city}` : ''}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="k">Designation</div>
+                    <div className="v">
+                      {emp?.role || '—'}
+                      {emp?.section_id ? ` · ${SECTION_META[emp.section_id]?.label || emp.section_id}` : ''}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="k">Days</div>
+                    <div className="v">{num(r.p_days)} P + {num(r.l_days)} L / {days}</div>
+                  </div>
+                </div>
+                {isEsi && (
+                  <div className="rowline">
+                    <div>
+                      <div className="k">ESI no.</div>
+                      <div className="v" style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 10.5 }}>
+                        {emp?.esi_no || '—'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="k">EPF no.</div>
+                      <div className="v" style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 10.5 }}>
+                        {emp?.epf_no || '—'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="k">UAN no.</div>
+                      <div className="v" style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 10.5 }}>
+                        {emp?.uan_no || '—'}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                <table className="bd">
+                  <tbody>
+                    {isEsi ? (
+                      <>
+                        <tr><td className="l">Basic (pro-rated)</td><td className="r">{rupees(breakdown.p_basics)}</td></tr>
+                        <tr><td className="l">DA (pro-rated)</td>   <td className="r">{rupees(breakdown.p_da)}</td></tr>
+                        <tr><td className="l">HRA (pro-rated)</td>  <td className="r">{rupees(breakdown.p_hra)}</td></tr>
+                        {breakdown.ld_s > 0   && <tr><td className="l">Leave encashment ({num(r.l_days)} d)</td><td className="r">{rupees(breakdown.ld_s)}</td></tr>}
+                        {breakdown.wa_paid > 0 && <tr><td className="l">W.A.</td>                           <td className="r">{rupees(breakdown.wa_paid)}</td></tr>}
+                        <tr><td className="l" style={{fontWeight:700}}>Total</td><td className="r" style={{fontWeight:700}}>{rupees(breakdown.total)}</td></tr>
+                        {num(r.bonus)  > 0 && <tr><td className="l">+ Bonus</td>    <td className="r">{rupees(r.bonus)}</td></tr>}
+                        {num(r.credit) > 0 && <tr><td className="l">+ Incentive</td><td className="r">{rupees(r.credit)}</td></tr>}
+                        {breakdown.epf_12  > 0 && <tr><td className="l neg">− EPF 12%</td>  <td className="r neg">−{rupees(breakdown.epf_12)}</td></tr>}
+                        {breakdown.esi_075 > 0 && <tr><td className="l neg">− ESI 0.75%</td><td className="r neg">−{rupees(breakdown.esi_075)}</td></tr>}
+                        {breakdown.diff    > 0 && <tr><td className="l neg">− Diff {num(r.diff_pct)}%</td><td className="r neg">−{rupees(breakdown.diff)}</td></tr>}
+                        {num(r.advance_amt) > 0 && <tr><td className="l neg">− Advance</td><td className="r neg">−{rupees(r.advance_amt)}</td></tr>}
+                      </>
+                    ) : (
+                      <>
+                        <tr><td className="l">Amount ({num(r.p_days)}+{num(r.l_days)}/{days} × {rupees(r.monthly_salary)})</td><td className="r">{rupees(r.amount)}</td></tr>
+                        {num(r.bonus)  > 0 && <tr><td className="l">+ Bonus</td> <td className="r">{rupees(r.bonus)}</td></tr>}
+                        {num(r.credit) > 0 && <tr><td className="l">+ Credit</td><td className="r">{rupees(r.credit)}</td></tr>}
+                        {num(r.dues)   > 0 && <tr><td className="l neg">− Dues</td>    <td className="r neg">−{rupees(r.dues)}</td></tr>}
+                        {num(r.advance_amt) > 0 && <tr><td className="l neg">− Advance</td><td className="r neg">−{rupees(r.advance_amt)}</td></tr>}
+                      </>
+                    )}
+                  </tbody>
+                </table>
+                <div className="netbar">
+                  <div className="label">Net pay</div>
+                  <div className="amount">{rupees(r.net)}</div>
+                </div>
+                <div className="sigs">
+                  <div>Employee signature</div>
+                  <div>Owner signature</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </>,
+    document.body
   );
 };
 
