@@ -2150,21 +2150,40 @@ const EmployeesPage = () => {
                   fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase',
                   color: 'var(--inkMuted)', cursor: 'pointer', padding: '4px 0',
                 }}>Sheet diagnostics — what the parser sees</summary>
-                {uploadPreview.sheetDiag.map((d, i) => (
-                  <div key={i} style={{
-                    border: '1px solid var(--border)', borderRadius: 10,
-                    padding: 10, marginTop: 8, background: 'var(--surfaceAlt)',
-                    fontSize: 11, fontFamily: 'JetBrains Mono, Menlo, monospace',
-                  }}>
-                    <div style={{ fontWeight: 700, marginBottom: 4 }}>Sheet: "{d.sheetName}"</div>
-                    <div style={{ marginBottom: 6, color: 'var(--inkSoft)' }}>
-                      Headers ({d.headers.length}): {d.headers.map(h => `"${h}"`).join(', ')}
+                {uploadPreview.sheetDiag.map((d, i) => {
+                  const text =
+                    `Sheet: "${d.sheetName}"\n` +
+                    `Headers (${d.headers.length}): ${d.headers.map(h => `"${h}"`).join(', ')}\n` +
+                    `First row: ${Object.entries(d.sampleRow).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' · ')}`;
+                  return (
+                    <div key={i} style={{
+                      border: '1px solid var(--border)', borderRadius: 10,
+                      padding: 10, marginTop: 8, background: 'var(--surfaceAlt)',
+                      fontSize: 11, fontFamily: 'JetBrains Mono, Menlo, monospace',
+                      position: 'relative',
+                    }}>
+                      <button className="btn"
+                        onClick={() => {
+                          navigator.clipboard.writeText(text)
+                            .then(() => toast('Copied'))
+                            .catch(() => toast('Could not copy'));
+                        }}
+                        style={{
+                          position: 'absolute', top: 8, right: 8,
+                          fontSize: 10, padding: '3px 8px',
+                        }}>
+                        Copy
+                      </button>
+                      <div style={{ fontWeight: 700, marginBottom: 4, paddingRight: 60 }}>Sheet: "{d.sheetName}"</div>
+                      <div style={{ marginBottom: 6, color: 'var(--inkSoft)', userSelect: 'text' }}>
+                        Headers ({d.headers.length}): {d.headers.map(h => `"${h}"`).join(', ')}
+                      </div>
+                      <div style={{ color: 'var(--inkSoft)', userSelect: 'text' }}>
+                        First row: {Object.entries(d.sampleRow).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' · ')}
+                      </div>
                     </div>
-                    <div style={{ color: 'var(--inkSoft)' }}>
-                      First row: {Object.entries(d.sampleRow).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(' · ')}
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </details>
             )}
           </>
