@@ -6100,6 +6100,7 @@ const KioskScannerScreen = () => {
   const [cameraReady, setCameraReady]   = React.useState(false);
   const [modelsReady, setModelsReady]   = React.useState(false);
   const [cameraErr, setCameraErr]       = React.useState(null);
+  const [facingMode, setFacingMode]     = React.useState('user'); // 'user' | 'environment'
   const [totalStaff, setTotalStaff]     = React.useState(0);
   const [faces, setFaces] = React.useState([]);   // [{employee_id, pose, embedding, employees: {name, role, section_id}}]
   const [threshold, setThreshold]       = React.useState(0.55);
@@ -6135,19 +6136,31 @@ const KioskScannerScreen = () => {
     return () => clearInterval(t);
   }, []);
 
-  // Load face-api models + open the webcam.
+  // Load face-api models + open the webcam. Re-runs when the user
+  // flips between front/back camera.
   React.useEffect(() => {
     let stream = null;
     let cancelled = false;
+    setCameraReady(false);
+    setCameraErr(null);
     (async () => {
       try {
         await window.loadFaceModels();
         if (cancelled) return;
         setModelsReady(true);
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
-          audio: false,
-        });
+        // Try the requested facing mode; fall back to any camera so the
+        // kiosk still works on devices with a single camera.
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: facingMode }, width: { ideal: 640 }, height: { ideal: 480 } },
+            audio: false,
+          });
+        } catch (e) {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 640 }, height: { ideal: 480 } },
+            audio: false,
+          });
+        }
         if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
@@ -6165,7 +6178,7 @@ const KioskScannerScreen = () => {
       cancelled = true;
       if (stream) stream.getTracks().forEach(t => t.stop());
     };
-  }, []);
+  }, [facingMode]);
 
   // Pull today's clocked-in set and recent scans from the DB on mount
   // and keep them fresh via the realtime subscription.
@@ -6386,7 +6399,7 @@ const KioskScannerScreen = () => {
       {/* Camera frame */}
       <div style={{ flex: 1, padding: '0 20px', position: 'relative' }}>
         <KioskCameraFrame phase={phase} current={current} pulse={pulse}
-          videoRef={videoRef} cameraErr={cameraErr}
+          videoRef={videoRef} cameraErr={cameraErr} facingMode={facingMode}
           enrolledCount={faces.length ? new Set(faces.map(f => f.employee_id)).size : 0} />
       </div>
 
@@ -6480,17 +6493,33 @@ const KioskScannerScreen = () => {
         }}>
           <Icon name="close" size={12} /> Exit kiosk
         </button>
-        <button onClick={triggerSimulate} disabled={phase !== 'idle'} style={{
-          background: phase === 'idle' ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.04)',
-          border: '1px solid rgba(255,255,255,0.15)', borderRadius: 10, padding: '10px 16px',
-          color: 'rgba(255,255,255,0.7)', fontSize: 11, fontWeight: 600,
-          cursor: phase === 'idle' ? 'pointer' : 'default',
-          fontFamily: 'inherit', letterSpacing: 0.3,
-          display: 'flex', alignItems: 'center', gap: 6,
-          opacity: phase === 'idle' ? 1 : 0.4,
-        }}>
-          <Icon name="sparkle" size={12} /> Simulate (demo)
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            onClick={() => setFacingMode(m => m === 'user' ? 'environment' : 'user')}
+            style={{
+              background: 'rgba(255,255,255,0.08)',
+              border: '1px solid rgba(255,255,255,0.15)', borderRadius: 10,
+              padding: '10px 14px',
+              color: 'rgba(255,255,255,0.85)', fontSize: 11, fontWeight: 600,
+              cursor: 'pointer', fontFamily: 'inherit', letterSpacing: 0.3,
+              display: 'flex', alignItems: 'center', gap: 6,
+            }}
+            title="Switch between front and back camera"
+          >
+            <Icon name="arrowRight" size={12} /> {facingMode === 'user' ? 'Back cam' : 'Front cam'}
+          </button>
+          <button onClick={triggerSimulate} disabled={phase !== 'idle'} style={{
+            background: phase === 'idle' ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.04)',
+            border: '1px solid rgba(255,255,255,0.15)', borderRadius: 10, padding: '10px 16px',
+            color: 'rgba(255,255,255,0.7)', fontSize: 11, fontWeight: 600,
+            cursor: phase === 'idle' ? 'pointer' : 'default',
+            fontFamily: 'inherit', letterSpacing: 0.3,
+            display: 'flex', alignItems: 'center', gap: 6,
+            opacity: phase === 'idle' ? 1 : 0.4,
+          }}>
+            <Icon name="sparkle" size={12} /> Simulate (demo)
+          </button>
+        </div>
       </div>
 
       {/* Exit PIN prompt */}
@@ -6509,7 +6538,7 @@ const KioskScannerScreen = () => {
   );
 };
 
-const KioskCameraFrame = ({ phase, current, pulse, videoRef, cameraErr, enrolledCount }) => {
+const KioskCameraFrame = ({ phase, current, pulse, videoRef, cameraErr, enrolledCount, facingMode = 'user' }) => {
   const ringColor =
     phase === 'matched' ? '#0E7C3A' :
     phase === 'detecting' || phase === 'matching' ? '#E8C65A' :
@@ -6531,13 +6560,14 @@ const KioskCameraFrame = ({ phase, current, pulse, videoRef, cameraErr, enrolled
         : 'inset 0 0 60px rgba(0,0,0,0.5)',
       transition: 'box-shadow 300ms, border-color 300ms',
     }}>
-      {/* Live webcam feed — mirrored so the preview looks natural. */}
+      {/* Live webcam feed — mirror the preview for the front camera so
+          it looks natural; leave the back camera un-flipped. */}
       {videoRef && (
         <video ref={videoRef} autoPlay playsInline muted
           style={{
             position: 'absolute', inset: 0,
             width: '100%', height: '100%', objectFit: 'cover',
-            transform: 'scaleX(-1)',
+            transform: facingMode === 'user' ? 'scaleX(-1)' : 'none',
             opacity: phase === 'matched' ? 0.2 : 0.85,
             transition: 'opacity 300ms',
           }} />
