@@ -4502,7 +4502,12 @@ const PayslipsPage = () => {
         payloads.push(draftToPayload(draft));
       }
       const { error } = await window.sb.from('payslips').insert(payloads);
-      if (error) { toast('Bulk generate failed (see console)'); console.error(error); return; }
+      if (error) {
+        const msg = [error.message, error.details, error.hint].filter(Boolean).join(' — ');
+        toast('Bulk generate failed: ' + (msg || 'unknown error'));
+        console.error('Bulk generate error:', error, 'First payload:', payloads[0]);
+        return;
+      }
       // Bump months_deducted for every advance touched.
       const allAdvs = Object.values(advsByEmp).flat();
       await bumpAdvances(allAdvs);
