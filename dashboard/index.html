@@ -5087,9 +5087,9 @@ const AdvancesPage = () => {
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
           <button className="btn"
             onClick={() => setPrinting(true)}
-            disabled={!filtered.some(r => r.status === 'approved' || r.status === 'completed')}
-            title="Print approved advance receipts (filtered)">
-            🖨 Print receipts
+            disabled={!rows.some(r => r.status === 'approved' || r.status === 'completed')}
+            title="Print all approved/completed advance receipts">
+            🖨 Print receipts ({rows.filter(r => r.status === 'approved' || r.status === 'completed').length})
           </button>
           {can('advances', 'create') && (
             <button className="btn primary" onClick={startFile}>+ File advance</button>
@@ -5349,7 +5349,9 @@ const AdvancesPage = () => {
 
       {printing && (
         <AdvanceReceiptsPrint
-          rows={filtered.filter(r => r.status === 'approved' || r.status === 'completed')}
+          rows={rows
+            .filter(r => r.status === 'approved' || r.status === 'completed')
+            .sort((a, b) => (b.decided_at || b.created_at || '').localeCompare(a.decided_at || a.created_at || ''))}
           onClose={() => setPrinting(false)}
         />
       )}
