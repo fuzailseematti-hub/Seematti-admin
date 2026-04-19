@@ -5379,10 +5379,19 @@ const AdvanceReceiptsPrint = ({ rows, onClose }) => {
         @media print {
           @page { size: A4; margin: 10mm; }
           html, body { background: #fff !important; }
-          body > *:not(.advance-print-root) { display: none !important; }
-          .advance-print-root { position: static !important; background: #fff !important; }
+          /* Hide everything, then re-show the print tree. Works no matter
+             how deep it's nested in React's tree. */
+          body * { visibility: hidden !important; }
+          .advance-print-root, .advance-print-root * { visibility: visible !important; }
+          .advance-print-root {
+            position: absolute !important;
+            left: 0 !important; top: 0 !important;
+            width: 100% !important; height: auto !important;
+            background: #fff !important;
+            overflow: visible !important;
+          }
           .advance-print-toolbar { display: none !important; }
-          .advance-print-grid { padding: 0 !important; max-width: none !important; }
+          .advance-print-grid { padding: 0 !important; margin: 0 !important; max-width: none !important; }
           .advance-receipt { page-break-inside: avoid; break-inside: avoid; }
         }
         .advance-print-root {
