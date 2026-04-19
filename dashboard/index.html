@@ -749,7 +749,7 @@ const useEmployees = () => {
     if (!window.sb) return;
     const { data } = await window.sb
       .from('employees')
-      .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city')
+      .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city, salary_type, monthly_salary, hra, wa, tmb_account_no, esi_no, epf_no, uan_no')
       .eq('is_active', true)
       .order('id');
     setRows(data || []);
@@ -1117,7 +1117,7 @@ const EmployeesPage = () => {
     if (!window.sb) return;
     const [empRes, faceRes] = await Promise.all([
       window.sb.from('employees')
-        .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city')
+        .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city, salary_type, monthly_salary, hra, wa, tmb_account_no, esi_no, epf_no, uan_no')
         .order('id'),
       window.sb.from('face_embeddings').select('employee_id'),
     ]);
@@ -1201,6 +1201,8 @@ const EmployeesPage = () => {
     id: '', name: '', role: '', section_id: 'fancy',
     user_type: 'staff', is_active: true, joined_date: new Date().toISOString().slice(0, 10),
     phone: '', city: '',
+    salary_type: 'new_joined', monthly_salary: '', hra: '', wa: '',
+    tmb_account_no: '', esi_no: '', epf_no: '', uan_no: '',
     _new: true, _suggestedId: nextId(),
   });
   const startEdit = (row) => setEditing({ ...row, _new: false });
@@ -1208,6 +1210,11 @@ const EmployeesPage = () => {
 
   const save = async () => {
     if (!editing || saving) return;
+    const numOrNull = (v) => {
+      if (v === '' || v == null) return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
     const payload = {
       name: (editing.name || '').trim(),
       role: (editing.role || '').trim(),
@@ -1217,6 +1224,14 @@ const EmployeesPage = () => {
       joined_date: editing.joined_date || null,
       phone: (editing.phone || '').trim() || null,
       city: (editing.city || '').trim() || null,
+      salary_type: editing.user_type === 'owner' ? null : (editing.salary_type || 'new_joined'),
+      monthly_salary: numOrNull(editing.monthly_salary),
+      hra:            numOrNull(editing.hra),
+      wa:             numOrNull(editing.wa),
+      tmb_account_no: (editing.tmb_account_no || '').trim() || null,
+      esi_no:         (editing.esi_no || '').trim() || null,
+      epf_no:         (editing.epf_no || '').trim() || null,
+      uan_no:         (editing.uan_no || '').trim() || null,
     };
     if (!payload.name) { toast('Name is required'); return; }
     if (!payload.role) { toast('Role is required'); return; }
@@ -1534,6 +1549,95 @@ const EmployeesPage = () => {
                 </label>
               </div>
             </div>
+
+            {editing.user_type !== 'owner' && (
+              <>
+                <div style={{
+                  marginTop: 18, marginBottom: 6, fontSize: 13, fontWeight: 600,
+                  color: 'var(--ink)', borderTop: '1px solid var(--stroke)', paddingTop: 14,
+                }}>
+                  Payroll
+                </div>
+
+                <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                  <div>
+                    <label>Salary type</label>
+                    <select
+                      value={editing.salary_type || 'new_joined'}
+                      onChange={e => setEditing({ ...editing, salary_type: e.target.value })}>
+                      <option value="new_joined">New joined</option>
+                      <option value="esi_pf">ESI / PF</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label>Monthly salary (₹)</label>
+                    <input type="number" min="0" step="1"
+                      value={editing.monthly_salary ?? ''}
+                      onChange={e => setEditing({ ...editing, monthly_salary: e.target.value })}
+                      placeholder="e.g. 15000" />
+                  </div>
+                </div>
+
+                {editing.salary_type === 'esi_pf' && (
+                  <>
+                    <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                      <div>
+                        <label>HRA (₹)</label>
+                        <input type="number" min="0" step="1"
+                          value={editing.hra ?? ''}
+                          onChange={e => setEditing({ ...editing, hra: e.target.value })}
+                          placeholder="e.g. 4600" />
+                      </div>
+                      <div>
+                        <label>W.A. — workman allowance (₹)</label>
+                        <input type="number" min="0" step="1"
+                          value={editing.wa ?? ''}
+                          onChange={e => setEditing({ ...editing, wa: e.target.value })}
+                          placeholder="e.g. 3000" />
+                      </div>
+                    </div>
+
+                    <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                      <div>
+                        <label>TMB account no.</label>
+                        <input
+                          value={editing.tmb_account_no || ''}
+                          onChange={e => setEditing({ ...editing, tmb_account_no: e.target.value })}
+                          placeholder="e.g. 094100050305880"
+                          style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }} />
+                      </div>
+                      <div>
+                        <label>ESI no.</label>
+                        <input
+                          value={editing.esi_no || ''}
+                          onChange={e => setEditing({ ...editing, esi_no: e.target.value })}
+                          placeholder="10-digit ESI number"
+                          style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }} />
+                      </div>
+                    </div>
+
+                    <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                      <div>
+                        <label>EPF no.</label>
+                        <input
+                          value={editing.epf_no || ''}
+                          onChange={e => setEditing({ ...editing, epf_no: e.target.value })}
+                          placeholder="optional"
+                          style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }} />
+                      </div>
+                      <div>
+                        <label>UAN no.</label>
+                        <input
+                          value={editing.uan_no || ''}
+                          onChange={e => setEditing({ ...editing, uan_no: e.target.value })}
+                          placeholder="12-digit UAN"
+                          style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }} />
+                      </div>
+                    </div>
+                  </>
+                )}
+              </>
+            )}
           </>
         )}
       </Modal>
@@ -1628,6 +1732,35 @@ const EmployeeDetailModal = ({ employee, faceCount, onClose, onEdit, onCleared }
           <DetailField label="Phone" value={employee.phone || '—'} mono />
           <DetailField label="City / town" value={employee.city || '—'} />
         </div>
+
+        {employee.user_type !== 'owner' && (
+          <div style={{
+            display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12,
+            padding: 14, background: 'var(--bg)',
+            border: '1px solid var(--border)', borderRadius: 12, marginBottom: 14,
+          }}>
+            <DetailField
+              label="Salary type"
+              value={employee.salary_type === 'esi_pf' ? 'ESI / PF'
+                   : employee.salary_type === 'new_joined' ? 'New joined'
+                   : '—'} />
+            <DetailField
+              label="Monthly salary"
+              value={employee.monthly_salary != null
+                ? '₹' + Number(employee.monthly_salary).toLocaleString('en-IN')
+                : '—'} />
+            {employee.salary_type === 'esi_pf' && (
+              <>
+                <DetailField label="HRA" value={employee.hra != null ? '₹' + Number(employee.hra).toLocaleString('en-IN') : '—'} />
+                <DetailField label="W.A."   value={employee.wa != null ? '₹' + Number(employee.wa).toLocaleString('en-IN') : '—'} />
+                <DetailField label="TMB a/c" value={employee.tmb_account_no || '—'} mono />
+                <DetailField label="ESI no." value={employee.esi_no || '—'} mono />
+                <DetailField label="EPF no." value={employee.epf_no || '—'} mono />
+                <DetailField label="UAN no." value={employee.uan_no || '—'} mono />
+              </>
+            )}
+          </div>
+        )}
 
         {/* Face enrollment card */}
         <div style={{
