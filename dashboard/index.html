@@ -3420,17 +3420,63 @@ const PayslipsPage = () => {
     return { ...draft, gross: g, deductions: d, net: g - d };
   };
 
-  const startNew = (employeeId) => {
+  // Fetch active advances for a given employee so they can auto-deduct
+  // when a new payslip is created.
+  const fetchActiveAdvances = async (employeeId) => {
+    if (!window.sb || !employeeId) return [];
+    const { data } = await window.sb.from('advances')
+      .select('id, amount_approved, monthly_deduction, months_total, months_deducted')
+      .eq('employee_id', employeeId)
+      .eq('status', 'approved');
+    return (data || []).filter(a => a.months_deducted < a.months_total);
+  };
+
+  const startNew = async (employeeId) => {
+    // If we know the employee already, auto-add any outstanding advance
+    // as a deduction line item so HR doesn't have to remember.
+    let adv = [];
+    if (employeeId) {
+      const active = await fetchActiveAdvances(employeeId);
+      adv = active.map(a => ({
+        label: `Advance repayment (${a.months_deducted + 1}/${a.months_total})`,
+        amount: a.monthly_deduction || 0,
+        advance_id: a.id,
+      }));
+    }
     setEditing(recalc({
       id: null,
       employee_id: employeeId || '',
       month,
       earnings:     [{ label: 'Basic',            amount: 15000 }, { label: 'HRA', amount: 4500 }],
-      deduct_items: [{ label: 'EPF',              amount: 1800  }, { label: 'Professional tax', amount: 50 }],
+      deduct_items: [
+        { label: 'EPF',              amount: 1800 },
+        { label: 'Professional tax', amount: 50 },
+        ...adv,
+      ],
       paid_at: null,
       bank_last4: '',
       _new: true,
     }));
+  };
+
+  // When the employee picker changes mid-edit on a new payslip, refresh
+  // the advance rows too.
+  const refreshAdvancesFor = async (employeeId) => {
+    if (!editing || !editing._new) return;
+    const active = await fetchActiveAdvances(employeeId);
+    setEditing(cur => {
+      const withoutOld = (cur.deduct_items || []).filter(i => !i.advance_id);
+      const advanceLines = active.map(a => ({
+        label: `Advance repayment (${a.months_deducted + 1}/${a.months_total})`,
+        amount: a.monthly_deduction || 0,
+        advance_id: a.id,
+      }));
+      return recalc({
+        ...cur,
+        employee_id: employeeId,
+        deduct_items: [...withoutOld, ...advanceLines],
+      });
+    });
   };
   const startEdit = (row) => setEditing({
     ...row,
@@ -3457,11 +3503,12 @@ const PayslipsPage = () => {
     if (!editing.employee_id) { toast('Pick an employee'); return; }
     setSaving(true);
     try {
+      const cleanDeducts = editing.deduct_items.filter(i => i.label && (i.amount >= 0));
       const payload = {
         employee_id: editing.employee_id,
         month: editing.month,
         earnings: editing.earnings.filter(i => i.label && (i.amount > 0)),
-        deduct_items: editing.deduct_items.filter(i => i.label && (i.amount >= 0)),
+        deduct_items: cleanDeducts,
         gross: editing.gross,
         deductions: editing.deductions,
         net: editing.net,
@@ -3474,7 +3521,29 @@ const PayslipsPage = () => {
           toast(error.message.includes('duplicate')
             ? 'Payslip already exists for this employee this month'
             : 'Could not save');
-        } else { toast('Payslip created'); close(); }
+        } else {
+          // Bump months_deducted on every advance the HR kept in this
+          // payslip. Mark the advance 'completed' when the final month
+          // is paid out.
+          const advanceIds = cleanDeducts.map(i => i.advance_id).filter(Boolean);
+          if (advanceIds.length) {
+            const { data: advs } = await window.sb.from('advances')
+              .select('id, months_total, months_deducted')
+              .in('id', advanceIds);
+            await Promise.all((advs || []).map(a => {
+              const next = (a.months_deducted || 0) + 1;
+              const done = next >= a.months_total;
+              return window.sb.from('advances').update({
+                months_deducted: next,
+                status: done ? 'completed' : 'approved',
+              }).eq('id', a.id);
+            }));
+          }
+          toast(advanceIds.length
+            ? `Payslip created · ${advanceIds.length} advance${advanceIds.length === 1 ? '' : 's'} updated`
+            : 'Payslip created');
+          close();
+        }
       } else {
         const { error } = await window.sb.from('payslips').update(payload).eq('id', editing.id);
         if (error) toast('Could not save');
@@ -3677,7 +3746,7 @@ const PayslipsPage = () => {
                 <label>Employee</label>
                 {editing._new ? (
                   <select value={editing.employee_id}
-                    onChange={e => setEditing({ ...editing, employee_id: e.target.value })}>
+                    onChange={e => refreshAdvancesFor(e.target.value)}>
                     <option value="">— select —</option>
                     {staffList.map(e => (
                       <option key={e.id} value={e.id}>{e.name} · {e.id}</option>
