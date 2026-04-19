@@ -1290,7 +1290,7 @@ const EmployeesPage = () => {
   // ── Excel upload — bulk-update salary records ─────────────
   // Auto-detects the sheet format (Silks new-joined vs EPF/ESI) from
   // its header row. Match-by-name is fuzzy (lowercase, trimmed); an
-  // exact Employee-ID match wins if present in the sheet.
+  // exact Employee-ID or Employee-Code match wins if present in the sheet.
   const onEmployeeExcelPicked = async (file) => {
     if (!file) return;
     if (typeof window.XLSX === 'undefined') {
@@ -1305,6 +1305,8 @@ const EmployeesPage = () => {
       all.forEach(e => { nameIdx[e.name.trim().toLowerCase()] = e; });
       const idIdx = {};
       all.forEach(e => { idIdx[e.id.trim().toUpperCase()] = e; });
+      const codeIdx = {};
+      all.forEach(e => { if (e.employee_code) codeIdx[String(e.employee_code).trim().toUpperCase()] = e; });
 
       const updates = []; // { employee, patch, source }
       const unmatched = []; // { name, source }
@@ -1331,15 +1333,22 @@ const EmployeesPage = () => {
 
         rows.forEach(r => {
           // Skip total rows, blank rows.
-          const idCell = getCell(r, ['Employee ID', 'ID', 'EMPLOYEE ID']);
+          const idCell   = getCell(r, ['Employee ID', 'ID', 'EMPLOYEE ID']);
+          const codeCell = getCell(r, ['EMPLOYEE CODE', 'Employee Code', 'EMP CODE', 'CODE']);
           const name = norm(getCell(r, ['EMPLOYEE NAME', 'Name', 'பெயர்', 'பெயர']));
-          if (!name && !idCell) return;
+          if (!name && !idCell && !codeCell) return;
           let emp = null;
-          if (idCell) emp = idIdx[norm(idCell).toUpperCase()];
+          if (idCell)   emp = idIdx[norm(idCell).toUpperCase()];
+          if (!emp && codeCell) emp = codeIdx[norm(codeCell).toUpperCase()];
           if (!emp && name) emp = nameIdx[lower(name)];
-          if (!emp) { unmatched.push({ name, source: sheetName }); return; }
+          if (!emp) { unmatched.push({ name: name || norm(codeCell), source: sheetName }); return; }
 
           const patch = {};
+          // Always pick up employee_code and company if present in any sheet
+          if (codeCell) patch.employee_code = norm(codeCell);
+          const company = norm(getCell(r, ['COMPANY', 'Company']));
+          if (company) patch.company = company;
+
           if (looksLikeEsi) {
             patch.salary_type    = 'esi_pf';
             const salary = Number(getCell(r, ['SALARY', 'Salary'])) || 0;
@@ -1413,7 +1422,7 @@ const EmployeesPage = () => {
       return;
     }
     const esiHeader = [
-      'S.NO', 'TMB ACCOUNT NO.', 'ESI NO.', 'EPF NO', 'UAN NO.',
+      'EMPLOYEE CODE', 'COMPANY', 'TMB ACCOUNT NO.', 'ESI NO.', 'EPF NO', 'UAN NO.',
       'EMPLOYEE NAME', 'DESIGNATION',
       'SALARY', 'HRA', 'W.A.', 'TOTAL', 'DA', 'N.BASICS',
       'DAYS', 'P.DAYS', 'L.D.',
@@ -1423,7 +1432,7 @@ const EmployeesPage = () => {
       'EPF 12%', 'ESI 0.75%', 'ESI/EPF', 'NET WAGES',
     ];
     const esiSample = [
-      [1, '094100050305880', '6380472899', '217', '100210509591',
+      ['E001', 'Seematti Silks', '094100050305880', '6380472899', '217', '100210509591',
         'SAMPLE — M.Mohamed Rafeek', 'CASHIER',
         23000, 4600, 3000, 15400, 7313, 8087,
         31, 31, 3,
@@ -1431,7 +1440,7 @@ const EmployeesPage = () => {
         25226, 0, 0,
         15000, 21000, 0,
         1800, 158, 1958, 23268],
-      [2, '094100080200041', '6380399686', '208', '100321307903',
+      ['E002', 'Seematti Silks', '094100080200041', '6380399686', '208', '100321307903',
         'SAMPLE — A.Abdul Nasar', 'CASHIER',
         20000, 4000, 2000, 14000, 7313, 6687,
         31, 31, 4,
@@ -1442,12 +1451,12 @@ const EmployeesPage = () => {
     ];
 
     const njHeader = [
-      'No', 'Town', 'Name', 'Days', 'P.DAYS', 'L.DAYS', 'TOTAL', 'Salary',
+      'EMPLOYEE CODE', 'COMPANY', 'Town', 'Name', 'Days', 'P.DAYS', 'L.DAYS', 'TOTAL', 'Salary',
       'Bonus', 'Amount', 'BONUS', 'Dues', 'Credit', 'SIGNATURE', 'ADVANCE',
     ];
     const njSample = [
-      [1, 'Kamel',           'SAMPLE — P.Bakrudeen',    31, 31, 2,   33, 16000, '', 17032, '', '', '', '', ''],
-      [2, 'Thanjavur',       'SAMPLE — R.Chithravale',  31, 31, 4,   35, 16000, '', 18065, '', '', '', '', ''],
+      ['N001', 'Seematti Silks', 'Kamel',           'SAMPLE — P.Bakrudeen',    31, 31, 2,   33, 16000, '', 17032, '', '', '', '', ''],
+      ['N002', 'Seematti Silks', 'Thanjavur',       'SAMPLE — R.Chithravale',  31, 31, 4,   35, 16000, '', 18065, '', '', '', '', ''],
     ];
 
     const notes = [
@@ -1455,7 +1464,7 @@ const EmployeesPage = () => {
       [],
       ['How to use this file:'],
       ['1.  Replace the SAMPLE rows with your real employees.'],
-      ['2.  The uploader matches rows by EMPLOYEE NAME (and ID if you add one).'],
+      ['2.  The uploader matches rows by EMPLOYEE CODE first, then EMPLOYEE NAME.'],
       ['3.  Keep the column headers exactly as-is. The first sheet is for'],
       ['    ESI / PF employees, the second for new-joined employees.'],
       ['4.  You only need to fill the columns that matter to you — leave the'],
@@ -1465,12 +1474,12 @@ const EmployeesPage = () => {
       ['6.  Empty rows between real data are fine; they are skipped.'],
       [],
       ['Salary fields updated by upload:'],
-      ['   ESI / PF sheet → monthly_salary, HRA, W.A., TMB a/c,'],
-      ['                     ESI no., EPF no., UAN no., designation.'],
-      ['   New-joined sheet → monthly_salary, city (from Town).'],
+      ['   ESI / PF sheet → employee_code, company, monthly_salary, HRA, W.A.,'],
+      ['                     TMB a/c, ESI no., EPF no., UAN no., designation.'],
+      ['   New-joined sheet → employee_code, company, monthly_salary, city (from Town).'],
       [],
-      ['All other columns on the sheets (P.DAYS, L.D., TOTAL, etc.) are ignored'],
-      ['by the uploader — they live on each payslip, not on the employee record.'],
+      ['All other columns (P.DAYS, L.D., TOTAL, etc.) are ignored by the uploader —'],
+      ['they live on each payslip, not on the employee record.'],
     ];
 
     const wb = window.XLSX.utils.book_new();
@@ -1586,6 +1595,8 @@ const EmployeesPage = () => {
           <thead>
             <tr>
               <th onClick={() => clickSort('id')} style={{ cursor: 'pointer', width: 90 }}>ID{arrow('id')}</th>
+              <th onClick={() => clickSort('employee_code')} style={{ cursor: 'pointer', width: 90 }}>Code{arrow('employee_code')}</th>
+              <th onClick={() => clickSort('company')} style={{ cursor: 'pointer', width: 130 }}>Company{arrow('company')}</th>
               <th onClick={() => clickSort('name')} style={{ cursor: 'pointer' }}>Name{arrow('name')}</th>
               <th onClick={() => clickSort('role')} style={{ cursor: 'pointer' }}>Role{arrow('role')}</th>
               <th onClick={() => clickSort('section_id')} style={{ cursor: 'pointer', width: 110 }}>Section{arrow('section_id')}</th>
@@ -1601,7 +1612,7 @@ const EmployeesPage = () => {
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={9} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                <td colSpan={11} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
                   {loading ? 'Loading…' : 'No employees match these filters.'}
                 </td>
               </tr>
@@ -1618,6 +1629,8 @@ const EmployeesPage = () => {
                     cursor: 'pointer',
                   }}>
                 <td className="id">{r.id}</td>
+                <td className="id">{r.employee_code || <span className="muted">—</span>}</td>
+                <td>{r.company || <span className="muted">—</span>}</td>
                 <td className="name">{r.name}</td>
                 <td>{r.role}</td>
                 <td>{SECTION_META[r.section_id]?.label || <span className="muted">—</span>}</td>
@@ -1709,6 +1722,24 @@ const EmployeesPage = () => {
                   value={editing.name || ''}
                   onChange={e => setEditing({ ...editing, name: e.target.value })}
                   placeholder="e.g. Divya Parvathy" />
+              </div>
+            </div>
+
+            <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
+                <label>Employee code</label>
+                <input
+                  value={editing.employee_code || ''}
+                  onChange={e => setEditing({ ...editing, employee_code: e.target.value })}
+                  placeholder="e.g. E001"
+                  style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }} />
+              </div>
+              <div>
+                <label>Company</label>
+                <input
+                  value={editing.company || ''}
+                  onChange={e => setEditing({ ...editing, company: e.target.value })}
+                  placeholder="e.g. Seematti Silks" />
               </div>
             </div>
 
@@ -2055,6 +2086,8 @@ const EmployeeDetailModal = ({ employee, faceCount, onClose, onEdit, onCleared }
           padding: 14, background: 'var(--bg)',
           border: '1px solid var(--border)', borderRadius: 12, marginBottom: 14,
         }}>
+          <DetailField label="Emp. code" value={employee.employee_code || '—'} mono />
+          <DetailField label="Company" value={employee.company || '—'} />
           <DetailField label="User type" value={TYPE_LABEL[employee.user_type] || employee.user_type} />
           <DetailField label="Section" value={sectionLabel} />
           <DetailField label="Joined" value={fmtDate(employee.joined_date)} />
