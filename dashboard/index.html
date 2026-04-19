@@ -529,7 +529,7 @@
 <div id="root"></div>
 
 <script type="text/babel" data-presets="react">
-const { useState, useEffect, useMemo, useCallback, createContext, useContext } = React;
+const { useState, useEffect, useMemo, useCallback, useRef, createContext, useContext } = React;
 
 // ──────────────────────────────────────────────────────────
 // Password gate
@@ -1116,6 +1116,9 @@ const EmployeesPage = () => {
   const [faceCounts, setFaceCounts] = useState({}); // employee_id -> pose count
   const [loading, setLoading] = useState(true);
   const [detail, setDetail] = useState(null);       // the employee being viewed
+  const [uploadPreview, setUploadPreview] = useState(null); // parsed Excel awaiting confirm
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const fileInputRef = useRef(null);
 
   const fetchAll = useCallback(async () => {
     if (!window.sb) return;
@@ -1268,6 +1271,123 @@ const EmployeesPage = () => {
     toast(row.is_active ? `${row.name} deactivated` : `${row.name} reactivated`);
   };
 
+  // ── Excel upload — bulk-update salary records ─────────────
+  // Auto-detects the sheet format (Silks new-joined vs EPF/ESI) from
+  // its header row. Match-by-name is fuzzy (lowercase, trimmed); an
+  // exact Employee-ID match wins if present in the sheet.
+  const onEmployeeExcelPicked = async (file) => {
+    if (!file) return;
+    if (typeof window.XLSX === 'undefined') {
+      toast('Excel library still loading, try again in a second');
+      return;
+    }
+    setUploadBusy(true);
+    try {
+      const buf = await file.arrayBuffer();
+      const wb = window.XLSX.read(buf, { type: 'array' });
+      const nameIdx = {};
+      all.forEach(e => { nameIdx[e.name.trim().toLowerCase()] = e; });
+      const idIdx = {};
+      all.forEach(e => { idIdx[e.id.trim().toUpperCase()] = e; });
+
+      const updates = []; // { employee, patch, source }
+      const unmatched = []; // { name, source }
+      const norm = (s) => (s == null ? '' : String(s).trim());
+      const lower = (s) => norm(s).toLowerCase();
+      const getCell = (row, keys) => {
+        for (const k of keys) {
+          const hit = Object.keys(row).find(key => key.trim().toLowerCase() === k.toLowerCase());
+          if (hit && row[hit] !== '' && row[hit] != null) return row[hit];
+        }
+        return null;
+      };
+
+      wb.SheetNames.forEach(sheetName => {
+        const ws = wb.Sheets[sheetName];
+        const rows = window.XLSX.utils.sheet_to_json(ws, { defval: '' });
+        if (!rows.length) return;
+        const headers = Object.keys(rows[0]).map(h => h.trim());
+        const looksLikeEsi = headers.some(h =>
+          /tmb account|esi no|epf no|uan no|n\.basics/i.test(h));
+        const looksLikeNewJoined = headers.some(h =>
+          /^no$/i.test(h)) && headers.some(h =>
+          /ஊர்|^town$|peyar|^name$|பெயர்|சம்பளம்|^salary$/i.test(h));
+
+        rows.forEach(r => {
+          // Skip total rows, blank rows.
+          const idCell = getCell(r, ['Employee ID', 'ID', 'EMPLOYEE ID']);
+          const name = norm(getCell(r, ['EMPLOYEE NAME', 'Name', 'பெயர்', 'பெயர']));
+          if (!name && !idCell) return;
+          let emp = null;
+          if (idCell) emp = idIdx[norm(idCell).toUpperCase()];
+          if (!emp && name) emp = nameIdx[lower(name)];
+          if (!emp) { unmatched.push({ name, source: sheetName }); return; }
+
+          const patch = {};
+          if (looksLikeEsi) {
+            patch.salary_type    = 'esi_pf';
+            const salary = Number(getCell(r, ['SALARY', 'Salary'])) || 0;
+            if (salary) patch.monthly_salary = salary;
+            const hra = Number(getCell(r, ['HRA'])) || 0;
+            if (hra) patch.hra = hra;
+            // The ESI sheet has two W.A. columns (stored value then paid
+            // value). Prefer the first non-empty one.
+            const wa = Number(getCell(r, ['W.A.', 'WA'])) || 0;
+            if (wa) patch.wa = wa;
+            const tmb = norm(getCell(r, ['TMB ACCOUNT NO.', 'TMB']));
+            if (tmb) patch.tmb_account_no = tmb;
+            const esiNo = norm(getCell(r, ['ESI NO.', 'ESI No', 'ESI']));
+            if (esiNo) patch.esi_no = esiNo;
+            const epfNo = norm(getCell(r, ['EPF NO', 'EPF No']));
+            if (epfNo) patch.epf_no = epfNo;
+            const uanNo = norm(getCell(r, ['UAN NO.', 'UAN']));
+            if (uanNo) patch.uan_no = uanNo;
+            const designation = norm(getCell(r, ['DESIGNATION', 'Designation']));
+            if (designation) patch.role = designation;
+          } else if (looksLikeNewJoined) {
+            patch.salary_type = 'new_joined';
+            const salary = Number(getCell(r, ['சம்பளம்', 'Salary', 'SALARY'])) || 0;
+            if (salary) patch.monthly_salary = salary;
+            const town = norm(getCell(r, ['ஊர்', 'Town', 'CITY', 'City']));
+            if (town) patch.city = town;
+          } else {
+            return; // unrecognised sheet, skip silently
+          }
+          if (Object.keys(patch).length > 0) {
+            updates.push({ employee: emp, patch, source: sheetName });
+          }
+        });
+      });
+
+      if (!updates.length && !unmatched.length) {
+        toast('No recognisable employee rows in this file');
+        return;
+      }
+      setUploadPreview({ updates, unmatched, filename: file.name });
+    } catch (err) {
+      console.error(err);
+      toast('Could not parse file (see console)');
+    } finally {
+      setUploadBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const applyUpload = async () => {
+    if (!uploadPreview || uploadBusy) return;
+    setUploadBusy(true);
+    try {
+      let ok = 0, fail = 0;
+      for (const u of uploadPreview.updates) {
+        const { error } = await window.sb.from('employees')
+          .update(u.patch).eq('id', u.employee.id);
+        if (error) { fail++; console.error(error); } else ok++;
+      }
+      toast(`Updated ${ok}${fail ? ` · ${fail} failed` : ''}`);
+      setUploadPreview(null);
+    } finally { setUploadBusy(false); }
+  };
+
   const del = async (row) => {
     if (!can('employees', 'delete')) return;
     if (!window.confirm(
@@ -1342,12 +1462,26 @@ const EmployeesPage = () => {
           {loading ? 'Loading…' : `Showing ${rows.length} of ${all.length}`}
         </div>
 
-        {can('employees', 'create') && (
-          <button className="btn primary" onClick={startNew}
-            style={{ marginLeft: 'auto' }}>
-            + New employee
-          </button>
-        )}
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+          {can('employees', 'edit') && (
+            <>
+              <input ref={fileInputRef} type="file"
+                accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv"
+                style={{ display: 'none' }}
+                onChange={e => onEmployeeExcelPicked(e.target.files?.[0])} />
+              <button className="btn" onClick={() => fileInputRef.current?.click()}
+                disabled={uploadBusy}
+                title="Upload the ESI/PF or new-joined Excel to bulk-update salary records (match by name or ID)">
+                {uploadBusy ? 'Reading…' : '↑ Upload Excel'}
+              </button>
+            </>
+          )}
+          {can('employees', 'create') && (
+            <button className="btn primary" onClick={startNew}>
+              + New employee
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="table-wrap">
@@ -1655,6 +1789,100 @@ const EmployeesPage = () => {
           onCleared={() => setDetail(d => d ? { ...d } : null)}
         />
       )}
+
+      <Modal
+        open={!!uploadPreview}
+        title={uploadPreview ? `Review changes · ${uploadPreview.filename}` : ''}
+        onClose={() => setUploadPreview(null)}
+        footer={
+          <>
+            <button className="btn" onClick={() => setUploadPreview(null)} disabled={uploadBusy}>Cancel</button>
+            <button className="btn primary" onClick={applyUpload}
+              disabled={uploadBusy || !uploadPreview?.updates.length}>
+              {uploadBusy ? 'Updating…' : `Apply ${uploadPreview?.updates.length || 0} update${uploadPreview?.updates.length === 1 ? '' : 's'}`}
+            </button>
+          </>
+        }
+      >
+        {uploadPreview && (
+          <>
+            <div style={{
+              display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10,
+              padding: 12, background: 'var(--bg)', borderRadius: 10,
+              border: '1px solid var(--border)', marginBottom: 14,
+            }}>
+              <DetailField label="Will update" value={String(uploadPreview.updates.length)} />
+              <DetailField label="Unmatched names" value={String(uploadPreview.unmatched.length)} />
+              <DetailField label="Sheets" value={
+                [...new Set([...uploadPreview.updates.map(u => u.source), ...uploadPreview.unmatched.map(u => u.source)])].join(', ') || '—'
+              } />
+            </div>
+
+            {uploadPreview.updates.length > 0 && (
+              <>
+                <div style={{
+                  fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase',
+                  color: 'var(--inkMuted)', marginBottom: 6,
+                }}>Updates</div>
+                <div style={{ maxHeight: 260, overflow: 'auto', border: '1px solid var(--border)', borderRadius: 10, marginBottom: 14 }}>
+                  <table className="data" style={{ fontSize: 12 }}>
+                    <thead>
+                      <tr>
+                        <th style={{ width: 80 }}>ID</th>
+                        <th>Name</th>
+                        <th style={{ width: 90 }}>Type</th>
+                        <th>Changes</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {uploadPreview.updates.map((u, i) => (
+                        <tr key={i}>
+                          <td className="id">{u.employee.id}</td>
+                          <td className="name">{u.employee.name}</td>
+                          <td>
+                            <span className={`status-pill ${u.patch.salary_type === 'esi_pf' ? 'leave' : 'unmarked'}`}>
+                              {u.patch.salary_type === 'esi_pf' ? 'ESI / PF' : 'New joined'}
+                            </span>
+                          </td>
+                          <td style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 11 }}>
+                            {Object.entries(u.patch)
+                              .filter(([k]) => k !== 'salary_type')
+                              .map(([k, v]) => `${k}=${v}`).join(' · ') || '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+
+            {uploadPreview.unmatched.length > 0 && (
+              <>
+                <div style={{
+                  fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase',
+                  color: 'var(--warning)', marginBottom: 6,
+                }}>Unmatched — these rows were skipped</div>
+                <div style={{
+                  maxHeight: 150, overflow: 'auto', border: '1px solid var(--border)',
+                  borderRadius: 10, padding: 10, background: 'var(--warningSoft)',
+                  fontSize: 12, lineHeight: 1.6,
+                }}>
+                  {uploadPreview.unmatched.map((u, i) => (
+                    <div key={i}>
+                      <strong>{u.name || '(blank)'}</strong>{u.source ? ` · from "${u.source}"` : ''}
+                    </div>
+                  ))}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--inkFaint)', marginTop: 6 }}>
+                  Tip: the matcher checks the <strong>employee name</strong> (and Employee ID if present).
+                  Fix typos on the Employees page or in the Excel, then re-upload.
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </Modal>
     </div>
   );
 };
