@@ -1404,6 +1404,83 @@ const EmployeesPage = () => {
     } finally { setUploadBusy(false); }
   };
 
+  // Generate a sample .xlsx so HR can see the exact column layout
+  // the uploader understands. Sample names are prefixed "SAMPLE —"
+  // so they won't match any real employee if re-uploaded by mistake.
+  const downloadSample = () => {
+    if (typeof window.XLSX === 'undefined') {
+      toast('Excel library still loading, try again in a second');
+      return;
+    }
+    const esiHeader = [
+      'S.NO', 'TMB ACCOUNT NO.', 'ESI NO.', 'EPF NO', 'UAN NO.',
+      'EMPLOYEE NAME', 'DESIGNATION',
+      'SALARY', 'HRA', 'W.A.', 'TOTAL', 'DA', 'N.BASICS',
+      'DAYS', 'P.DAYS', 'L.D.',
+      'P.BASICS', 'P.DA', 'WAGES', 'P.HRA', 'L.D.S', 'W.A.',
+      'Total', 'BONUS', 'INCENTIVE',
+      'EPF WAGES', 'ESI WAGES', 'diff. 2%',
+      'EPF 12%', 'ESI 0.75%', 'ESI/EPF', 'NET WAGES',
+    ];
+    const esiSample = [
+      [1, '094100050305880', '6380472899', '217', '100210509591',
+        'SAMPLE — M.Mohamed Rafeek', 'CASHIER',
+        23000, 4600, 3000, 15400, 7313, 8087,
+        31, 31, 3,
+        8087, 7313, 15400, 4600, 2226, 3000,
+        25226, 0, 0,
+        15000, 21000, 0,
+        1800, 158, 1958, 23268],
+      [2, '094100080200041', '6380399686', '208', '100321307903',
+        'SAMPLE — A.Abdul Nasar', 'CASHIER',
+        20000, 4000, 2000, 14000, 7313, 6687,
+        31, 31, 4,
+        6687, 7313, 14000, 4000, 2581, 2000,
+        22581, 0, 0,
+        15000, 20581, 0,
+        1800, 154, 1954, 20627],
+    ];
+
+    const njHeader = [
+      'No', 'Town', 'Name', 'Days', 'P.DAYS', 'L.DAYS', 'TOTAL', 'Salary',
+      'Bonus', 'Amount', 'BONUS', 'Dues', 'Credit', 'SIGNATURE', 'ADVANCE',
+    ];
+    const njSample = [
+      [1, 'Kamel',           'SAMPLE — P.Bakrudeen',    31, 31, 2,   33, 16000, '', 17032, '', '', '', '', ''],
+      [2, 'Thanjavur',       'SAMPLE — R.Chithravale',  31, 31, 4,   35, 16000, '', 18065, '', '', '', '', ''],
+    ];
+
+    const notes = [
+      ['Payroll Excel — sample'],
+      [],
+      ['How to use this file:'],
+      ['1.  Replace the SAMPLE rows with your real employees.'],
+      ['2.  The uploader matches rows by EMPLOYEE NAME (and ID if you add one).'],
+      ['3.  Keep the column headers exactly as-is. The first sheet is for'],
+      ['    ESI / PF employees, the second for new-joined employees.'],
+      ['4.  You only need to fill the columns that matter to you — leave the'],
+      ['    computed columns (TOTAL, N.BASICS, P.BASICS, WAGES, NET WAGES, etc.)'],
+      ['    blank if you like. The dashboard recomputes them on payslip generation.'],
+      ['5.  The ESI / PF sheet has two W.A. columns — fill only the first.'],
+      ['6.  Empty rows between real data are fine; they are skipped.'],
+      [],
+      ['Salary fields updated by upload:'],
+      ['   ESI / PF sheet → monthly_salary, HRA, W.A., TMB a/c,'],
+      ['                     ESI no., EPF no., UAN no., designation.'],
+      ['   New-joined sheet → monthly_salary, city (from Town).'],
+      [],
+      ['All other columns on the sheets (P.DAYS, L.D., TOTAL, etc.) are ignored'],
+      ['by the uploader — they live on each payslip, not on the employee record.'],
+    ];
+
+    const wb = window.XLSX.utils.book_new();
+    window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.aoa_to_sheet(notes),                 'Read me first');
+    window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.aoa_to_sheet([esiHeader, ...esiSample]), 'EPF & ESI');
+    window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.aoa_to_sheet([njHeader,  ...njSample]),  'New joined');
+    window.XLSX.writeFile(wb, 'payroll_sample.xlsx');
+    toast('Sample downloaded');
+  };
+
   const del = async (row) => {
     if (!can('employees', 'delete')) return;
     if (!window.confirm(
@@ -1485,6 +1562,10 @@ const EmployeesPage = () => {
                 accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv"
                 style={{ display: 'none' }}
                 onChange={e => onEmployeeExcelPicked(e.target.files?.[0])} />
+              <button className="btn" onClick={downloadSample}
+                title="Download a sample .xlsx with the exact column layout the uploader expects (with a read-me sheet inside)">
+                ↓ Sample
+              </button>
               <button className="btn" onClick={() => fileInputRef.current?.click()}
                 disabled={uploadBusy}
                 title="Upload the ESI/PF or new-joined Excel to bulk-update salary records (match by name or ID)">
