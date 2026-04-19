@@ -593,6 +593,7 @@ const PERMS = {
     visitors:     { read: true, edit: true,  delete: true,  create: true },
     payslips:     { read: true, edit: false, delete: false, create: false },
     advances:     { read: true, edit: true,  delete: false, create: true },
+    bonus:        { read: true, edit: true,  delete: true,  create: true },
     access:       { read: false },
     reports:      { read: true },
   },
@@ -623,6 +624,7 @@ const NAV = [
   ]},
   { section: 'Payroll', items: [
     { id: 'payslips', label: 'Payslips', area: 'payslips' },
+    { id: 'bonus',    label: 'Bonus planner', area: 'bonus' },
     { id: 'advances', label: 'Advances', area: 'advances' },
   ]},
   { section: 'Insights', items: [
@@ -4812,6 +4814,368 @@ const PayslipReceiptsPrint = ({ rows, empById, da, monthLabel, onClose }) => {
 };
 
 // ──────────────────────────────────────────────────────────
+// Bonus planner — per-month page showing each eligible employee's
+// attendance performance + an editable Bonus ₹ column. HR saves the
+// plan; Owner (payslips.edit) pushes it onto that month's payslips.
+// Bonuses done twice a year, per the Owner's brief.
+// ──────────────────────────────────────────────────────────
+const BonusPlannerPage = () => {
+  const toast = useToast();
+  const { can } = useContext(AppCtx);
+  const { rows: employees } = useEmployees();
+
+  const [month, setMonth] = useState(() => firstOfMonth(new Date()));
+  const [attendance, setAttendance] = useState({});
+  const [payslips, setPayslips] = useState({}); // employee_id -> payslip row
+  const [plan, setPlan] = useState(null);
+  const [bonuses, setBonuses] = useState({});   // employee_id -> ₹
+  const [note, setNote] = useState('');
+  const [saving, setSaving]   = useState(false);
+  const [pushing, setPushing] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch]   = useState('');
+  const [typeFilter, setTypeFilter] = useState('all');
+
+  const eligibleList = useMemo(() =>
+    employees.filter(e => e.user_type !== 'owner' && e.is_active)
+      .sort((a, b) => a.name.localeCompare(b.name))
+  , [employees]);
+
+  const monthEnd = useMemo(() => {
+    const d = new Date(month + 'T00:00:00');
+    return fmtDateISO(new Date(d.getFullYear(), d.getMonth() + 1, 0));
+  }, [month]);
+
+  const load = useCallback(async () => {
+    if (!window.sb) return;
+    setLoading(true);
+    const [planRes, rowsRes, attRes, payRes] = await Promise.all([
+      window.sb.from('bonus_plans').select('*').eq('month', month).maybeSingle(),
+      window.sb.from('bonus_plan_rows').select('*'),
+      window.sb.from('attendance')
+        .select('employee_id, status, date')
+        .gte('date', month).lte('date', monthEnd),
+      window.sb.from('payslips').select('id, employee_id, bonus, amount, gross, deductions, net, salary_type, p_days, l_days, days_in_month, monthly_salary, hra, wa, dues, credit, advance_amt, diff_pct').eq('month', month),
+    ]);
+    // Bucket attendance by employee.
+    const byEmp = {};
+    (attRes.data || []).forEach(r => { (byEmp[r.employee_id] = byEmp[r.employee_id] || []).push(r); });
+    const stats = {};
+    Object.keys(byEmp).forEach(id => { stats[id] = attendanceToPayDays(byEmp[id]); });
+    setAttendance(stats);
+    // Bucket payslips by employee.
+    const payByEmp = {};
+    (payRes.data || []).forEach(r => { payByEmp[r.employee_id] = r; });
+    setPayslips(payByEmp);
+    // Plan + rows.
+    const planRow = planRes.data || null;
+    setPlan(planRow);
+    setNote(planRow?.note || '');
+    const seeded = {};
+    if (planRow) {
+      (rowsRes.data || []).filter(r => r.plan_id === planRow.id)
+        .forEach(r => { seeded[r.employee_id] = Number(r.bonus_amount) || 0; });
+    }
+    setBonuses(seeded);
+    setLoading(false);
+  }, [month, monthEnd]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const filteredList = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return eligibleList.filter(e => {
+      if (typeFilter !== 'all' && (e.salary_type || 'new_joined') !== typeFilter) return false;
+      if (q) {
+        if (!e.name.toLowerCase().includes(q) &&
+            !e.id.toLowerCase().includes(q) &&
+            !(e.role || '').toLowerCase().includes(q)) return false;
+      }
+      return true;
+    });
+  }, [eligibleList, typeFilter, search]);
+
+  const totals = useMemo(() => {
+    const sum = Object.values(bonuses).reduce((s, v) => s + (num(v) || 0), 0);
+    const given = Object.values(bonuses).filter(v => num(v) > 0).length;
+    const payslipMatches = Object.keys(bonuses)
+      .filter(id => num(bonuses[id]) > 0 && payslips[id]).length;
+    return { sum, given, payslipMatches };
+  }, [bonuses, payslips]);
+
+  const save = async () => {
+    if (saving || !can('bonus', 'edit')) return;
+    setSaving(true);
+    try {
+      let planId = plan?.id;
+      if (!planId) {
+        const { data, error } = await window.sb.from('bonus_plans')
+          .insert({ month, note: note.trim() || null })
+          .select().maybeSingle();
+        if (error) { toast('Could not save plan'); console.error(error); return; }
+        planId = data.id;
+        setPlan(data);
+      } else {
+        await window.sb.from('bonus_plans')
+          .update({ note: note.trim() || null })
+          .eq('id', planId);
+      }
+      // Upsert one row per eligible employee that has a stats entry.
+      const rowsPayload = eligibleList.map(e => {
+        const s = attendance[e.id] || { p_days: 0, late_days: 0, leaves_taken: 0 };
+        return {
+          plan_id:      planId,
+          employee_id:  e.id,
+          present_days: s.p_days || 0,
+          late_days:    s.late_days || 0,
+          leave_days:   s.leaves_taken || 0,
+          bonus_amount: num(bonuses[e.id]),
+        };
+      });
+      const { error } = await window.sb.from('bonus_plan_rows')
+        .upsert(rowsPayload, { onConflict: 'plan_id,employee_id' });
+      if (error) { toast('Could not save rows'); console.error(error); return; }
+      toast(`Saved ${rowsPayload.length} rows`);
+    } finally { setSaving(false); }
+  };
+
+  // Push every non-zero bonus onto the matching payslip row for this
+  // month, updating bonus + gross/net. Requires payslips.edit (Owner).
+  const pushToPayslips = async () => {
+    if (pushing || !can('payslips', 'edit')) return;
+    const hits = Object.keys(bonuses).filter(id => num(bonuses[id]) > 0 && payslips[id]);
+    const skipped = Object.keys(bonuses).filter(id => num(bonuses[id]) > 0 && !payslips[id]);
+    if (!hits.length) { toast('No matching payslips for the bonuses entered'); return; }
+    if (!window.confirm(
+      `Push ${hits.length} bonus${hits.length === 1 ? '' : 'es'} onto payslips for this month?\n\n` +
+      (skipped.length ? `${skipped.length} employee${skipped.length === 1 ? ' has' : 's have'} no payslip yet and will be skipped.\n\n` : '') +
+      `This updates the Bonus column on each payslip and recomputes Net pay.`
+    )) return;
+    setPushing(true);
+    try {
+      // Save plan first so what we push is persisted.
+      await save();
+      // Update each payslip with the new bonus. Recompute with the
+      // same engine the Payslips page uses so the numbers stay in sync.
+      let ok = 0;
+      for (const id of hits) {
+        const p = payslips[id];
+        const bonus = num(bonuses[id]);
+        const days = p.days_in_month || daysInMonthIso(month);
+        const shared = {
+          salary: num(p.monthly_salary), days,
+          p_days: num(p.p_days), l_days: num(p.l_days),
+          bonus, advance: num(p.advance_amt),
+        };
+        let newGross, newDed, newNet, newAmount;
+        if (p.salary_type === 'esi_pf') {
+          // DA is whatever the payslips page would have used. Fetch the
+          // current setting so we don't stale-out if it changed.
+          const { data: daRow } = await window.sb.from('app_settings')
+            .select('value').eq('key', 'payroll.da').maybeSingle();
+          const daVal = num(daRow?.value?.amount) || 7313;
+          const c = computeEsiPf({
+            ...shared,
+            hra: num(p.hra), wa: num(p.wa), da: daVal,
+            incentive: num(p.credit), diff_pct: num(p.diff_pct),
+          });
+          newAmount = c.total;
+          newGross  = c.total + bonus + num(p.credit);
+          newDed    = c.esi_epf + num(p.advance_amt);
+          newNet    = c.net_wages;
+        } else {
+          const c = computeNewJoined({ ...shared, dues: num(p.dues), credit: num(p.credit) });
+          newAmount = c.amount;
+          newGross  = c.amount + bonus + num(p.credit);
+          newDed    = num(p.dues) + num(p.advance_amt);
+          newNet    = c.net;
+        }
+        const { error } = await window.sb.from('payslips')
+          .update({ bonus, amount: newAmount, gross: newGross, deductions: newDed, net: newNet })
+          .eq('id', p.id);
+        if (!error) ok++;
+      }
+      // Stamp the plan as pushed.
+      if (plan?.id) {
+        await window.sb.from('bonus_plans')
+          .update({ pushed_at: new Date().toISOString() })
+          .eq('id', plan.id);
+        setPlan(p => p ? { ...p, pushed_at: new Date().toISOString() } : p);
+      }
+      toast(`Pushed ${ok}/${hits.length} bonus${hits.length === 1 ? '' : 'es'}`);
+      await load();
+    } finally { setPushing(false); }
+  };
+
+  const readOnly = !can('bonus', 'edit');
+  const canPush  = can('payslips', 'edit');
+  const monthLabel = new Date(month + 'T00:00:00').toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+
+  return (
+    <div>
+      <div className="stat-strip">
+        <div className="stat"><div className="k">Employees</div><div className="v">{filteredList.length}</div></div>
+        <div className="stat present"><div className="k">With bonus</div><div className="v">{totals.given}</div></div>
+        <div className="stat leave"><div className="k">Total ₹</div><div className="v" style={{ fontSize: 18 }}>{rupees(totals.sum)}</div></div>
+        <div className="stat"><div className="k">Payslips matched</div><div className="v">{totals.payslipMatches}</div></div>
+      </div>
+
+      <div className="toolbar">
+        <input type="month" value={month.slice(0, 7)}
+          onChange={e => setMonth(e.target.value + '-01')} />
+
+        <div className="seg">
+          {[
+            { id: 'all', label: 'All types' },
+            { id: 'new_joined', label: 'New joined' },
+            { id: 'esi_pf', label: 'ESI / PF' },
+          ].map(s => (
+            <button key={s.id}
+              className={typeFilter === s.id ? 'active' : ''}
+              onClick={() => setTypeFilter(s.id)}>{s.label}</button>
+          ))}
+        </div>
+
+        <input type="search" placeholder="Search name, ID or role…"
+          value={search} onChange={e => setSearch(e.target.value)} />
+
+        {plan?.pushed_at && (
+          <span className="status-pill present" title={`Pushed ${new Date(plan.pushed_at).toLocaleString('en-GB')}`}>
+            Pushed to payslips
+          </span>
+        )}
+
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {!readOnly && (
+            <button className="btn" onClick={save} disabled={saving}>
+              {saving ? 'Saving…' : (plan?.id ? 'Save plan' : 'Create plan')}
+            </button>
+          )}
+          {canPush && (
+            <button className="btn primary" onClick={pushToPayslips} disabled={pushing || !totals.given}>
+              {pushing ? 'Pushing…' : `Push to payslips${totals.payslipMatches ? ` (${totals.payslipMatches})` : ''}`}
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 280px', gap: 12, marginBottom: 10 }}>
+        <div className="table-wrap">
+          <table className="data">
+            <thead>
+              <tr>
+                <th style={{ width: 50 }}>#</th>
+                <th style={{ width: 90 }}>ID</th>
+                <th>Name</th>
+                <th style={{ width: 100 }}>Type</th>
+                <th style={{ width: 100 }}>Section</th>
+                <th style={{ width: 110 }}>Salary</th>
+                <th style={{ width: 80 }}>Present</th>
+                <th style={{ width: 70 }}>Late</th>
+                <th style={{ width: 100 }}>Leaves taken</th>
+                <th style={{ width: 110 }}>Payslip?</th>
+                <th style={{ width: 140 }}>Bonus ₹</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredList.length === 0 && (
+                <tr>
+                  <td colSpan={11} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                    {loading ? 'Loading…' : 'No employees match these filters.'}
+                  </td>
+                </tr>
+              )}
+              {filteredList.map((e, idx) => {
+                const s = attendance[e.id] || { p_days: 0, late_days: 0, leaves_taken: 0 };
+                const hasPayslip = !!payslips[e.id];
+                const stype = e.salary_type || 'new_joined';
+                return (
+                  <tr key={e.id}>
+                    <td className="muted">{idx + 1}</td>
+                    <td className="id">{e.id}</td>
+                    <td className="name">
+                      {e.name}
+                      {e.role && (
+                        <div style={{ fontSize: 11, color: 'var(--inkMuted)', fontWeight: 400, marginTop: 2 }}>{e.role}</div>
+                      )}
+                    </td>
+                    <td>
+                      <span className={`status-pill ${stype === 'esi_pf' ? 'leave' : 'unmarked'}`}>
+                        {stype === 'esi_pf' ? 'ESI / PF' : 'New joined'}
+                      </span>
+                    </td>
+                    <td>{SECTION_META[e.section_id]?.label || <span className="muted">—</span>}</td>
+                    <td className="muted" style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{rupees(e.monthly_salary)}</td>
+                    <td style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{s.p_days}</td>
+                    <td className="muted" style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{s.late_days}</td>
+                    <td className="muted" style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
+                      {s.leaves_taken}
+                      {s.leaves_taken > 0 && (
+                        <span style={{ fontSize: 10, color: 'var(--inkMuted)' }}> · {s.l_days} unused</span>
+                      )}
+                    </td>
+                    <td>
+                      {hasPayslip
+                        ? <span className="status-pill present">Yes</span>
+                        : <span className="status-pill unmarked">—</span>}
+                    </td>
+                    <td>
+                      <input type="number" min="0" step="1"
+                        value={bonuses[e.id] ?? ''}
+                        disabled={readOnly}
+                        onChange={ev => setBonuses({ ...bonuses, [e.id]: ev.target.value })}
+                        placeholder="0"
+                        style={{
+                          fontFamily: 'JetBrains Mono, Menlo, monospace', textAlign: 'right',
+                          background: num(bonuses[e.id]) > 0 ? 'var(--brandSoft)' : undefined,
+                        }} />
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        <div style={{
+          background: 'var(--surface)', border: '1px solid var(--border)',
+          borderRadius: 12, padding: 16, alignSelf: 'start',
+          position: 'sticky', top: 16,
+        }}>
+          <div style={{
+            fontSize: 12, color: 'var(--inkMuted)', fontWeight: 600,
+            textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8,
+          }}>Plan · {monthLabel}</div>
+          <label>Note (optional)</label>
+          <textarea rows={3} value={note} disabled={readOnly}
+            onChange={e => setNote(e.target.value)}
+            placeholder="e.g. Diwali bonus 2026"
+            style={{ width: '100%', marginBottom: 10 }} />
+          <div style={{ fontSize: 12, color: 'var(--inkMuted)', lineHeight: 1.5 }}>
+            Planned bonuses appear on each payslip's <strong>Bonus</strong> line after you push.
+            {canPush ? '' : ' (Only Owner can push.)'}
+          </div>
+          {plan?.pushed_at && (
+            <div style={{
+              marginTop: 10, padding: 10, borderRadius: 8,
+              background: 'var(--brandSoft)', color: 'var(--brand)', fontSize: 12,
+            }}>
+              Pushed {new Date(plan.pushed_at).toLocaleString('en-GB')}.
+              Pushing again overwrites the Bonus column with the current values.
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div style={{ marginTop: 6, fontSize: 11.5, color: 'var(--inkFaint)' }}>
+        Present counts include late days. Leaves-taken eats into the 4-day paid-leave bank.
+        {!payslips && 'Generate payslips first to see the "Payslip?" column turn green.'}
+      </div>
+    </div>
+  );
+};
+
+// ──────────────────────────────────────────────────────────
 // Reports & CSV exports
 // ──────────────────────────────────────────────────────────
 
@@ -6530,6 +6894,7 @@ const Page = ({ name }) => {
   if (name === 'visitors')      return <VisitorsPage />;
   if (name === 'sections')      return <SectionsPage />;
   if (name === 'payslips')      return <PayslipsPage />;
+  if (name === 'bonus')         return <BonusPlannerPage />;
   if (name === 'advances')      return <AdvancesPage />;
   if (name === 'reports')       return <ReportsPage />;
   if (name === 'kiosk')         return <KioskSettingsPage />;
