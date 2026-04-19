@@ -1245,7 +1245,7 @@ const useLiveAdvances = () => {
     if (!window.sb) return;
     const { data } = await window.sb
       .from('advances')
-      .select('*, employees(name, role, section_id)')
+      .select('*, employees!advances_employee_id_fkey(name, role, section_id)')
       .order('created_at', { ascending: false });
     setItems((data || []).filter(r => r.employees));
     setLoading(false);

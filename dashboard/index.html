@@ -4927,7 +4927,7 @@ const AdvancesPage = () => {
     if (!window.sb) return;
     const [advRes, empRes] = await Promise.all([
       window.sb.from('advances')
-        .select('*, employees(id, name, role, section_id, user_type)')
+        .select('*, employees!advances_employee_id_fkey(id, name, role, section_id, user_type)')
         .order('created_at', { ascending: false }),
       window.sb.from('employees')
         .select('id, name, role, section_id, user_type')
