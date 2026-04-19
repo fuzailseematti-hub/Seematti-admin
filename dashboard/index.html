@@ -3478,12 +3478,83 @@ const SectionsPage = () => {
 
 // ──────────────────────────────────────────────────────────
 // Payslips management — Owner-only writes, HR read-only.
+// Split into two compute engines:
+//   • new_joined  → salary × (P.DAYS + L.DAYS) ÷ days_in_month, plus
+//                    bonus + credit − dues − advance.
+//   • esi_pf      → Basic/HRA/DA pro-ration with EPF 12% (cap ₹15k),
+//                    ESI 0.75% (cap ₹21k gross), matches the Silks
+//                    ESI/PF template the Owner supplied.
+// Both engines grant a 4-day paid-leave bank; unused leaves add to
+// salary via L.DAYS. Attendance for the selected month auto-seeds
+// P.DAYS and L.DAYS; HR can still override per row.
 // ──────────────────────────────────────────────────────────
 const firstOfMonth = (d) => fmtDateISO(new Date(d.getFullYear(), d.getMonth(), 1));
 
 const rupees = (n) => {
   if (n == null) return '—';
   return '₹' + Number(n).toLocaleString('en-IN');
+};
+
+const daysInMonthIso = (iso) => {
+  if (!iso) return 30;
+  const d = new Date(iso + (iso.length === 10 ? 'T00:00:00' : ''));
+  return new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+};
+const num = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+};
+const round = (n) => Math.round(num(n));
+
+// Paid-leave bank: 4 days/month. Unused days are paid on top of salary.
+const PAID_LEAVE_BANK = 4;
+const derivedLdays = (leavesTaken) => Math.max(0, PAID_LEAVE_BANK - num(leavesTaken));
+
+// Compute { amount, net } for a new-joined payslip.
+const computeNewJoined = ({ salary, days, p_days, l_days, bonus, dues, credit, advance }) => {
+  const total = num(p_days) + num(l_days);
+  const amount = days > 0 ? round(num(salary) * total / num(days)) : 0;
+  const net = amount + num(bonus) + num(credit) - num(dues) - num(advance);
+  return { amount, net };
+};
+
+// Compute the full ESI/PF breakdown matching the Silks Excel.
+const computeEsiPf = ({ salary, hra, wa, da, days, p_days, l_days, bonus, incentive, diff_pct, advance }) => {
+  const s = num(salary), h = num(hra), w = num(wa), dd = num(da);
+  const d = num(days),   p = num(p_days), l = num(l_days);
+  const n_basics = Math.max(0, s - h - w - dd);
+  const p_basics = d > 0 ? round(n_basics * p / d) : 0;
+  const p_da     = d > 0 ? round(dd       * p / d) : 0;
+  const p_hra    = d > 0 ? round(h        * p / d) : 0;
+  const ld_s     = d > 0 ? round(s        * l / d) : 0;
+  const wages    = p_basics + p_da;
+  const total    = wages + p_hra + ld_s + w;
+  const epf_wages = Math.min(15000, wages);
+  const esi_wages = total <= 21000 ? total : 0;
+  const epf_12    = round(epf_wages * 0.12);
+  const esi_075   = round(esi_wages * 0.0075);
+  const diff      = round(wages * num(diff_pct) / 100);
+  const esi_epf   = epf_12 + esi_075 + diff;
+  const net_wages = total + num(bonus) + num(incentive) - esi_epf - num(advance);
+  return {
+    n_basics, p_basics, p_da, p_hra, ld_s, wa_paid: w,
+    wages, total, epf_wages, esi_wages,
+    epf_12, esi_075, diff, esi_epf, net_wages,
+  };
+};
+
+// Count attendance rows into P.DAYS + L.DAYS for the selected month.
+// late still counts toward P.DAYS; on_leave eats into the 4-day bank.
+const attendanceToPayDays = (rows) => {
+  const c = { present: 0, late: 0, on_leave: 0, absent: 0 };
+  (rows || []).forEach(r => { c[r.status] = (c[r.status] || 0) + 1; });
+  return {
+    p_days: c.present + c.late,
+    l_days: derivedLdays(c.on_leave),
+    late_days: c.late,
+    leaves_taken: c.on_leave,
+    absent_days: c.absent,
+  };
 };
 
 const PayslipsPage = () => {
@@ -3493,8 +3564,11 @@ const PayslipsPage = () => {
   const [month, setMonth] = useState(() => firstOfMonth(new Date()));
   const [search, setSearch] = useState('');
   const [sectionFilter, setSectionFilter] = useState('all');
+  const [typeFilter, setTypeFilter] = useState('all'); // 'all' | 'esi_pf' | 'new_joined'
 
   const [rows, setRows] = useState([]);
+  const [attendance, setAttendance] = useState({}); // employee_id -> { p_days, l_days, ... }
+  const [da, setDa] = useState(7313);
   const [loading, setLoading] = useState(true);
 
   const { rows: employees } = useEmployees();
@@ -3508,21 +3582,39 @@ const PayslipsPage = () => {
     employees.forEach(e => { m[e.id] = e; });
     return m;
   }, [employees]);
-  const staffList = useMemo(() =>
-    employees.filter(e => e.user_type === 'staff' && e.is_active)
+  // Everyone except Owner gets a payslip (HR, Manager, Supervisor, Staff).
+  const eligibleList = useMemo(() =>
+    employees.filter(e => e.user_type !== 'owner' && e.is_active)
       .sort((a, b) => a.name.localeCompare(b.name))
   , [employees]);
 
+  const daysInMonth = useMemo(() => daysInMonthIso(month), [month]);
+  const monthEnd = useMemo(() => {
+    const d = new Date(month + 'T00:00:00');
+    return fmtDateISO(new Date(d.getFullYear(), d.getMonth() + 1, 0));
+  }, [month]);
+
   const fetchAll = useCallback(async () => {
     if (!window.sb) return;
-    const { data } = await window.sb
-      .from('payslips')
-      .select('*')
-      .eq('month', month)
-      .order('employee_id');
-    setRows(data || []);
+    const [payRes, attRes, daRes] = await Promise.all([
+      window.sb.from('payslips').select('*').eq('month', month).order('employee_id'),
+      window.sb.from('attendance')
+        .select('employee_id, status, date')
+        .gte('date', month).lte('date', monthEnd),
+      window.sb.from('app_settings').select('value').eq('key', 'payroll.da').maybeSingle(),
+    ]);
+    setRows(payRes.data || []);
+    // Bucket attendance by employee, turn into { p_days, l_days, late_days, leaves_taken }.
+    const byEmp = {};
+    (attRes.data || []).forEach(r => {
+      (byEmp[r.employee_id] = byEmp[r.employee_id] || []).push(r);
+    });
+    const stats = {};
+    Object.keys(byEmp).forEach(id => { stats[id] = attendanceToPayDays(byEmp[id]); });
+    setAttendance(stats);
+    if (daRes.data?.value?.amount != null) setDa(Number(daRes.data.value.amount) || 7313);
     setLoading(false);
-  }, [month]);
+  }, [month, monthEnd]);
 
   useEffect(() => {
     if (!window.sb) return;
@@ -3531,6 +3623,9 @@ const PayslipsPage = () => {
     const ch = window.sb.channel(`dash-payslips-${month}`)
       .on('postgres_changes',
         { event: '*', schema: 'public', table: 'payslips', filter: `month=eq.${month}` },
+        () => fetchAll())
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'attendance' },
         () => fetchAll())
       .subscribe();
     return () => { window.sb.removeChannel(ch); };
@@ -3541,13 +3636,17 @@ const PayslipsPage = () => {
     return rows.filter(r => {
       const emp = empById[r.employee_id];
       if (sectionFilter !== 'all' && emp?.section_id !== sectionFilter) return false;
+      if (typeFilter !== 'all') {
+        const rowType = r.salary_type || emp?.salary_type || 'new_joined';
+        if (rowType !== typeFilter) return false;
+      }
       if (q) {
         const name = (emp?.name || '').toLowerCase();
         if (!name.includes(q) && !r.employee_id.toLowerCase().includes(q)) return false;
       }
       return true;
     });
-  }, [rows, empById, sectionFilter, search]);
+  }, [rows, empById, sectionFilter, typeFilter, search]);
 
   const totals = useMemo(() => {
     const gross = filtered.reduce((s, r) => s + (r.gross || 0), 0);
@@ -3557,144 +3656,254 @@ const PayslipsPage = () => {
     return { gross, net, ded, paid };
   }, [filtered]);
 
-  // Edit helpers — earnings / deduct_items are arrays of { label, amount }
-  const sumItems = (items) => (items || []).reduce((s, i) => s + (Number(i.amount) || 0), 0);
-  const recalc = (draft) => {
-    const g = sumItems(draft.earnings);
-    const d = sumItems(draft.deduct_items);
-    return { ...draft, gross: g, deductions: d, net: g - d };
-  };
-
-  // Fetch active advances for a given employee so they can auto-deduct
-  // when a new payslip is created.
+  // Fetch active (unfinished) advances so we can auto-deduct the monthly
+  // installment onto the payslip. The advance id is stashed on the draft
+  // so `save()` can bump months_deducted after the insert.
   const fetchActiveAdvances = async (employeeId) => {
     if (!window.sb || !employeeId) return [];
     const { data } = await window.sb.from('advances')
-      .select('id, amount_approved, monthly_deduction, months_total, months_deducted')
+      .select('id, monthly_deduction, months_total, months_deducted')
       .eq('employee_id', employeeId)
       .eq('status', 'approved');
     return (data || []).filter(a => a.months_deducted < a.months_total);
   };
+  const sumAdvances = (advs) =>
+    (advs || []).reduce((s, a) => s + (Number(a.monthly_deduction) || 0), 0);
 
-  const startNew = async (employeeId) => {
-    // If we know the employee already, auto-add any outstanding advance
-    // as a deduction line item so HR doesn't have to remember.
-    let adv = [];
-    if (employeeId) {
-      const active = await fetchActiveAdvances(employeeId);
-      adv = active.map(a => ({
-        label: `Advance repayment (${a.months_deducted + 1}/${a.months_total})`,
-        amount: a.monthly_deduction || 0,
-        advance_id: a.id,
-      }));
+  // Build the derived display values for a draft payslip.
+  const recomputeDraft = (draft, employee, daValue) => {
+    const shared = {
+      salary:  num(draft.monthly_salary ?? employee?.monthly_salary),
+      days:    num(draft.days_in_month  ?? daysInMonthIso(draft.month)),
+      p_days:  num(draft.p_days),
+      l_days:  num(draft.l_days),
+      bonus:   num(draft.bonus),
+      advance: num(draft.advance_amt),
+    };
+    if (draft.salary_type === 'esi_pf') {
+      const calc = computeEsiPf({
+        ...shared,
+        hra:       num(draft.hra ?? employee?.hra),
+        wa:        num(draft.wa  ?? employee?.wa),
+        da:        num(daValue),
+        incentive: num(draft.credit),         // new-joined 'Credit' column = ESI/PF 'Incentive'
+        diff_pct:  num(draft.diff_pct),
+      });
+      return {
+        ...draft,
+        calc,
+        gross:      calc.total + num(draft.bonus) + num(draft.credit),
+        deductions: calc.esi_epf + num(draft.advance_amt),
+        net:        calc.net_wages,
+        amount:     calc.total,
+      };
     }
-    setEditing(recalc({
+    // new_joined
+    const calc = computeNewJoined({ ...shared, dues: num(draft.dues), credit: num(draft.credit) });
+    return {
+      ...draft,
+      calc,
+      gross:      calc.amount + num(draft.bonus) + num(draft.credit),
+      deductions: num(draft.dues) + num(draft.advance_amt),
+      net:        calc.net,
+      amount:     calc.amount,
+    };
+  };
+
+  // Build an insert payload from the draft state.
+  const draftToPayload = (draft) => {
+    const base = {
+      employee_id:   draft.employee_id,
+      month:         draft.month,
+      salary_type:   draft.salary_type,
+      monthly_salary: num(draft.monthly_salary),
+      hra:           draft.salary_type === 'esi_pf' ? num(draft.hra) : null,
+      wa:            draft.salary_type === 'esi_pf' ? num(draft.wa)  : null,
+      days_in_month: num(draft.days_in_month),
+      p_days:        num(draft.p_days),
+      l_days:        num(draft.l_days),
+      amount:        num(draft.amount),
+      bonus:         num(draft.bonus),
+      dues:          num(draft.dues),
+      credit:        num(draft.credit),
+      advance_amt:   num(draft.advance_amt),
+      diff_pct:      num(draft.diff_pct),
+      gross:         num(draft.gross),
+      deductions:    num(draft.deductions),
+      net:           num(draft.net),
+      paid_at:       draft.paid_at || null,
+      bank_last4:    (draft.bank_last4 || '').trim() || null,
+    };
+    // Keep the legacy JSONB fields populated so the Reports CSV export
+    // and any historical tooling still see a breakdown.
+    const earnings = [];
+    const deduct_items = [];
+    if (draft.salary_type === 'esi_pf' && draft.calc) {
+      const c = draft.calc;
+      earnings.push({ label: 'Basic (pro-rated)', amount: c.p_basics });
+      earnings.push({ label: 'DA (pro-rated)',    amount: c.p_da });
+      earnings.push({ label: 'HRA (pro-rated)',   amount: c.p_hra });
+      if (c.ld_s)   earnings.push({ label: `Leave encashment (${draft.l_days} d)`, amount: c.ld_s });
+      if (c.wa_paid) earnings.push({ label: 'W.A.', amount: c.wa_paid });
+      if (num(draft.bonus))  earnings.push({ label: 'Bonus',     amount: num(draft.bonus) });
+      if (num(draft.credit)) earnings.push({ label: 'Incentive', amount: num(draft.credit) });
+      if (c.epf_12)  deduct_items.push({ label: 'EPF 12%',  amount: c.epf_12 });
+      if (c.esi_075) deduct_items.push({ label: 'ESI 0.75%', amount: c.esi_075 });
+      if (c.diff)    deduct_items.push({ label: 'Diff 2%',  amount: c.diff });
+    } else {
+      earnings.push({ label: `Amount (${draft.p_days}+${draft.l_days}/${draft.days_in_month} d)`, amount: num(draft.amount) });
+      if (num(draft.bonus))  earnings.push({ label: 'Bonus',  amount: num(draft.bonus) });
+      if (num(draft.credit)) earnings.push({ label: 'Credit', amount: num(draft.credit) });
+      if (num(draft.dues))   deduct_items.push({ label: 'Dues', amount: num(draft.dues) });
+    }
+    if (num(draft.advance_amt) && Array.isArray(draft._advances)) {
+      draft._advances.forEach(a => {
+        deduct_items.push({
+          label: `Advance repayment (${a.months_deducted + 1}/${a.months_total})`,
+          amount: a.monthly_deduction || 0,
+          advance_id: a.id,
+        });
+      });
+    } else if (num(draft.advance_amt)) {
+      deduct_items.push({ label: 'Advance repayment', amount: num(draft.advance_amt) });
+    }
+    base.earnings = earnings;
+    base.deduct_items = deduct_items;
+    return base;
+  };
+
+  // Compose a brand-new draft for the given employee.
+  const makeDraftForEmployee = async (emp, overrides = {}) => {
+    const advs = await fetchActiveAdvances(emp.id);
+    const stats = attendance[emp.id] || { p_days: daysInMonth, l_days: PAID_LEAVE_BANK };
+    const draft = {
       id: null,
-      employee_id: employeeId || '',
+      _new: true,
+      employee_id: emp.id,
+      salary_type: emp.salary_type || 'new_joined',
       month,
-      earnings:     [{ label: 'Basic',            amount: 15000 }, { label: 'HRA', amount: 4500 }],
-      deduct_items: [
-        { label: 'EPF',              amount: 1800 },
-        { label: 'Professional tax', amount: 50 },
-        ...adv,
-      ],
+      monthly_salary: num(emp.monthly_salary),
+      hra: num(emp.hra),
+      wa:  num(emp.wa),
+      days_in_month: daysInMonth,
+      p_days:  stats.p_days,
+      l_days:  stats.l_days,
+      bonus:   0,
+      dues:    0,
+      credit:  0,
+      advance_amt: sumAdvances(advs),
+      diff_pct: 0,
+      _advances: advs,
       paid_at: null,
       bank_last4: '',
-      _new: true,
-    }));
+      ...overrides,
+    };
+    return recomputeDraft(draft, emp, da);
   };
 
-  // When the employee picker changes mid-edit on a new payslip, refresh
-  // the advance rows too.
-  const refreshAdvancesFor = async (employeeId) => {
-    if (!editing || !editing._new) return;
-    const active = await fetchActiveAdvances(employeeId);
-    setEditing(cur => {
-      const withoutOld = (cur.deduct_items || []).filter(i => !i.advance_id);
-      const advanceLines = active.map(a => ({
-        label: `Advance repayment (${a.months_deducted + 1}/${a.months_total})`,
-        amount: a.monthly_deduction || 0,
-        advance_id: a.id,
-      }));
-      return recalc({
-        ...cur,
-        employee_id: employeeId,
-        deduct_items: [...withoutOld, ...advanceLines],
+  const startNew = async (employeeId) => {
+    const emp = empById[employeeId];
+    if (employeeId && emp) {
+      setEditing(await makeDraftForEmployee(emp));
+    } else {
+      // Blank until an employee is picked.
+      setEditing({
+        id: null, _new: true, employee_id: '', salary_type: 'new_joined',
+        month, monthly_salary: 0, hra: 0, wa: 0,
+        days_in_month: daysInMonth, p_days: daysInMonth, l_days: PAID_LEAVE_BANK,
+        bonus: 0, dues: 0, credit: 0, advance_amt: 0, diff_pct: 0,
+        _advances: [], paid_at: null, bank_last4: '',
+        amount: 0, gross: 0, deductions: 0, net: 0,
       });
-    });
+    }
   };
-  const startEdit = (row) => setEditing({
-    ...row,
-    earnings:     Array.isArray(row.earnings)     ? row.earnings     : [],
-    deduct_items: Array.isArray(row.deduct_items) ? row.deduct_items : [],
-    _new: false,
-  });
+
+  const pickEmployee = async (employeeId) => {
+    const emp = empById[employeeId];
+    if (!emp) return;
+    setEditing(await makeDraftForEmployee(emp));
+  };
+
+  // Editing an existing row: if it pre-dates the new schema (no
+  // salary_type), fall back to the stored gross/deductions so the form
+  // at least renders something sensible.
+  const startEdit = (row) => {
+    const emp = empById[row.employee_id];
+    const legacy = !row.salary_type;
+    const draft = {
+      ...row,
+      _new: false,
+      salary_type: row.salary_type || emp?.salary_type || 'new_joined',
+      monthly_salary: row.monthly_salary ?? emp?.monthly_salary ?? 0,
+      hra: row.hra ?? emp?.hra ?? 0,
+      wa:  row.wa  ?? emp?.wa  ?? 0,
+      days_in_month: row.days_in_month || daysInMonthIso(row.month),
+      p_days:   row.p_days   ?? daysInMonthIso(row.month),
+      l_days:   row.l_days   ?? 0,
+      bonus:    row.bonus    ?? 0,
+      dues:     row.dues     ?? 0,
+      credit:   row.credit   ?? 0,
+      advance_amt: row.advance_amt ?? 0,
+      diff_pct: row.diff_pct ?? 0,
+      _legacy: legacy,
+    };
+    setEditing(recomputeDraft(draft, emp, da));
+  };
   const close = () => setEditing(null);
 
-  const setItem = (field, idx, key, val) => {
+  // Update one field on the draft and re-run the compute engine.
+  const patchDraft = (patch) => {
     setEditing(cur => {
-      const items = [...cur[field]];
-      items[idx] = { ...items[idx], [key]: key === 'amount' ? Number(val) || 0 : val };
-      return recalc({ ...cur, [field]: items });
+      if (!cur) return cur;
+      const emp = empById[cur.employee_id];
+      return recomputeDraft({ ...cur, ...patch }, emp, da);
     });
   };
-  const addItem = (field) =>
-    setEditing(cur => recalc({ ...cur, [field]: [...cur[field], { label: '', amount: 0 }] }));
-  const removeItem = (field, idx) =>
-    setEditing(cur => recalc({ ...cur, [field]: cur[field].filter((_, i) => i !== idx) }));
 
   const save = async () => {
     if (!editing || saving) return;
     if (!editing.employee_id) { toast('Pick an employee'); return; }
     setSaving(true);
     try {
-      const cleanDeducts = editing.deduct_items.filter(i => i.label && (i.amount >= 0));
-      const payload = {
-        employee_id: editing.employee_id,
-        month: editing.month,
-        earnings: editing.earnings.filter(i => i.label && (i.amount > 0)),
-        deduct_items: cleanDeducts,
-        gross: editing.gross,
-        deductions: editing.deductions,
-        net: editing.net,
-        paid_at: editing.paid_at || null,
-        bank_last4: (editing.bank_last4 || '').trim() || null,
-      };
+      const payload = draftToPayload(editing);
       if (editing._new) {
         const { error } = await window.sb.from('payslips').insert(payload);
         if (error) {
           toast(error.message.includes('duplicate')
             ? 'Payslip already exists for this employee this month'
-            : 'Could not save');
+            : 'Could not save (see console)');
+          console.error(error);
         } else {
-          // Bump months_deducted on every advance the HR kept in this
-          // payslip. Mark the advance 'completed' when the final month
-          // is paid out.
-          const advanceIds = cleanDeducts.map(i => i.advance_id).filter(Boolean);
-          if (advanceIds.length) {
-            const { data: advs } = await window.sb.from('advances')
-              .select('id, months_total, months_deducted')
-              .in('id', advanceIds);
-            await Promise.all((advs || []).map(a => {
-              const next = (a.months_deducted || 0) + 1;
-              const done = next >= a.months_total;
-              return window.sb.from('advances').update({
-                months_deducted: next,
-                status: done ? 'completed' : 'approved',
-              }).eq('id', a.id);
-            }));
-          }
-          toast(advanceIds.length
-            ? `Payslip created · ${advanceIds.length} advance${advanceIds.length === 1 ? '' : 's'} updated`
+          await bumpAdvances(editing._advances);
+          toast(editing._advances?.length
+            ? `Payslip created · ${editing._advances.length} advance${editing._advances.length === 1 ? '' : 's'} updated`
             : 'Payslip created');
           close();
         }
       } else {
         const { error } = await window.sb.from('payslips').update(payload).eq('id', editing.id);
-        if (error) toast('Could not save');
+        if (error) { toast('Could not save'); console.error(error); }
         else { toast('Saved'); close(); }
       }
     } finally { setSaving(false); }
+  };
+
+  // Bump months_deducted on every advance that rode along with the
+  // newly-created payslip; mark the advance 'completed' when it hits
+  // months_total.
+  const bumpAdvances = async (advs) => {
+    if (!advs || !advs.length) return;
+    const { data: fresh } = await window.sb.from('advances')
+      .select('id, months_total, months_deducted')
+      .in('id', advs.map(a => a.id));
+    await Promise.all((fresh || []).map(a => {
+      const next = (a.months_deducted || 0) + 1;
+      const done = next >= a.months_total;
+      return window.sb.from('advances').update({
+        months_deducted: next,
+        status: done ? 'completed' : 'approved',
+      }).eq('id', a.id);
+    }));
   };
 
   const del = async (row) => {
@@ -3711,41 +3920,58 @@ const PayslipsPage = () => {
       .eq('id', row.id);
   };
 
-  // Bulk generate: one default payslip per active staff who doesn't have one this month
-  const bulkGenerate = async () => {
+  // Bulk generate: one payslip per eligible employee of the chosen
+  // salary_type who doesn't already have one this month. Uses the
+  // month's attendance to pre-fill P.DAYS / L.DAYS.
+  const bulkGenerate = async (kind) => {
     if (!can('payslips', 'create') || bulkBusy) return;
-    const missing = staffList.filter(e => !rows.find(r => r.employee_id === e.id));
-    if (!missing.length) { toast('All active staff already have payslips for this month'); return; }
-    if (!window.confirm(`Generate default payslips for ${missing.length} staff?\n\nEach gets: Basic 15,000 + HRA 4,500 − EPF 1,800 − PT 50 = Net 17,650.\nYou can edit each one after.`)) return;
+    const pool = eligibleList.filter(e => (e.salary_type || 'new_joined') === kind);
+    const missing = pool.filter(e => !rows.find(r => r.employee_id === e.id));
+    if (!pool.length) {
+      toast(`No active ${kind === 'esi_pf' ? 'ESI / PF' : 'new-joined'} employees. Set their salary type on the Employees page first.`);
+      return;
+    }
+    if (!missing.length) { toast(`All ${pool.length} employees already have a payslip this month`); return; }
+    if (!window.confirm(
+      `Generate ${missing.length} ${kind === 'esi_pf' ? 'ESI / PF' : 'new-joined'} payslip${missing.length === 1 ? '' : 's'} for ${monthLabel}?\n\n` +
+      `P.DAYS and L.DAYS are auto-filled from attendance (${PAID_LEAVE_BANK}-day paid-leave bank). You can edit each row after.`
+    )) return;
     setBulkBusy(true);
     try {
-      const earnings = [
-        { label: 'Basic', amount: 15000 },
-        { label: 'HRA',   amount: 4500 },
-      ];
-      const deduct_items = [
-        { label: 'EPF',              amount: 1800 },
-        { label: 'Professional tax', amount: 50 },
-      ];
-      const gross = 19500;
-      const ded   = 1850;
-      const net   = gross - ded;
-      const payload = missing.map(e => ({
-        employee_id: e.id,
-        month,
-        earnings,
-        deduct_items,
-        gross, deductions: ded, net,
-      }));
-      const { error } = await window.sb.from('payslips').insert(payload);
-      if (error) toast('Bulk generate failed (see console)');
-      else toast(`Generated ${missing.length} payslips`);
+      const payloads = [];
+      const advsByEmp = {};
+      for (const emp of missing) {
+        const advs = await fetchActiveAdvances(emp.id);
+        advsByEmp[emp.id] = advs;
+        const stats = attendance[emp.id] || { p_days: daysInMonth, l_days: PAID_LEAVE_BANK };
+        const draft = recomputeDraft({
+          employee_id: emp.id,
+          month,
+          salary_type: kind,
+          monthly_salary: num(emp.monthly_salary),
+          hra: num(emp.hra), wa: num(emp.wa),
+          days_in_month: daysInMonth,
+          p_days: stats.p_days, l_days: stats.l_days,
+          bonus: 0, dues: 0, credit: 0,
+          advance_amt: sumAdvances(advs),
+          diff_pct: 0,
+          _advances: advs,
+        }, emp, da);
+        payloads.push(draftToPayload(draft));
+      }
+      const { error } = await window.sb.from('payslips').insert(payloads);
+      if (error) { toast('Bulk generate failed (see console)'); console.error(error); return; }
+      // Bump months_deducted for every advance touched.
+      const allAdvs = Object.values(advsByEmp).flat();
+      await bumpAdvances(allAdvs);
+      toast(`Generated ${payloads.length} payslip${payloads.length === 1 ? '' : 's'}`);
     } finally { setBulkBusy(false); }
   };
 
   const readOnly = !can('payslips', 'edit');
   const monthLabel = new Date(month + 'T00:00:00').toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
-  const coverage = staffList.length ? Math.round((rows.length / staffList.length) * 100) : 0;
+  const coverage = eligibleList.length ? Math.round((rows.length / eligibleList.length) * 100) : 0;
+  const editingEmp = editing ? empById[editing.employee_id] : null;
 
   return (
     <div>
@@ -3762,6 +3988,20 @@ const PayslipsPage = () => {
           onChange={e => setMonth(e.target.value + '-01')} />
 
         <div className="seg">
+          {[
+            { id: 'all', label: 'All types' },
+            { id: 'new_joined', label: 'New joined' },
+            { id: 'esi_pf', label: 'ESI / PF' },
+          ].map(s => (
+            <button key={s.id}
+              className={typeFilter === s.id ? 'active' : ''}
+              onClick={() => setTypeFilter(s.id)}>
+              {s.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="seg">
           {[{ id: 'all', label: 'All sections' }, ...Object.entries(SECTION_META).map(([k, v]) => ({ id: k, label: v.label }))]
             .map(s => (
               <button key={s.id}
@@ -3776,7 +4016,7 @@ const PayslipsPage = () => {
           value={search} onChange={e => setSearch(e.target.value)} />
 
         <div style={{ fontSize: 12, color: 'var(--inkMuted)' }}>
-          Coverage: {rows.length} / {staffList.length} staff ({coverage}%)
+          Coverage: {rows.length} / {eligibleList.length} ({coverage}%)
         </div>
 
         {readOnly && (
@@ -3790,9 +4030,13 @@ const PayslipsPage = () => {
 
         {!readOnly && (
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-            <button className="btn" onClick={bulkGenerate} disabled={bulkBusy}
-              title="Create default payslips for all staff who don't have one this month">
-              {bulkBusy ? 'Generating…' : 'Bulk generate'}
+            <button className="btn" onClick={() => bulkGenerate('new_joined')} disabled={bulkBusy}
+              title="Create payslips for every active 'new joined' employee who doesn't have one this month">
+              {bulkBusy ? 'Generating…' : 'Bulk: New joined'}
+            </button>
+            <button className="btn" onClick={() => bulkGenerate('esi_pf')} disabled={bulkBusy}
+              title="Create payslips for every active ESI/PF employee who doesn't have one this month">
+              {bulkBusy ? 'Generating…' : 'Bulk: ESI / PF'}
             </button>
             {can('payslips', 'create') && (
               <button className="btn primary" onClick={() => startNew('')}>+ New payslip</button>
@@ -3807,24 +4051,27 @@ const PayslipsPage = () => {
             <tr>
               <th style={{ width: 80 }}>ID</th>
               <th>Employee</th>
+              <th style={{ width: 100 }}>Type</th>
               <th style={{ width: 110 }}>Section</th>
+              <th style={{ width: 110 }}>Days (P+L)</th>
               <th style={{ width: 120 }}>Gross</th>
               <th style={{ width: 120 }}>Deductions</th>
               <th style={{ width: 120 }}>Net</th>
-              <th style={{ width: 120 }}>Paid</th>
-              {!readOnly && <th style={{ width: 240 }}>Actions</th>}
+              <th style={{ width: 110 }}>Paid</th>
+              {!readOnly && <th style={{ width: 220 }}>Actions</th>}
             </tr>
           </thead>
           <tbody>
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={readOnly ? 7 : 8} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                <td colSpan={readOnly ? 9 : 10} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
                   {loading ? 'Loading…' : 'No payslips for this month.'}
                 </td>
               </tr>
             )}
             {filtered.map(r => {
               const emp = empById[r.employee_id];
+              const rowType = r.salary_type || emp?.salary_type || 'new_joined';
               return (
                 <tr key={r.id}>
                   <td className="id">{r.employee_id}</td>
@@ -3836,7 +4083,17 @@ const PayslipsPage = () => {
                       </div>
                     )}
                   </td>
+                  <td>
+                    <span className={`status-pill ${rowType === 'esi_pf' ? 'leave' : 'unmarked'}`}>
+                      {rowType === 'esi_pf' ? 'ESI / PF' : 'New joined'}
+                    </span>
+                  </td>
                   <td>{SECTION_META[emp?.section_id]?.label || <span className="muted">—</span>}</td>
+                  <td className="muted" style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
+                    {r.p_days != null
+                      ? `${r.p_days} + ${r.l_days || 0} / ${r.days_in_month || daysInMonthIso(r.month)}`
+                      : <span className="muted">—</span>}
+                  </td>
                   <td className="muted" style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{rupees(r.gross)}</td>
                   <td className="muted" style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', color: 'var(--danger)' }}>−{rupees(r.deductions)}</td>
                   <td style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontWeight: 600 }}>{rupees(r.net)}</td>
@@ -3867,152 +4124,253 @@ const PayslipsPage = () => {
       </div>
 
       <div style={{ marginTop: 10, fontSize: 11.5, color: 'var(--inkFaint)' }}>
-        {monthLabel} · {staffList.length} active staff
-        {!readOnly && ' · Bulk generate creates defaults; always review and edit before marking paid.'}
+        {monthLabel} · {eligibleList.length} eligible · DA {rupees(da)}/mo
+        {!readOnly && ' · P.DAYS and L.DAYS auto-fill from attendance. Always review before marking paid.'}
       </div>
 
       <Modal
         open={!!editing}
-        title={editing?._new ? 'New payslip' : `Payslip · ${empById[editing?.employee_id]?.name || editing?.employee_id}`}
+        title={editing?._new ? 'New payslip' : `Payslip · ${editingEmp?.name || editing?.employee_id}`}
         onClose={close}
         footer={
           <>
             <button className="btn" onClick={close} disabled={saving}>Cancel</button>
-            <button className="btn primary" onClick={save} disabled={saving}>
+            <button className="btn primary" onClick={save} disabled={saving || !editing?.employee_id}>
               {saving ? 'Saving…' : editing?._new ? 'Create payslip' : 'Save'}
             </button>
           </>
         }
       >
         {editing && (
-          <>
-            <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 140px', gap: 12 }}>
-              <div>
-                <label>Employee</label>
-                {editing._new ? (
-                  <select value={editing.employee_id}
-                    onChange={e => refreshAdvancesFor(e.target.value)}>
-                    <option value="">— select —</option>
-                    {staffList.map(e => (
-                      <option key={e.id} value={e.id}>{e.name} · {e.id}</option>
-                    ))}
-                  </select>
-                ) : (
-                  <input readOnly
-                    value={`${empById[editing.employee_id]?.name || editing.employee_id} · ${editing.employee_id}`}
-                    style={{ background: 'var(--surfaceAlt)' }} />
-                )}
-              </div>
-              <div>
-                <label>Month</label>
-                <input type="month" value={editing.month.slice(0, 7)}
-                  onChange={e => setEditing({ ...editing, month: e.target.value + '-01' })} />
-              </div>
-            </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginBottom: 14 }}>
-              <ItemsEditor
-                title="Earnings"
-                items={editing.earnings}
-                onChange={(idx, key, val) => setItem('earnings', idx, key, val)}
-                onAdd={() => addItem('earnings')}
-                onRemove={(idx) => removeItem('earnings', idx)}
-                total={editing.gross}
-                totalColor="var(--ink)"
-              />
-              <ItemsEditor
-                title="Deductions"
-                items={editing.deduct_items}
-                onChange={(idx, key, val) => setItem('deduct_items', idx, key, val)}
-                onAdd={() => addItem('deduct_items')}
-                onRemove={(idx) => removeItem('deduct_items', idx)}
-                total={editing.deductions}
-                totalColor="var(--danger)"
-              />
-            </div>
-
-            <div style={{
-              background: 'var(--brandSoft)', borderRadius: 12, padding: 14,
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              marginBottom: 16,
-            }}>
-              <div style={{ fontSize: 12, color: 'var(--brand)', fontWeight: 600, letterSpacing: 0.5, textTransform: 'uppercase' }}>
-                Net pay
-              </div>
-              <div style={{
-                fontFamily: 'Fraunces, Georgia, serif', fontSize: 26,
-                fontWeight: 600, letterSpacing: -0.5, color: 'var(--brand)',
-              }}>
-                {rupees(editing.net)}
-              </div>
-            </div>
-
-            <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-              <div>
-                <label>Paid on (optional)</label>
-                <input type="date"
-                  value={editing.paid_at || ''}
-                  onChange={e => setEditing({ ...editing, paid_at: e.target.value || null })} />
-              </div>
-              <div>
-                <label>Bank last 4 digits</label>
-                <input
-                  value={editing.bank_last4 || ''}
-                  onChange={e => setEditing({ ...editing, bank_last4: e.target.value.replace(/\D/g, '').slice(0, 4) })}
-                  placeholder="4521"
-                  style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }} />
-              </div>
-            </div>
-          </>
+          <PayslipEditor
+            editing={editing}
+            emp={editingEmp}
+            eligibleList={eligibleList}
+            attendance={attendance}
+            da={da}
+            daysInMonth={daysInMonth}
+            onPickEmployee={pickEmployee}
+            onPatch={patchDraft}
+          />
         )}
       </Modal>
     </div>
   );
 };
 
-const ItemsEditor = ({ title, items, onChange, onAdd, onRemove, total, totalColor }) => (
-  <div>
-    <label style={{ marginBottom: 8 }}>{title}</label>
-    <div style={{
-      border: '1px solid var(--border)', borderRadius: 10,
-      background: 'var(--bg)', padding: 10,
-    }}>
-      {(items || []).map((it, i) => (
-        <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 110px 32px', gap: 6, marginBottom: 6 }}>
-          <input
-            value={it.label}
-            onChange={e => onChange(i, 'label', e.target.value)}
-            placeholder="Label" />
-          <input type="number"
-            value={it.amount}
-            onChange={e => onChange(i, 'amount', e.target.value)}
-            placeholder="0"
-            style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', textAlign: 'right' }} />
-          <button
-            onClick={() => onRemove(i)}
-            className="btn"
-            style={{ height: 38, width: 32, padding: 0, color: 'var(--danger)' }}
-            title="Remove">×</button>
+// Renders the payslip edit form. Different body per salary_type.
+const PayslipEditor = ({ editing, emp, eligibleList, attendance, da, daysInMonth, onPickEmployee, onPatch }) => {
+  const isEsi = editing.salary_type === 'esi_pf';
+  const empStats = emp ? attendance[emp.id] : null;
+
+  return (
+    <>
+      <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 160px 140px', gap: 12 }}>
+        <div>
+          <label>Employee</label>
+          {editing._new ? (
+            <select value={editing.employee_id}
+              onChange={e => onPickEmployee(e.target.value)}>
+              <option value="">— select —</option>
+              {eligibleList.map(e => (
+                <option key={e.id} value={e.id}>
+                  {e.name} · {e.id} · {(e.salary_type || 'new_joined') === 'esi_pf' ? 'ESI/PF' : 'New joined'}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input readOnly
+              value={`${emp?.name || editing.employee_id} · ${editing.employee_id}`}
+              style={{ background: 'var(--surfaceAlt)' }} />
+          )}
         </div>
-      ))}
-      <button className="btn" onClick={onAdd} style={{ width: '100%', height: 32, marginTop: 4 }}>
-        + Add line
-      </button>
-      <div style={{
-        display: 'flex', justifyContent: 'space-between',
-        paddingTop: 10, marginTop: 10, borderTop: '1px solid var(--border)',
-      }}>
-        <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.4, textTransform: 'uppercase', color: 'var(--inkMuted)' }}>
-          Total
-        </span>
-        <span style={{
-          fontFamily: 'JetBrains Mono, Menlo, monospace',
-          fontWeight: 700, color: totalColor,
-        }}>{rupees(total)}</span>
+        <div>
+          <label>Salary type</label>
+          <select
+            value={editing.salary_type}
+            onChange={e => onPatch({ salary_type: e.target.value })}>
+            <option value="new_joined">New joined</option>
+            <option value="esi_pf">ESI / PF</option>
+          </select>
+        </div>
+        <div>
+          <label>Month</label>
+          <input type="month" value={editing.month.slice(0, 7)}
+            onChange={e => onPatch({ month: e.target.value + '-01' })} />
+        </div>
       </div>
-    </div>
-  </div>
-);
+
+      {emp && empStats && (
+        <div style={{
+          fontSize: 12, color: 'var(--inkMuted)', marginBottom: 10,
+          padding: '8px 12px', background: 'var(--bg)', borderRadius: 8,
+          border: '1px solid var(--border)',
+        }}>
+          Attendance: <strong>{empStats.p_days}</strong> present-days ·{' '}
+          <strong>{empStats.leaves_taken}</strong> leaves taken ·{' '}
+          <strong>{empStats.l_days}</strong> unused of {PAID_LEAVE_BANK}-day paid-leave bank
+        </div>
+      )}
+
+      <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 12 }}>
+        <div>
+          <label>Monthly salary (₹)</label>
+          <input type="number" min="0" step="1"
+            value={editing.monthly_salary}
+            onChange={e => onPatch({ monthly_salary: e.target.value })} />
+        </div>
+        <div>
+          <label>Days in month</label>
+          <input type="number" min="28" max="31"
+            value={editing.days_in_month}
+            onChange={e => onPatch({ days_in_month: e.target.value })} />
+        </div>
+        <div>
+          <label>P.DAYS</label>
+          <input type="number" min="0" step="0.5"
+            value={editing.p_days}
+            onChange={e => onPatch({ p_days: e.target.value })} />
+        </div>
+        <div>
+          <label>L.DAYS</label>
+          <input type="number" min="0" step="0.5"
+            value={editing.l_days}
+            onChange={e => onPatch({ l_days: e.target.value })} />
+        </div>
+      </div>
+
+      {isEsi && (
+        <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 12 }}>
+          <div>
+            <label>HRA (₹)</label>
+            <input type="number" min="0" step="1"
+              value={editing.hra}
+              onChange={e => onPatch({ hra: e.target.value })} />
+          </div>
+          <div>
+            <label>W.A. (₹)</label>
+            <input type="number" min="0" step="1"
+              value={editing.wa}
+              onChange={e => onPatch({ wa: e.target.value })} />
+          </div>
+          <div>
+            <label>DA (₹)</label>
+            <input type="number" min="0" step="1" value={da} readOnly
+              style={{ background: 'var(--surfaceAlt)' }}
+              title="Edit DA from admin settings" />
+          </div>
+          <div>
+            <label>Diff %</label>
+            <input type="number" min="0" step="0.01"
+              value={editing.diff_pct}
+              onChange={e => onPatch({ diff_pct: e.target.value })} />
+          </div>
+        </div>
+      )}
+
+      <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 12 }}>
+        <div>
+          <label>Bonus (₹)</label>
+          <input type="number" min="0" step="1"
+            value={editing.bonus}
+            onChange={e => onPatch({ bonus: e.target.value })} />
+        </div>
+        <div>
+          <label>{isEsi ? 'Incentive (₹)' : 'Credit / வரவு (₹)'}</label>
+          <input type="number" min="0" step="1"
+            value={editing.credit}
+            onChange={e => onPatch({ credit: e.target.value })} />
+        </div>
+        {!isEsi && (
+          <div>
+            <label>Dues / பற்று (₹)</label>
+            <input type="number" min="0" step="1"
+              value={editing.dues}
+              onChange={e => onPatch({ dues: e.target.value })} />
+          </div>
+        )}
+        <div>
+          <label>Advance repayment (₹)</label>
+          <input type="number" min="0" step="1"
+            value={editing.advance_amt}
+            onChange={e => onPatch({ advance_amt: e.target.value })}
+            title={editing._advances?.length
+              ? `Auto-filled from ${editing._advances.length} active advance${editing._advances.length === 1 ? '' : 's'}`
+              : ''} />
+        </div>
+      </div>
+
+      {/* Breakdown preview */}
+      <div style={{
+        marginTop: 10, padding: 14, borderRadius: 12,
+        background: 'var(--bg)', border: '1px solid var(--border)',
+      }}>
+        <div style={{ fontSize: 12, color: 'var(--inkMuted)', fontWeight: 600, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.4 }}>
+          Breakdown
+        </div>
+        {isEsi && editing.calc ? (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, fontSize: 13, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
+            <div>Basic (pro-rated)</div><div style={{ textAlign: 'right' }}>{rupees(editing.calc.p_basics)}</div>
+            <div>DA (pro-rated)</div>   <div style={{ textAlign: 'right' }}>{rupees(editing.calc.p_da)}</div>
+            <div>HRA (pro-rated)</div>  <div style={{ textAlign: 'right' }}>{rupees(editing.calc.p_hra)}</div>
+            <div>Leave encashment ({editing.l_days}d)</div><div style={{ textAlign: 'right' }}>{rupees(editing.calc.ld_s)}</div>
+            <div>W.A.</div>             <div style={{ textAlign: 'right' }}>{rupees(editing.calc.wa_paid)}</div>
+            <div style={{ fontWeight: 700, borderTop: '1px solid var(--border)', paddingTop: 4 }}>Total</div>
+            <div style={{ fontWeight: 700, borderTop: '1px solid var(--border)', paddingTop: 4, textAlign: 'right' }}>{rupees(editing.calc.total)}</div>
+            <div style={{ color: 'var(--danger)' }}>− EPF 12%</div><div style={{ textAlign: 'right', color: 'var(--danger)' }}>−{rupees(editing.calc.epf_12)}</div>
+            <div style={{ color: 'var(--danger)' }}>− ESI 0.75%</div><div style={{ textAlign: 'right', color: 'var(--danger)' }}>−{rupees(editing.calc.esi_075)}</div>
+            {editing.calc.diff > 0 && (<><div style={{ color: 'var(--danger)' }}>− Diff {editing.diff_pct}%</div><div style={{ textAlign: 'right', color: 'var(--danger)' }}>−{rupees(editing.calc.diff)}</div></>)}
+            {num(editing.bonus)  > 0 && (<><div>+ Bonus</div>     <div style={{ textAlign: 'right' }}>{rupees(editing.bonus)}</div></>)}
+            {num(editing.credit) > 0 && (<><div>+ Incentive</div> <div style={{ textAlign: 'right' }}>{rupees(editing.credit)}</div></>)}
+            {num(editing.advance_amt) > 0 && (<><div style={{ color: 'var(--danger)' }}>− Advance</div><div style={{ textAlign: 'right', color: 'var(--danger)' }}>−{rupees(editing.advance_amt)}</div></>)}
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, fontSize: 13, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
+            <div>Amount ({editing.p_days}+{editing.l_days} / {editing.days_in_month}d)</div>
+            <div style={{ textAlign: 'right' }}>{rupees(editing.amount)}</div>
+            {num(editing.bonus) > 0 && (<><div>+ Bonus</div><div style={{ textAlign: 'right' }}>{rupees(editing.bonus)}</div></>)}
+            {num(editing.credit) > 0 && (<><div>+ Credit</div><div style={{ textAlign: 'right' }}>{rupees(editing.credit)}</div></>)}
+            {num(editing.dues) > 0 && (<><div style={{ color: 'var(--danger)' }}>− Dues</div><div style={{ textAlign: 'right', color: 'var(--danger)' }}>−{rupees(editing.dues)}</div></>)}
+            {num(editing.advance_amt) > 0 && (<><div style={{ color: 'var(--danger)' }}>− Advance</div><div style={{ textAlign: 'right', color: 'var(--danger)' }}>−{rupees(editing.advance_amt)}</div></>)}
+          </div>
+        )}
+      </div>
+
+      <div style={{
+        background: 'var(--brandSoft)', borderRadius: 12, padding: 14,
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        marginTop: 12, marginBottom: 12,
+      }}>
+        <div style={{ fontSize: 12, color: 'var(--brand)', fontWeight: 600, letterSpacing: 0.5, textTransform: 'uppercase' }}>
+          Net pay
+        </div>
+        <div style={{
+          fontFamily: 'Fraunces, Georgia, serif', fontSize: 26,
+          fontWeight: 600, letterSpacing: -0.5, color: 'var(--brand)',
+        }}>
+          {rupees(editing.net)}
+        </div>
+      </div>
+
+      <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <div>
+          <label>Paid on (optional)</label>
+          <input type="date"
+            value={editing.paid_at || ''}
+            onChange={e => onPatch({ paid_at: e.target.value || null })} />
+        </div>
+        <div>
+          <label>Bank last 4 digits</label>
+          <input
+            value={editing.bank_last4 || ''}
+            onChange={e => onPatch({ bank_last4: e.target.value.replace(/\D/g, '').slice(0, 4) })}
+            placeholder="4521"
+            style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }} />
+        </div>
+      </div>
+    </>
+  );
+};
 
 // ──────────────────────────────────────────────────────────
 // Reports & CSV exports
