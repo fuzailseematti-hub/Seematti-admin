@@ -6485,6 +6485,7 @@ const KioskSettingsPage = () => {
 // and set their per-section scope + granular power flags.
 // ──────────────────────────────────────────────────────────
 const ROLE_OPTIONS = [
+  { id: 'owner',      label: 'Owner',      sub: 'Full access to everything, including payroll edits' },
   { id: 'manager',    label: 'Manager',    sub: 'Sees their sections, full operational access' },
   { id: 'supervisor', label: 'Supervisor', sub: 'Sees their sections, limited powers by default' },
   { id: 'hr',         label: 'HR',         sub: 'Company-wide except sections/payslips edits' },
