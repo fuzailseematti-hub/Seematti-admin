@@ -2625,13 +2625,13 @@ const OwnerHomeScreen = () => {
           marginTop: 10,
         }}>
           <ModuleTile icon="calendar" label="Attendance" onClick={() => nav.go('attendance')} />
-          <ModuleTile icon="leaf"     label="Leaves"     onClick={() => nav.go('leaves')} />
-          <ModuleTile icon="people"   label="Employees"  onClick={() => {}} />
-          <ModuleTile icon="wallet"   label="Payroll"    onClick={() => nav.go('payslip')} />
+          <ModuleTile icon="suitcase" label="Leaves"     onClick={() => nav.go('leaves')} />
+          <ModuleTile icon="wallet"   label="Advances"   onClick={() => nav.go('advances')} />
+          <ModuleTile icon="people"   label="Employees"  onClick={() => nav.go('attendance')} />
+          <ModuleTile icon="doc"      label="Payslip"    onClick={() => nav.go('payslip')} />
           <ModuleTile icon="tasks"    label="Tasks"      onClick={() => nav.go('tasks')} />
           <ModuleTile icon="log"      label="Visitors"   onClick={() => nav.go('visitors')} />
           <ModuleTile icon="megaphone"label="Notices"    onClick={() => nav.go('announcements')} />
-          <ModuleTile icon="doc"      label="Reports"    onClick={() => {}} />
         </div>
       </div>
 
@@ -7755,15 +7755,23 @@ const AdvancesScreen = () => {
     if (!mo  || mo  <= 0)  { toast('Months must be > 0'); return; }
     setSaving(true);
     try {
-      await file({
+      const res = await file({
         employeeId: filing.employee_id,
         amount: amt,
         months: mo,
         reason: (filing.reason || '').trim(),
         filedBy: userId || null,
       });
+      if (res && res.error) {
+        console.error('advance insert failed', res.error);
+        toast(`Could not save: ${res.error.message || 'try again'}`);
+        return;
+      }
       toast('Advance request filed');
       setFiling(null);
+    } catch (err) {
+      console.error(err);
+      toast('Could not save — check connection');
     } finally { setSaving(false); }
   };
 
