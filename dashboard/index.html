@@ -498,6 +498,16 @@
       border-right: none; border-bottom: 1px solid var(--border);
       max-height: 60vh;
     }
+    /* iOS Safari auto-zooms any focused form control whose font-size is
+       below 16px. Bump form controls to 16px on small screens so the
+       PWA stops zooming on tap. Keep the desktop sizing alone. */
+    input, select, textarea,
+    .field,
+    input[type=text], input[type=search], input[type=date],
+    input[type=number], input[type=month], input[type=tel],
+    input[type=email], input[type=password] {
+      font-size: 16px;
+    }
   }
 </style>
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
