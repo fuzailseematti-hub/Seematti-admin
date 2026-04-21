@@ -2586,6 +2586,7 @@ const OwnerHomeScreen = () => {
           <ModuleTile icon="tasks"    label="Tasks"      onClick={() => nav.go('tasks')} />
           <ModuleTile icon="log"      label="Visitors"   onClick={() => nav.go('visitors')} />
           <ModuleTile icon="megaphone"label="Notices"    onClick={() => nav.go('announcements')} />
+          <ModuleTile icon="user"     label="Profile"    onClick={() => nav.go('profile')} />
         </div>
       </div>
 
@@ -2956,10 +2957,11 @@ const StaffHomeScreen = () => {
 
       {/* Quick actions */}
       <div style={{ padding: '20px 16px 0' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
-          <QuickAction icon="leaf" label={t('applyLeave')} onClick={() => nav.go('applyLeave')} />
-          <QuickAction icon="wallet" label={t('mySalary')} onClick={() => nav.go('payslip')} />
-          <QuickAction icon="calendar" label="Roster" onClick={() => {}} />
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
+          <QuickAction icon="leaf"     label={t('applyLeave')} onClick={() => nav.go('applyLeave')} />
+          <QuickAction icon="wallet"   label={t('mySalary')}   onClick={() => nav.go('payslip')} />
+          <QuickAction icon="calendar" label="Roster"          onClick={() => {}} />
+          <QuickAction icon="user"     label="Profile"         onClick={() => nav.go('profile')} />
         </div>
       </div>
 
@@ -5102,29 +5104,51 @@ const HRHomeScreen = () => {
         </div>
       )}
 
-      {/* HR tools — one tap away via the bottom "Tools" tab. */}
-      <div style={{ padding: '24px 16px 0' }}>
+      {/* HR tools + Profile shortcuts */}
+      <div style={{ padding: '24px 16px 0', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
         <button onClick={() => nav.go('hrTools')} style={{
-          width: '100%', background: T_.surface, color: T_.ink,
+          background: T_.surface, color: T_.ink,
           border: `1px solid ${T_.border}`, borderRadius: 16,
-          padding: '14px 16px',
-          display: 'flex', alignItems: 'center', gap: 12, cursor: 'pointer',
+          padding: '14px 14px',
+          display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer',
           fontFamily: 'inherit', textAlign: 'left',
         }}>
           <div style={{
-            width: 36, height: 36, borderRadius: 10,
+            width: 34, height: 34, borderRadius: 10,
             background: T_.maroonSoft,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
+            flexShrink: 0,
           }}>
-            <Icon name="grid" size={18} color={T_.maroon} />
+            <Icon name="grid" size={16} color={T_.maroon} />
           </div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 14, fontWeight: 600 }}>HR tools</div>
-            <div style={{ fontSize: 11.5, color: T_.inkMuted, marginTop: 1 }}>
-              Leaves · Directory · Enroll · Advances · Announcements
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600 }}>HR tools</div>
+            <div style={{ fontSize: 11, color: T_.inkMuted, marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              Leaves · Directory · Advances
             </div>
           </div>
-          <Icon name="chevron" size={16} color={T_.inkMuted} />
+        </button>
+        <button onClick={() => nav.go('profile')} style={{
+          background: T_.surface, color: T_.ink,
+          border: `1px solid ${T_.border}`, borderRadius: 16,
+          padding: '14px 14px',
+          display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer',
+          fontFamily: 'inherit', textAlign: 'left',
+        }}>
+          <div style={{
+            width: 34, height: 34, borderRadius: 10,
+            background: T_.goldSoft,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            flexShrink: 0,
+          }}>
+            <Icon name="user" size={16} color={T_.gold} />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600 }}>My profile</div>
+            <div style={{ fontSize: 11, color: T_.inkMuted, marginTop: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              Details · password
+            </div>
+          </div>
         </button>
       </div>
 
@@ -5380,6 +5404,13 @@ const HRToolsScreen = () => {
             sub="Latest month's slip"
             onClick={() => nav.go('payslip')}
           />
+          <HRTile
+            icon="user" tone="brand"
+            title="My profile"
+            value="View"
+            sub="Your details · change password"
+            onClick={() => nav.go('profile')}
+          />
         </div>
       </div>
     </div>
@@ -5587,7 +5618,7 @@ const ManagerHomeScreen = () => {
         </div>
       </div>
 
-      {/* Leave actions */}
+      {/* Leave + profile actions */}
       <div style={{ padding: '14px 16px 0', display: 'flex', gap: 10 }}>
         <button onClick={() => nav.go('applyLeave')} style={{
           flex: 1, padding: '14px',
@@ -5608,6 +5639,16 @@ const ManagerHomeScreen = () => {
         }}>
           <Icon name="calendar" size={16} color={T_.info} />
           My requests
+        </button>
+        <button onClick={() => nav.go('profile')} style={{
+          flex: 1, padding: '14px',
+          background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 14,
+          fontSize: 13, fontWeight: 600, color: T_.ink, fontFamily: 'inherit',
+          cursor: 'pointer',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+        }}>
+          <Icon name="user" size={16} color={T_.gold} />
+          Profile
         </button>
       </div>
 
