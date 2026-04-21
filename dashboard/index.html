@@ -588,21 +588,85 @@ const { useState, useEffect, useMemo, useCallback, useRef, createContext, useCon
 // ──────────────────────────────────────────────────────────
 // Password gate
 // ──────────────────────────────────────────────────────────
+// Session helpers — persist the logged-in admin across refreshes.
+const SESSION_KEY = 'seematti_admin_session';
+const loadSession = () => {
+  try { return JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null'); }
+  catch { return null; }
+};
+const saveSession = (s) => {
+  if (s) sessionStorage.setItem(SESSION_KEY, JSON.stringify(s));
+  else   sessionStorage.removeItem(SESSION_KEY);
+  // Legacy unlock flag kept for any code path that still checks it.
+  if (s) sessionStorage.setItem('seematti_admin_unlock', '1');
+  else   sessionStorage.removeItem('seematti_admin_unlock');
+};
+
 const Gate = ({ onPass }) => {
+  const [username, setUsername] = useState('');
   const [pwd, setPwd] = useState('');
-  const [err, setErr] = useState(false);
+  const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
   const submit = async (e) => {
     e.preventDefault();
     if (busy) return;
-    setBusy(true); setErr(false);
-    const hash = await window.sha256(pwd);
-    if (hash === window.ADMIN_PASSWORD_SHA256) {
-      sessionStorage.setItem('seematti_admin_unlock', '1');
+    setBusy(true); setErr('');
+
+    const uname = username.trim().toLowerCase();
+    const hash  = await window.sha256(pwd);
+
+    // Path 1 — bootstrap Owner login. If the username is empty and the
+    // password matches the shared admin password, grant Owner access so
+    // the original admin never gets locked out.
+    if (!uname && hash === window.ADMIN_PASSWORD_SHA256) {
+      saveSession({
+        employee_id: null,
+        username: null,
+        role: 'owner',
+        display_name: 'Owner',
+        section_ids: [],
+        all_sections: true,
+      });
       onPass();
-    } else {
-      setErr(true);
+      return;
+    }
+
+    // Path 2 — user_access lookup. Requires a username.
+    if (!uname) {
+      setErr('Enter your username, or leave it blank and use the shared admin password.');
+      setBusy(false);
+      return;
+    }
+    try {
+      const { data, error } = await window.sb
+        .from('user_access')
+        .select('employee_id, section_ids, all_sections, password_sha256, employees(id, name, user_type, is_active)')
+        .eq('username', uname)
+        .maybeSingle();
+      if (error) throw error;
+      if (!data || !data.password_sha256 || data.password_sha256 !== hash) {
+        setErr('Wrong username or password');
+        setBusy(false);
+        return;
+      }
+      if (data.employees && data.employees.is_active === false) {
+        setErr('This account has been deactivated');
+        setBusy(false);
+        return;
+      }
+      saveSession({
+        employee_id:  data.employee_id,
+        username:     uname,
+        role:         data.employees?.user_type || 'hr',
+        display_name: data.employees?.name || uname,
+        section_ids:  data.section_ids || [],
+        all_sections: !!data.all_sections,
+      });
+      onPass();
+    } catch (e) {
+      console.error(e);
+      setErr('Could not sign in. Check your connection and try again.');
       setBusy(false);
     }
   };
@@ -612,17 +676,27 @@ const Gate = ({ onPass }) => {
       <form className="gate-card" onSubmit={submit}>
         <img src="assets/seemaatti-logo.png" alt="Seemaatti" />
         <h1>Admin Console</h1>
-        <p>Enter the shared admin password to continue.</p>
+        <p>Sign in with the username your admin gave you.</p>
+        <input
+          type="text"
+          autoFocus
+          autoComplete="username"
+          placeholder="Username"
+          value={username}
+          onChange={e => setUsername(e.target.value)}
+        />
         <input
           type="password"
-          autoFocus
+          autoComplete="current-password"
           placeholder="Password"
           value={pwd}
           onChange={e => setPwd(e.target.value)}
         />
-        <div className={`err ${err ? 'on' : ''}`}>Incorrect password — try again</div>
-        <button type="submit" disabled={busy}>{busy ? 'Checking…' : 'Unlock'}</button>
-        <div className="hint">SEEMAATTI · INTERNAL · v0.1</div>
+        <div className={`err ${err ? 'on' : ''}`}>{err || ' '}</div>
+        <button type="submit" disabled={busy}>{busy ? 'Signing in…' : 'Sign in'}</button>
+        <div className="hint">
+          Owner bootstrap: leave username blank, use the shared admin password.
+        </div>
       </form>
     </div>
   );
@@ -633,10 +707,13 @@ const Gate = ({ onPass }) => {
 // ──────────────────────────────────────────────────────────
 const AppCtx = createContext(null);
 
-// Permission map — Owner can do everything; HR is restricted from
-// payroll, sections, and employee deletion (per the user's choice).
+// Permission map — Owner and Admin have full rights. HR is an
+// operational role (no payroll, no access management). Manager and
+// Supervisor are scoped to their sections and are added lazily as rows
+// create Team Access records for them.
 const PERMS = {
   owner: { all: true },
+  admin: { all: true },
   hr: {
     employees:    { read: true, edit: true, delete: false, create: true },
     sections:     { read: true, edit: false, delete: false, create: false },
@@ -645,11 +722,11 @@ const PERMS = {
     tasks:        { read: true, edit: true,  delete: true,  create: true },
     announcements:{ read: true, edit: true,  delete: true,  create: true },
     visitors:     { read: true, edit: true,  delete: true,  create: true },
-    payslips:     { read: true, edit: false, delete: false, create: false },
+    payslips:     { read: false },
     advances:     { read: true, edit: true,  delete: false, create: true },
-    bonus:        { read: true, edit: true,  delete: true,  create: true },
+    bonus:        { read: false },
     access:       { read: false },
-    reports:      { read: true },
+    reports:      { read: false },
   },
 };
 const can = (role, area, action='read') => {
@@ -691,15 +768,11 @@ const NAV = [
 // ──────────────────────────────────────────────────────────
 const App = () => {
   const [page, setPage] = useState('attendance');
-  const [role, setRole] = useState(() =>
-    localStorage.getItem('seematti_admin_role') || 'owner'
-  );
-  useEffect(() => {
-    localStorage.setItem('seematti_admin_role', role);
-  }, [role]);
+  const [session, setSession] = useState(() => loadSession());
+  const role = session?.role || 'owner';
 
   const signOut = () => {
-    sessionStorage.removeItem('seematti_admin_unlock');
+    saveSession(null);
     location.reload();
   };
 
@@ -713,7 +786,7 @@ const App = () => {
   }, [allowed, visiblePage.id]);
 
   return (
-    <AppCtx.Provider value={{ role, setRole, page, setPage, can: (a, ac) => can(role, a, ac) }}>
+    <AppCtx.Provider value={{ role, session, page, setPage, can: (a, ac) => can(role, a, ac) }}>
       <div className="shell">
         <aside className="sidebar">
           <div className="sidebar-brand">
@@ -745,12 +818,15 @@ const App = () => {
             ))}
           </nav>
           <div className="sidebar-footer">
-            <span className={`role-pill ${role}`}>{role}</span>
-            <button className="role-switch"
-              onClick={() => setRole(role === 'owner' ? 'hr' : 'owner')}
-              title="Switch role">
-              Switch
-            </button>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+              <div style={{
+                fontSize: 12.5, fontWeight: 600, color: 'var(--ink)',
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              }}>
+                {session?.display_name || 'Owner'}
+              </div>
+              <span className={`role-pill ${role}`} style={{ alignSelf: 'flex-start' }}>{role}</span>
+            </div>
             <button className="signout-btn" onClick={signOut}>Sign out</button>
           </div>
         </aside>
@@ -762,7 +838,7 @@ const App = () => {
               <h1>{visiblePage.label}</h1>
             </div>
             <div style={{ fontSize: 10, color: 'var(--inkFaint)', letterSpacing: 0.3, marginLeft: 'auto', alignSelf: 'flex-end' }}>
-              v2026-04-21-slugsearch
+              v2026-04-21-auth
             </div>
           </div>
           <div className="content">
@@ -6482,15 +6558,20 @@ const KioskSettingsPage = () => {
 // and set their per-section scope + granular power flags.
 // ──────────────────────────────────────────────────────────
 const ROLE_OPTIONS = [
-  { id: 'owner',      label: 'Owner',      sub: 'Full access to everything, including payroll edits' },
+  { id: 'owner',      label: 'Owner',      sub: 'Full access — only the Owner can grant Admin', ownerOnly: true },
+  { id: 'admin',      label: 'Admin',      sub: 'Same rights as Owner. Only the Owner can grant this.', ownerOnly: true },
   { id: 'manager',    label: 'Manager',    sub: 'Sees their sections, full operational access' },
   { id: 'supervisor', label: 'Supervisor', sub: 'Sees their sections, limited powers by default' },
-  { id: 'hr',         label: 'HR',         sub: 'Company-wide except sections/payslips edits' },
+  { id: 'hr',         label: 'HR',         sub: 'Operations only — no payroll, no access management' },
 ];
 
 const TeamAccessPage = () => {
   const toast = useToast();
-  const { can } = useContext(AppCtx);
+  const { can, role: currentRole } = useContext(AppCtx);
+  const roleOptions = useMemo(
+    () => ROLE_OPTIONS.filter(o => !o.ownerOnly || currentRole === 'owner'),
+    [currentRole]
+  );
 
   const [employees, setEmployees] = useState([]);
   const [access, setAccess]       = useState([]); // joined: user_access + employee
@@ -6573,6 +6654,10 @@ const TeamAccessPage = () => {
   const save = async () => {
     if (!editing || saving) return;
     if (!editing.employee_id) { toast('Pick an employee'); return; }
+    if ((editing.role === 'owner' || editing.role === 'admin') && currentRole !== 'owner') {
+      toast('Only the Owner can assign Owner or Admin rights');
+      return;
+    }
     if (!editing.all_sections && editing.section_ids.length === 0 && editing.role !== 'hr') {
       toast('Pick at least one section (or All sections)'); return;
     }
@@ -6778,7 +6863,7 @@ const TeamAccessPage = () => {
             <div className="field-row">
               <label>Role</label>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {ROLE_OPTIONS.map(opt => (
+                {roleOptions.map(opt => (
                   <label key={opt.id} className="checkbox-row" style={{ cursor: 'pointer' }}>
                     <input type="radio"
                       name="role-pick"
@@ -6790,6 +6875,11 @@ const TeamAccessPage = () => {
                     </div>
                   </label>
                 ))}
+                {currentRole !== 'owner' && (
+                  <div style={{ fontSize: 11.5, color: 'var(--inkMuted)', marginTop: 4 }}>
+                    Only the Owner can grant Owner or Admin rights. Ask the Owner to create those accounts.
+                  </div>
+                )}
               </div>
             </div>
 
@@ -7609,9 +7699,7 @@ const Page = ({ name }) => {
 // Root
 // ──────────────────────────────────────────────────────────
 const Root = () => {
-  const [unlocked, setUnlocked] = useState(
-    () => sessionStorage.getItem('seematti_admin_unlock') === '1'
-  );
+  const [unlocked, setUnlocked] = useState(() => !!loadSession());
   if (!unlocked) return <Gate onPass={() => setUnlocked(true)} />;
   return <ToastHost><App /></ToastHost>;
 };
