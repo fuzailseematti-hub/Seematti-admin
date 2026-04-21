@@ -761,6 +761,9 @@ const App = () => {
               <div className="crumb">{NAV.find(g => g.items.find(i => i.id === visiblePage.id))?.section || ''}</div>
               <h1>{visiblePage.label}</h1>
             </div>
+            <div style={{ fontSize: 10, color: 'var(--inkFaint)', letterSpacing: 0.3, marginLeft: 'auto', alignSelf: 'flex-end' }}>
+              v2026-04-21-slugsearch
+            </div>
           </div>
           <div className="content">
             <Page name={visiblePage.id} />
