@@ -662,6 +662,7 @@ const Gate = ({ onPass }) => {
         display_name: data.employees?.name || uname,
         section_ids:  data.section_ids || [],
         all_sections: !!data.all_sections,
+        password_sha256: hash, // needed to call SECURITY DEFINER RPCs
       });
       onPass();
     } catch (e) {
@@ -6363,6 +6364,8 @@ const ProfilePage = () => {
         .update({ password_sha256: newHash }).eq('employee_id', employeeId);
       if (error) { toast('Could not update password'); console.error(error); return; }
       setCurPwd(''); setNewPwd(''); setCfmPwd('');
+      const s = loadSession();
+      if (s) saveSession({ ...s, password_sha256: newHash });
       toast('Password updated');
     } finally { setPwdBusy(false); }
   };
@@ -6929,10 +6932,29 @@ const TeamAccessPage = () => {
 
     setSaving(true);
     try {
-      // Promote/demote the employee's user_type
-      const { error: upErr } = await window.sb.from('employees')
-        .update({ user_type: editing.role }).eq('id', editing.employee_id);
-      if (upErr) { toast('Could not promote employee'); return; }
+      // Promote/demote the employee's user_type. Role changes go through
+      // the admin_change_role() RPC so the DB-side trigger can verify the
+      // actor's credentials. Owner/Admin grants are restricted to the
+      // signed-in Owner by the RPC itself.
+      const sess = loadSession();
+      if (!sess?.username || !sess?.password_sha256) {
+        toast('Your session lacks credentials to change roles. Sign out and sign in again.');
+        return;
+      }
+      const { error: roleErr } = await window.sb.rpc('admin_change_role', {
+        p_actor_username:        sess.username,
+        p_actor_password_sha256: sess.password_sha256,
+        p_target_employee_id:    editing.employee_id,
+        p_new_role:              editing.role,
+      });
+      if (roleErr) {
+        const msg = (roleErr.message || '').toLowerCase();
+        if (msg.includes('owner or admin')) toast('Only the Owner can grant Owner or Admin rights');
+        else if (msg.includes('invalid credentials')) toast('Session expired — sign in again');
+        else toast('Could not promote employee');
+        console.error(roleErr);
+        return;
+      }
 
       // Hash the password if a new one was typed.
       let passwordHash = undefined;
