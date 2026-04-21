@@ -911,6 +911,16 @@ window.MOCK = MOCK;
 const { useState, useEffect, useRef, useMemo, createContext, useContext } = React;
 const T = window.TOKENS;
 
+// Lenient search helper: strips punctuation / whitespace and lower-cases
+// both sides, so typing "saha" matches "P. SAHABUDEEN" and "psaha" too.
+const slugify = (s) => String(s == null ? '' : s).replace(/[^a-z0-9]/gi, '').toLowerCase();
+const matchesQuery = (needle, ...haystacks) => {
+  const n = slugify(needle);
+  if (!n) return true;
+  return haystacks.some(h => slugify(h).includes(n));
+};
+window.matchesQuery = matchesQuery;
+
 // ──────────────────────────────────────────────────────────
 // App context — language, density, current user, navigation, data
 // ──────────────────────────────────────────────────────────
@@ -5836,11 +5846,11 @@ const MarkAttendanceScreen = () => {
     await persistStatus(id, status, userId || 'E001');
   };
 
-  const q = search.trim().toLowerCase();
+  const q = search;
   const visible = roster.filter(p =>
     (section === 'all' || p.section === section) &&
     (filter === 'all' || p.status === null) &&
-    (!q || p.name.toLowerCase().includes(q) || (p.id || '').toLowerCase().includes(q) || (p.role || '').toLowerCase().includes(q))
+    window.matchesQuery(q, p.name, p.id, p.role)
   );
 
   const markedCount = roster.filter(p => p.status !== null).length;
