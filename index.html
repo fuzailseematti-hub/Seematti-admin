@@ -6116,18 +6116,6 @@ const KioskScannerScreen = () => {
     return () => clearInterval(handle);
   }, []);
 
-  // Queue of fake matches for the Simulate button (keeps the demo usable
-  // even without enrolled faces).
-  const queue = React.useRef([
-    { id: 'E004', name: 'Deepa S.',     section: 'Silk',   role: 'Sales Associate', confidence: 0.94 },
-    { id: 'E015', name: 'Divya P.',     section: 'Cotton', role: 'Trainee',         confidence: 0.91 },
-    { id: 'E008', name: 'Anitha R.',    section: 'Silk',   role: 'Sales Associate', confidence: 0.96 },
-    { id: 'E010', name: 'Murali T.',    section: 'Dhoti',  role: 'Packer',          confidence: 0.89 },
-    { id: 'E006', name: 'Meena S.',     section: 'Silk',   role: 'Sales Associate', confidence: 0.97 },
-    { id: 'E014', name: 'Shanmugam R.', section: 'Dhoti',  role: 'Packer',          confidence: 0.92 },
-  ]);
-  const queueIdx = React.useRef(0);
-
   const [now, setNow] = React.useState(new Date());
   React.useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
@@ -6367,20 +6355,13 @@ const KioskScannerScreen = () => {
     return () => { cancelled = true; clearTimeout(handle); };
   }, [modelsReady, cameraReady, phase, faces, threshold, showMatchUI]);
 
-  // Legacy Simulate button — cycles through the mock queue regardless of
-  // enrolled faces. Useful for demos and when the camera is unavailable.
-  const triggerSimulate = () => {
-    if (phase !== 'idle') return;
-    const next = queue.current[queueIdx.current % queue.current.length];
-    queueIdx.current++;
-    setPhase('detecting');
-    setTimeout(() => showMatchUI(next), 600);
-  };
-
   const direction = current && clockedIn.has(current.id) ? 'out' : 'in';
   const hh = now.getHours() % 12 || 12;
   const mm = String(now.getMinutes()).padStart(2, '0');
   const ampm = now.getHours() >= 12 ? 'PM' : 'AM';
+
+  const dateLabel = now.toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: 'short' });
+  const matched = phase === 'matched' && current;
 
   return (
     <div style={{
@@ -6390,8 +6371,8 @@ const KioskScannerScreen = () => {
     }}>
       {/* Top bar */}
       <div style={{
-        padding: 'var(--screen-top-sm) 20px 16px', display: 'flex',
-        alignItems: 'flex-start', justifyContent: 'space-between',
+        padding: 'var(--screen-top-sm) 20px 14px', display: 'flex',
+        alignItems: 'flex-start', justifyContent: 'space-between', gap: 12,
       }}>
         <div>
           <div style={{
@@ -6403,174 +6384,212 @@ const KioskScannerScreen = () => {
             fontSize: 22, fontWeight: 500, marginTop: 2, letterSpacing: -0.4,
           }}>Attendance Kiosk</div>
         </div>
-        <div style={{ textAlign: 'right' }}>
-          <div style={{
-            fontFamily: 'Fraunces, Georgia, serif',
-            fontSize: 26, fontWeight: 500, letterSpacing: -0.6, lineHeight: 1,
-            fontFeatureSettings: '"tnum"',
-          }}>{hh}:{mm}</div>
-          <div style={{
-            fontSize: 10, color: 'rgba(255,255,255,0.45)',
-            letterSpacing: 0.6, marginTop: 4,
-          }}>{ampm} · Sat 18 Apr</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ textAlign: 'right' }}>
+            <div style={{
+              fontFamily: 'Fraunces, Georgia, serif',
+              fontSize: 26, fontWeight: 500, letterSpacing: -0.6, lineHeight: 1,
+              fontFeatureSettings: '"tnum"',
+            }}>{hh}:{mm}</div>
+            <div style={{
+              fontSize: 10, color: 'rgba(255,255,255,0.45)',
+              letterSpacing: 0.6, marginTop: 4,
+            }}>{ampm} · {dateLabel}</div>
+          </div>
+          {/* Flip camera — small icon button, only before a match */}
+          {!matched && (
+            <button
+              onClick={() => setFacingMode(m => m === 'user' ? 'environment' : 'user')}
+              aria-label="Flip camera"
+              title="Flip camera"
+              style={{
+                background: 'rgba(255,255,255,0.08)',
+                border: '1px solid rgba(255,255,255,0.15)', borderRadius: 10,
+                width: 38, height: 38, padding: 0,
+                color: 'rgba(255,255,255,0.85)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                cursor: 'pointer', flex: 'none',
+              }}
+            >
+              <Icon name="arrowRight" size={16} />
+            </button>
+          )}
         </div>
       </div>
 
       {/* Camera frame */}
-      <div style={{ flex: 1, padding: '0 20px', position: 'relative' }}>
+      <div style={{ flex: 1, padding: '0 20px', position: 'relative', minHeight: 0 }}>
         <KioskCameraFrame phase={phase} current={current} pulse={pulse}
           videoRef={videoRef} cameraErr={cameraErr} facingMode={facingMode}
           faceSeen={faceSeen}
           enrolledCount={faces.length ? new Set(faces.map(f => f.employee_id)).size : 0} />
       </div>
 
-      {/* Instruction + bilingual prompt / match confirm */}
-      <div style={{ padding: '16px 20px 8px', textAlign: 'center', minHeight: 88 }}>
-        {phase === 'idle' && (
-          <>
-            <div style={{
-              fontFamily: 'Fraunces, Georgia, serif',
-              fontSize: 22, fontWeight: 500, letterSpacing: -0.3, lineHeight: 1.2,
-            }}>Stand here &amp; look at the camera</div>
-            <div style={{ fontSize: 15, color: 'rgba(255,255,255,0.6)', marginTop: 6 }}>
-              கேமராவை நேராக பாருங்கள்
-            </div>
-          </>
-        )}
-        {phase === 'detecting' && (
-          <>
-            <div style={{
-              fontFamily: 'Fraunces, Georgia, serif',
-              fontSize: 20, fontWeight: 500, letterSpacing: -0.3, color: '#E8C65A',
-            }}>Face detected…</div>
-            <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.5)', marginTop: 6 }}>
-              முகம் கண்டறியப்பட்டது…
-            </div>
-          </>
-        )}
-        {phase === 'matching' && (
-          <>
-            <div style={{
-              fontFamily: 'Fraunces, Georgia, serif',
-              fontSize: 20, fontWeight: 500, letterSpacing: -0.3, color: '#E8C65A',
-            }}>Matching…</div>
-            <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.5)', marginTop: 6 }}>
-              அடையாளம் காண்கிறது…
-            </div>
-          </>
-        )}
-        {phase === 'matched' && current && (
-          <>
-            <KioskMatchedConfirm person={current} direction={direction} />
-            <div style={{
-              display: 'flex', flexDirection: 'column', gap: 10,
-              marginTop: 18, alignItems: 'stretch',
-            }}>
-              <button onClick={confirmMatch} style={{
-                background: '#0E7C3A', border: 'none', borderRadius: 16,
-                padding: '18px 22px', color: '#fff',
-                fontFamily: 'inherit', fontSize: 18, fontWeight: 700,
-                letterSpacing: 0.3, cursor: 'pointer',
-                display: 'inline-flex', alignItems: 'center',
-                justifyContent: 'center', gap: 10,
-                boxShadow: '0 12px 28px -10px rgba(14,124,58,0.55)',
-              }}>
-                <Icon name="check" size={22} color="#fff" />
-                {direction === 'in' ? 'Confirm clock in' : 'Confirm clock out'}
-              </button>
-              <button onClick={tryAgainMatch} style={{
-                background: 'rgba(255,255,255,0.06)',
-                border: '1px solid rgba(255,255,255,0.18)', borderRadius: 12,
-                padding: '10px 14px',
-                color: 'rgba(255,255,255,0.8)',
-                fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600,
-                cursor: 'pointer', alignSelf: 'center',
-              }}>
-                Not me — try again
-              </button>
-            </div>
-          </>
-        )}
-      </div>
+      {/* Instruction label — only when NOT matched */}
+      {!matched && (
+        <div style={{ padding: '14px 20px 6px', textAlign: 'center', minHeight: 64 }}>
+          {phase === 'idle' && (
+            <>
+              <div style={{
+                fontFamily: 'Fraunces, Georgia, serif',
+                fontSize: 22, fontWeight: 500, letterSpacing: -0.3, lineHeight: 1.2,
+              }}>Stand here &amp; look at the camera</div>
+              <div style={{ fontSize: 15, color: 'rgba(255,255,255,0.6)', marginTop: 6 }}>
+                கேமராவை நேராக பாருங்கள்
+              </div>
+            </>
+          )}
+          {phase === 'detecting' && (
+            <>
+              <div style={{
+                fontFamily: 'Fraunces, Georgia, serif',
+                fontSize: 20, fontWeight: 500, letterSpacing: -0.3, color: '#E8C65A',
+              }}>Face detected…</div>
+              <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.5)', marginTop: 6 }}>
+                முகம் கண்டறியப்பட்டது…
+              </div>
+            </>
+          )}
+          {phase === 'matching' && (
+            <>
+              <div style={{
+                fontFamily: 'Fraunces, Georgia, serif',
+                fontSize: 20, fontWeight: 500, letterSpacing: -0.3, color: '#E8C65A',
+              }}>Matching…</div>
+              <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.5)', marginTop: 6 }}>
+                அடையாளம் காண்கிறது…
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
-      {/* Tally strip */}
-      <div style={{
-        margin: '12px 20px 0', padding: '12px 14px',
-        background: 'rgba(255,255,255,0.05)', borderRadius: 12,
-        border: '1px solid rgba(255,255,255,0.08)',
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      }}>
-        <div>
-          <div style={{
-            fontSize: 9.5, letterSpacing: 1, textTransform: 'uppercase',
-            color: 'rgba(255,255,255,0.4)', fontWeight: 600,
-          }}>Today's check-ins</div>
-          <div style={{
-            fontFamily: 'Fraunces, Georgia, serif',
-            fontSize: 20, fontWeight: 500, marginTop: 2, letterSpacing: -0.4,
-            fontFeatureSettings: '"tnum"',
-          }}>
-            {clockedIn.size}<span style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)' }}> / {totalStaff || '—'}</span>
+      {/* Tally strip — only when NOT matched */}
+      {!matched && (
+        <div style={{
+          margin: '6px 20px 0', padding: '10px 14px',
+          background: 'rgba(255,255,255,0.05)', borderRadius: 12,
+          border: '1px solid rgba(255,255,255,0.08)',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        }}>
+          <div>
+            <div style={{
+              fontSize: 9.5, letterSpacing: 1, textTransform: 'uppercase',
+              color: 'rgba(255,255,255,0.4)', fontWeight: 600,
+            }}>Today's check-ins</div>
+            <div style={{
+              fontFamily: 'Fraunces, Georgia, serif',
+              fontSize: 20, fontWeight: 500, marginTop: 2, letterSpacing: -0.4,
+              fontFeatureSettings: '"tnum"',
+            }}>
+              {clockedIn.size}<span style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)' }}> / {totalStaff || '—'}</span>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {recent.slice(0, 4).map((r, i) => (
+              <div key={i} title={`${r.name} · clocked ${r.dir} at ${r.time}`}
+                style={{
+                  width: 28, height: 28, borderRadius: '50%',
+                  background: r.dir === 'in' ? 'rgba(14, 124, 58, 0.3)' : 'rgba(232, 198, 90, 0.25)',
+                  border: `1.5px solid ${r.dir === 'in' ? '#0E7C3A' : '#E8C65A'}`,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 10, fontWeight: 700, color: '#fff',
+                }}>
+                {r.name.split(' ').map(s => s[0]).slice(0, 2).join('')}
+              </div>
+            ))}
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 6 }}>
-          {recent.slice(0, 4).map((r, i) => (
-            <div key={i} title={`${r.name} · clocked ${r.dir} at ${r.time}`}
-              style={{
-                width: 28, height: 28, borderRadius: '50%',
-                background: r.dir === 'in' ? 'rgba(14, 124, 58, 0.3)' : 'rgba(232, 198, 90, 0.25)',
-                border: `1.5px solid ${r.dir === 'in' ? '#0E7C3A' : '#E8C65A'}`,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: 10, fontWeight: 700, color: '#fff',
-              }}>
-              {r.name.split(' ').map(s => s[0]).slice(0, 2).join('')}
-            </div>
-          ))}
-        </div>
-      </div>
+      )}
 
-      {/* Footer */}
-      <div style={{
-        padding: '14px 20px 24px', display: 'flex',
-        alignItems: 'center', justifyContent: 'space-between', gap: 10,
-      }}>
-        <button onClick={() => setShowExitPrompt(true)} style={{
-          background: 'none', border: '1px solid rgba(255,255,255,0.15)',
-          borderRadius: 10, padding: '8px 12px',
-          color: 'rgba(255,255,255,0.6)', fontSize: 11, fontWeight: 600,
-          fontFamily: 'inherit', cursor: 'pointer',
-          display: 'flex', alignItems: 'center', gap: 4,
+      {/* Footer — only when NOT matched. Just the Exit button, centered. */}
+      {!matched && (
+        <div style={{
+          padding: '12px 20px 24px', display: 'flex',
+          alignItems: 'center', justifyContent: 'center',
         }}>
-          <Icon name="close" size={12} /> Exit kiosk
-        </button>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button
-            onClick={() => setFacingMode(m => m === 'user' ? 'environment' : 'user')}
-            style={{
-              background: 'rgba(255,255,255,0.08)',
-              border: '1px solid rgba(255,255,255,0.15)', borderRadius: 10,
-              padding: '10px 14px',
-              color: 'rgba(255,255,255,0.85)', fontSize: 11, fontWeight: 600,
-              cursor: 'pointer', fontFamily: 'inherit', letterSpacing: 0.3,
-              display: 'flex', alignItems: 'center', gap: 6,
-            }}
-            title="Switch between front and back camera"
-          >
-            <Icon name="arrowRight" size={12} /> {facingMode === 'user' ? 'Back cam' : 'Front cam'}
-          </button>
-          <button onClick={triggerSimulate} disabled={phase !== 'idle'} style={{
-            background: phase === 'idle' ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.04)',
-            border: '1px solid rgba(255,255,255,0.15)', borderRadius: 10, padding: '10px 16px',
-            color: 'rgba(255,255,255,0.7)', fontSize: 11, fontWeight: 600,
-            cursor: phase === 'idle' ? 'pointer' : 'default',
-            fontFamily: 'inherit', letterSpacing: 0.3,
+          <button onClick={() => setShowExitPrompt(true)} style={{
+            background: 'none', border: '1px solid rgba(255,255,255,0.15)',
+            borderRadius: 10, padding: '10px 16px',
+            color: 'rgba(255,255,255,0.6)', fontSize: 12, fontWeight: 600,
+            fontFamily: 'inherit', cursor: 'pointer',
             display: 'flex', alignItems: 'center', gap: 6,
-            opacity: phase === 'idle' ? 1 : 0.4,
           }}>
-            <Icon name="sparkle" size={12} /> Simulate (demo)
+            <Icon name="close" size={14} /> Exit kiosk
           </button>
         </div>
-      </div>
+      )}
+
+      {/* Matched state — full-screen takeover so nothing can overlap. */}
+      {matched && (
+        <div style={{
+          position: 'absolute', inset: 0,
+          background: 'linear-gradient(180deg, rgba(11,13,14,0.96) 0%, rgba(8,28,18,0.98) 100%)',
+          backdropFilter: 'blur(10px)',
+          display: 'flex', flexDirection: 'column',
+          padding: 'calc(var(--screen-top-sm) + 12px) 22px 28px',
+          animation: 'kioskMatchIn 260ms ease-out',
+          zIndex: 20, overflow: 'hidden',
+        }}>
+          {/* Big success check */}
+          <div style={{ display: 'flex', justifyContent: 'center', marginTop: 20 }}>
+            <div style={{
+              width: 118, height: 118, borderRadius: '50%',
+              background: 'rgba(14, 124, 58, 0.25)', border: '3px solid #0E7C3A',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              boxShadow: '0 0 50px rgba(14, 124, 58, 0.55)',
+            }}>
+              <Icon name="check" size={60} color="#5BC47E" />
+            </div>
+          </div>
+
+          {/* Name block */}
+          <div style={{ textAlign: 'center', marginTop: 28 }}>
+            <div style={{
+              fontSize: 11, letterSpacing: 1.4, textTransform: 'uppercase',
+              color: '#5BC47E', fontWeight: 700,
+            }}>
+              {direction === 'in' ? 'Clocking in · உள்நுழைய' : 'Clocking out · வெளியேற'}
+            </div>
+            <div style={{
+              fontFamily: 'Fraunces, Georgia, serif',
+              fontSize: 34, fontWeight: 500, letterSpacing: -0.6, lineHeight: 1.1,
+              marginTop: 12,
+            }}>{current.name}</div>
+            <div style={{ fontSize: 15, color: 'rgba(255,255,255,0.65)', marginTop: 10 }}>
+              {[current.role, current.section && `${current.section} Section`, `${hh}:${mm}`]
+                .filter(Boolean).join(' · ')}
+            </div>
+          </div>
+
+          <div style={{ flex: 1 }} />
+
+          {/* Huge confirm button — designed to be easy to tap */}
+          <button onClick={confirmMatch} style={{
+            background: '#0E7C3A', border: 'none', borderRadius: 20,
+            padding: '24px 22px', color: '#fff',
+            fontFamily: 'inherit', fontSize: 21, fontWeight: 700,
+            letterSpacing: 0.4, cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12,
+            boxShadow: '0 16px 36px -14px rgba(14,124,58,0.7)',
+            width: '100%',
+          }}>
+            <Icon name="check" size={26} color="#fff" />
+            {direction === 'in' ? 'Confirm clock in' : 'Confirm clock out'}
+          </button>
+
+          {/* Not me — small link-style button */}
+          <button onClick={tryAgainMatch} style={{
+            background: 'none', border: 'none',
+            padding: '16px 14px',
+            color: 'rgba(255,255,255,0.6)', fontSize: 14, fontWeight: 600,
+            cursor: 'pointer', fontFamily: 'inherit',
+            width: '100%', textAlign: 'center', marginTop: 6,
+          }}>
+            Not me — try again · மீண்டும் முயற்சிக்க
+          </button>
+        </div>
+      )}
 
       {/* Exit PIN prompt */}
       {showExitPrompt && (
@@ -6764,28 +6783,6 @@ const KioskCameraFrame = ({ phase, current, pulse, videoRef, cameraErr, enrolled
           to { opacity: 1; transform: scale(1); }
         }
       `}</style>
-    </div>
-  );
-};
-
-const KioskMatchedConfirm = ({ person, direction }) => {
-  const hh = new Date().getHours() % 12 || 12;
-  const mm = String(new Date().getMinutes()).padStart(2, '0');
-  return (
-    <div style={{ animation: 'kioskMatchIn 260ms ease-out' }}>
-      <div style={{
-        fontSize: 10, letterSpacing: 1.2, textTransform: 'uppercase',
-        color: '#5BC47E', fontWeight: 700, marginBottom: 6,
-      }}>
-        {direction === 'in' ? 'CLOCKED IN · உள்நுழைந்தார்' : 'CLOCKED OUT · வெளியேறினார்'}
-      </div>
-      <div style={{
-        fontFamily: 'Fraunces, Georgia, serif',
-        fontSize: 26, fontWeight: 500, letterSpacing: -0.5, lineHeight: 1.15,
-      }}>{person.name}</div>
-      <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.55)', marginTop: 6 }}>
-        {person.role} · {person.section} Section · {hh}:{mm}
-      </div>
     </div>
   );
 };

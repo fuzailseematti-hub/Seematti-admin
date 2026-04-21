@@ -6746,6 +6746,57 @@ const KioskSettingsPage = () => {
         </div>
       </div>
 
+      {/* Dedicated kiosk phone — setup guide */}
+      <div style={{
+        background: 'var(--surface)', border: '1px solid var(--border)',
+        borderRadius: 16, padding: 24, marginBottom: 16,
+      }}>
+        <div style={{
+          fontFamily: 'Fraunces, Georgia, serif', fontSize: 20, fontWeight: 500,
+          letterSpacing: -0.3, marginBottom: 4,
+        }}>Set up a dedicated kiosk phone</div>
+        <div style={{ fontSize: 13, color: 'var(--inkMuted)', marginBottom: 16 }}>
+          Turn any phone or tablet into the attendance kiosk at the staff entrance. Once the phone enters kiosk mode, it stays in kiosk mode even after reboot — only someone with the PIN above can exit it.
+        </div>
+
+        <ol style={{ fontSize: 13.5, lineHeight: 1.65, color: 'var(--inkSoft)', paddingLeft: 20, margin: 0 }}>
+          <li style={{ marginBottom: 10 }}>
+            On the kiosk phone, open a browser (Safari on iPhone, Chrome on Android) and go to the <strong>staff app URL</strong> — the same link you use on your own phone.
+          </li>
+          <li style={{ marginBottom: 10 }}>
+            <strong>Install to home screen</strong> so it looks like an app (no browser bar):
+            <ul style={{ marginTop: 4, paddingLeft: 18 }}>
+              <li><em>iPhone</em>: tap Share → "Add to Home Screen".</li>
+              <li><em>Android</em>: tap menu (⋮) → "Install app" or "Add to Home screen".</li>
+            </ul>
+          </li>
+          <li style={{ marginBottom: 10 }}>
+            Open the new app icon. Log in with an <strong>Owner</strong> or <strong>HR</strong> account, then go to <strong>HR Tools → Kiosk scanner</strong>, enter the Kiosk PIN, and the kiosk screen opens.
+          </li>
+          <li style={{ marginBottom: 10 }}>
+            Allow the camera when the phone asks. The kiosk will remember the permission from here on.
+          </li>
+          <li style={{ marginBottom: 10 }}>
+            The phone is now "locked" to the kiosk — if staff close the app or the phone reboots, opening the app takes them straight back to the kiosk screen. The only way out is the Exit kiosk button + PIN.
+          </li>
+          <li style={{ marginBottom: 10 }}>
+            To stop staff from leaving the kiosk app entirely (swiping home, opening other apps), turn on the phone's built-in kiosk mode:
+            <ul style={{ marginTop: 4, paddingLeft: 18 }}>
+              <li><em>iPhone</em>: Settings → Accessibility → <strong>Guided Access</strong> → turn on. Then open the kiosk app and triple-click the side button to lock it.</li>
+              <li><em>Android</em>: Settings → Security → <strong>Screen pinning</strong> (or "App pinning") → turn on. Open the kiosk app, open Recents, and pin it.</li>
+            </ul>
+          </li>
+        </ol>
+
+        <div style={{
+          marginTop: 16, padding: 12, borderRadius: 10,
+          background: 'var(--surfaceAlt)', border: '1px solid var(--border)',
+          fontSize: 12.5, color: 'var(--inkSoft)',
+        }}>
+          <strong>Tip</strong>: Plug the kiosk phone into a charger at the entrance so it never runs out of battery. Set Auto-Lock to "Never" (iPhone: Settings → Display & Brightness; Android: Settings → Display → Screen timeout) so the screen stays on.
+        </div>
+      </div>
+
       {/* Partials list + danger zone */}
       <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 24, marginBottom: 16 }}>
         <div style={{
