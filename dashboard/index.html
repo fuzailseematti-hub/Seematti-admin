@@ -6951,8 +6951,8 @@ const TeamAccessPage = () => {
         const msg = (roleErr.message || '').toLowerCase();
         if (msg.includes('owner or admin')) toast('Only the Owner can grant Owner or Admin rights');
         else if (msg.includes('invalid credentials')) toast('Session expired — sign in again');
-        else toast('Could not promote employee');
-        console.error(roleErr);
+        else toast('Could not promote employee: ' + (roleErr.message || roleErr.hint || roleErr.code || 'unknown error'));
+        console.error('admin_change_role error', roleErr);
         return;
       }
 
