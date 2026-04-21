@@ -6059,6 +6059,20 @@ const KioskScannerScreen = () => {
   const MATCH_COOLDOWN_MS = 30000;
   const lastMatchMap = React.useRef({}); // { employeeId: timestamp }
 
+  // Idle dim: if no face has been seen for a while we dim the preview
+  // to save the tablet's power. The detection loop keeps ticking so a
+  // face walking in front of the camera still wakes us instantly.
+  const IDLE_DIM_MS = 15000;
+  const lastFaceSeenAtRef = React.useRef(Date.now());
+  const [faceSeen, setFaceSeen] = React.useState(true);
+  React.useEffect(() => {
+    const handle = setInterval(() => {
+      const seen = Date.now() - lastFaceSeenAtRef.current < IDLE_DIM_MS;
+      setFaceSeen(prev => prev === seen ? prev : seen);
+    }, 1000);
+    return () => clearInterval(handle);
+  }, []);
+
   // Queue of fake matches for the Simulate button (keeps the demo usable
   // even without enrolled faces).
   const queue = React.useRef([
@@ -6225,13 +6239,19 @@ const KioskScannerScreen = () => {
     }
   };
 
-  // Run the match outcome UI (shared by real + simulated matches).
+  // Show the big name card and wait for the user to Confirm or Try again.
+  // The scan is persisted only when the user taps Confirm, so a wrong
+  // recognition can be rolled back before it hits the DB.
   const showMatchUI = React.useCallback((emp) => {
     setCurrent(emp);
-    setPhase('matching');
+    setPhase('matched');
+  }, []);
+
+  const confirmMatch = async () => {
+    if (!current || phase !== 'matched') return;
+    const emp = current;
     const dir = clockedIn.has(emp.id) ? 'out' : 'in';
-    persistScan(emp, dir);
-    setTimeout(() => setPhase('matched'), 300);
+    await persistScan(emp, dir);
     const hh = new Date().getHours() % 12 || 12;
     const mm = String(new Date().getMinutes()).padStart(2, '0');
     setRecent(r => [{ ...emp, dir, time: `${hh}:${mm}` }, ...r].slice(0, 6));
@@ -6240,9 +6260,18 @@ const KioskScannerScreen = () => {
       if (dir === 'in') ns.add(emp.id); else ns.delete(emp.id);
       return ns;
     });
-    setTimeout(() => { setPhase('idle'); setCurrent(null); }, 4200);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clockedIn, lateCutoff]);
+    setPhase('idle');
+    setCurrent(null);
+  };
+
+  const tryAgainMatch = () => {
+    if (!current) return;
+    // Drop the per-employee cooldown so the same face can match again
+    // right away — useful when the wrong person was recognised.
+    delete lastMatchMap.current[current.id];
+    setCurrent(null);
+    setPhase('idle');
+  };
 
   // Real-face matching loop — active only while phase is idle.
   React.useEffect(() => {
@@ -6257,6 +6286,7 @@ const KioskScannerScreen = () => {
           // Throttle: re-match the same person at most once every 6 seconds.
           const desc = await window.computeFaceDescriptor(v);
           if (desc) {
+            lastFaceSeenAtRef.current = Date.now();
             let best = { id: null, name: null, sim: -1, emp: null };
             for (const f of faces) {
               const sim = window.cosineSim(desc, f.embedding);
@@ -6347,6 +6377,7 @@ const KioskScannerScreen = () => {
       <div style={{ flex: 1, padding: '0 20px', position: 'relative' }}>
         <KioskCameraFrame phase={phase} current={current} pulse={pulse}
           videoRef={videoRef} cameraErr={cameraErr} facingMode={facingMode}
+          faceSeen={faceSeen}
           enrolledCount={faces.length ? new Set(faces.map(f => f.employee_id)).size : 0} />
       </div>
 
@@ -6386,7 +6417,36 @@ const KioskScannerScreen = () => {
           </>
         )}
         {phase === 'matched' && current && (
-          <KioskMatchedConfirm person={current} direction={direction} />
+          <>
+            <KioskMatchedConfirm person={current} direction={direction} />
+            <div style={{
+              display: 'flex', flexDirection: 'column', gap: 10,
+              marginTop: 18, alignItems: 'stretch',
+            }}>
+              <button onClick={confirmMatch} style={{
+                background: '#0E7C3A', border: 'none', borderRadius: 16,
+                padding: '18px 22px', color: '#fff',
+                fontFamily: 'inherit', fontSize: 18, fontWeight: 700,
+                letterSpacing: 0.3, cursor: 'pointer',
+                display: 'inline-flex', alignItems: 'center',
+                justifyContent: 'center', gap: 10,
+                boxShadow: '0 12px 28px -10px rgba(14,124,58,0.55)',
+              }}>
+                <Icon name="check" size={22} color="#fff" />
+                {direction === 'in' ? 'Confirm clock in' : 'Confirm clock out'}
+              </button>
+              <button onClick={tryAgainMatch} style={{
+                background: 'rgba(255,255,255,0.06)',
+                border: '1px solid rgba(255,255,255,0.18)', borderRadius: 12,
+                padding: '10px 14px',
+                color: 'rgba(255,255,255,0.8)',
+                fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600,
+                cursor: 'pointer', alignSelf: 'center',
+              }}>
+                Not me — try again
+              </button>
+            </div>
+          </>
         )}
       </div>
 
@@ -6485,7 +6545,7 @@ const KioskScannerScreen = () => {
   );
 };
 
-const KioskCameraFrame = ({ phase, current, pulse, videoRef, cameraErr, enrolledCount, facingMode = 'user' }) => {
+const KioskCameraFrame = ({ phase, current, pulse, videoRef, cameraErr, enrolledCount, facingMode = 'user', faceSeen = true }) => {
   const ringColor =
     phase === 'matched' ? '#0E7C3A' :
     phase === 'detecting' || phase === 'matching' ? '#E8C65A' :
@@ -6515,9 +6575,26 @@ const KioskCameraFrame = ({ phase, current, pulse, videoRef, cameraErr, enrolled
             position: 'absolute', inset: 0,
             width: '100%', height: '100%', objectFit: 'cover',
             transform: facingMode === 'user' ? 'scaleX(-1)' : 'none',
-            opacity: phase === 'matched' ? 0.2 : 0.85,
-            transition: 'opacity 300ms',
+            opacity: phase === 'matched' ? 0.2 : (faceSeen ? 0.85 : 0.18),
+            transition: 'opacity 400ms',
           }} />
+      )}
+      {/* Idle-dim overlay — shown when nobody is standing in front of the
+          camera. Detection keeps ticking so the first face wakes us up. */}
+      {phase === 'idle' && !faceSeen && !cameraErr && (
+        <div style={{
+          position: 'absolute', inset: 0,
+          display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center',
+          gap: 8, color: 'rgba(255,255,255,0.55)',
+          pointerEvents: 'none',
+        }}>
+          <div style={{
+            fontFamily: 'Fraunces, Georgia, serif',
+            fontSize: 22, fontWeight: 500, letterSpacing: -0.3,
+          }}>Step in front of the camera</div>
+          <div style={{ fontSize: 12.5 }}>கேமரா முன்பு நில்லுங்கள்</div>
+        </div>
       )}
       {/* Camera error badge */}
       {cameraErr && (
