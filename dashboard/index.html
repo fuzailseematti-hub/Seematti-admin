@@ -807,6 +807,16 @@ const COMPANIES = [
   'Seematti Dresses',
 ];
 
+// Lenient search helper: strips punctuation / whitespace and lower-cases
+// both sides, so typing "saha" matches "P. SAHABUDEEN", "psaha" matches
+// too, and the dots-vs-spaces variance in HR's data doesn't hide rows.
+const slugify = (s) => String(s == null ? '' : s).replace(/[^a-z0-9]/gi, '').toLowerCase();
+const matchesQuery = (needle, ...haystacks) => {
+  const n = slugify(needle);
+  if (!n) return true;
+  return haystacks.some(h => slugify(h).includes(n));
+};
+
 const useEmployees = () => {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -937,9 +947,7 @@ const AttendancePage = () => {
         if (statusFilter === 'unmarked' && r.status !== null) return false;
         if (statusFilter !== 'unmarked' && r.status !== statusFilter) return false;
       }
-      if (q && !(r.name.toLowerCase().includes(q) ||
-                 r.id.toLowerCase().includes(q) ||
-                 (r.employee_code || '').toLowerCase().includes(q))) return false;
+      if (!matchesQuery(q, r.name, r.id, r.employee_code, r.role)) return false;
       return true;
     });
   }, [staff, byId, section, statusFilter, search]);
@@ -1225,11 +1233,7 @@ const EmployeesPage = () => {
       if (!showInactive && !e.is_active) return false;
       if (type !== 'all' && e.user_type !== type) return false;
       if (section !== 'all' && e.section_id !== section) return false;
-      if (q && !(e.name.toLowerCase().includes(q) ||
-                 e.id.toLowerCase().includes(q) ||
-                 (e.employee_code || '').toLowerCase().includes(q) ||
-                 (e.company || '').toLowerCase().includes(q) ||
-                 (e.role || '').toLowerCase().includes(q))) return false;
+      if (!matchesQuery(q, e.name, e.id, e.employee_code, e.company, e.role, e.phone, e.city)) return false;
       return true;
     });
     const cmp = (a, b) => {
@@ -2645,11 +2649,7 @@ const LeavesPage = () => {
     const q = search.trim().toLowerCase();
     return items.filter(r => {
       if (statusFilter !== 'all' && r.status !== statusFilter) return false;
-      if (q) {
-        const name = (r.employees?.name || '').toLowerCase();
-        const reason = (r.reason || '').toLowerCase();
-        if (!name.includes(q) && !r.employee_id.toLowerCase().includes(q) && !reason.includes(q)) return false;
-      }
+      if (!matchesQuery(q, r.employees?.name, r.employee_id, r.reason, r.employees?.employee_code)) return false;
       return true;
     });
   }, [items, statusFilter, search]);
@@ -2899,17 +2899,12 @@ const EmployeePicker = ({
     [employees, value]
   );
 
-  const slug = (s) => String(s == null ? '' : s).replace(/[^a-z0-9]/gi, '').toLowerCase();
-
   const matches = useMemo(() => {
     const list = employees || [];
-    const q = slug(query);
-    if (!q) return list.slice(0, 80);
-    return list.filter(e => {
-      const hay = [e.name, e.id, e.employee_code, e.role, e.company, e.phone, e.city, e.section_id]
-        .map(slug).join(' ');
-      return hay.includes(q);
-    }).slice(0, 80);
+    if (!query.trim()) return list.slice(0, 80);
+    return list.filter(e =>
+      matchesQuery(query, e.name, e.id, e.employee_code, e.role, e.company, e.phone, e.city, e.section_id)
+    ).slice(0, 80);
   }, [employees, query]);
 
   useEffect(() => {
@@ -3038,8 +3033,7 @@ const AnnouncementsPage = () => {
     return items.filter(a => {
       if (pinFilter === 'pinned' && !a.pinned) return false;
       if (pinFilter === 'unpinned' && a.pinned) return false;
-      if (q && !a.title.toLowerCase().includes(q) && !(a.body || '').toLowerCase().includes(q)
-           && !(a.posted_by || '').toLowerCase().includes(q)) return false;
+      if (!matchesQuery(q, a.title, a.body, a.posted_by)) return false;
       return true;
     });
   }, [items, pinFilter, search]);
@@ -3303,8 +3297,7 @@ const TasksPage = () => {
     return tasks.filter(t => {
       if (t.scope !== scope) return false;
       if (scope === 'staff' && assignee !== 'all' && t.assignee_id !== assignee) return false;
-      if (q && !t.label.toLowerCase().includes(q) &&
-              !(t.owner_label || '').toLowerCase().includes(q)) return false;
+      if (!matchesQuery(q, t.label, t.owner_label)) return false;
       return true;
     });
   }, [tasks, scope, assignee, search]);
@@ -3672,9 +3665,7 @@ const VisitorsPage = () => {
     return list.filter(v => {
       if (status === 'in' && v.status !== 'in') return false;
       if (status === 'out' && v.status !== 'out') return false;
-      if (q && !v.name.toLowerCase().includes(q) &&
-              !(v.purpose || '').toLowerCase().includes(q) &&
-              !(v.location || '').toLowerCase().includes(q)) return false;
+      if (!matchesQuery(q, v.name, v.purpose, v.location)) return false;
       return true;
     });
   }, [list, status, search]);
@@ -4358,15 +4349,7 @@ const PayslipsPage = () => {
         const rowType = r.salary_type || emp?.salary_type || 'new_joined';
         if (rowType !== typeFilter) return false;
       }
-      if (q) {
-        const name = (emp?.name || '').toLowerCase();
-        const code = (emp?.employee_code || '').toLowerCase();
-        const company = (emp?.company || '').toLowerCase();
-        if (!name.includes(q)
-            && !r.employee_id.toLowerCase().includes(q)
-            && !code.includes(q)
-            && !company.includes(q)) return false;
-      }
+      if (!matchesQuery(q, emp?.name, r.employee_id, emp?.employee_code, emp?.company, emp?.role)) return false;
       return true;
     });
   }, [rows, empById, companyFilter, typeFilter, search]);
@@ -5607,13 +5590,7 @@ const BonusPlannerPage = () => {
     const q = search.trim().toLowerCase();
     return eligibleList.filter(e => {
       if (typeFilter !== 'all' && (e.salary_type || 'new_joined') !== typeFilter) return false;
-      if (q) {
-        if (!e.name.toLowerCase().includes(q) &&
-            !e.id.toLowerCase().includes(q) &&
-            !(e.employee_code || '').toLowerCase().includes(q) &&
-            !(e.company || '').toLowerCase().includes(q) &&
-            !(e.role || '').toLowerCase().includes(q)) return false;
-      }
+      if (!matchesQuery(q, e.name, e.id, e.employee_code, e.company, e.role)) return false;
       return true;
     });
   }, [eligibleList, typeFilter, search]);
@@ -6544,13 +6521,8 @@ const TeamAccessPage = () => {
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
     return access.filter(a => {
-      if (!q) return true;
       const e = a.employees;
-      return e.name.toLowerCase().includes(q) ||
-             e.id.toLowerCase().includes(q) ||
-             (e.employee_code || '').toLowerCase().includes(q) ||
-             (e.company || '').toLowerCase().includes(q) ||
-             (e.role || '').toLowerCase().includes(q);
+      return matchesQuery(q, e.name, e.id, e.employee_code, e.company, e.role);
     });
   }, [access, search]);
 
@@ -6984,11 +6956,7 @@ const AdvancesPage = () => {
     const q = search.trim().toLowerCase();
     return rows.filter(r => {
       if (statusFilter !== 'all' && r.status !== statusFilter) return false;
-      if (q) {
-        const name = (r.employees?.name || '').toLowerCase();
-        const reason = (r.reason || '').toLowerCase();
-        if (!name.includes(q) && !r.employee_id.toLowerCase().includes(q) && !reason.includes(q)) return false;
-      }
+      if (!matchesQuery(q, r.employees?.name, r.employee_id, r.reason)) return false;
       return true;
     });
   }, [rows, statusFilter, search]);
