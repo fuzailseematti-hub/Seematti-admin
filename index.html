@@ -7168,6 +7168,10 @@ const SettingsPreviewSwitcher = () => {
   const T_ = window.TOKENS;
   const { users } = useLoginUsers();
 
+  // Owner-only developer tool: let the owner preview the app as any other
+  // role without signing out. Hidden for everyone else in production.
+  if (user !== 'owner') return null;
+
   const pick = (targetUser) => {
     const list = users.filter(u => u.user_type === targetUser);
     if (!list.length) return;
@@ -7241,8 +7245,6 @@ const SettingsScreen = () => {
   const { user, userId, setUser, setUserId, nav, lang, setLang, toast } = useApp();
   const T_ = window.TOKENS;
 
-  // Switching role now means signing out to re-pick the right person,
-  // because different managers/supervisors are different employees.
   const signOut = () => {
     setUser(null);
     setUserId(null);
@@ -7261,9 +7263,99 @@ const SettingsScreen = () => {
     })();
   }, [userId]);
 
+  const isAdmin = user === 'owner' || user === 'admin';
+
   const roleLabel = (r) => ({
-    owner: 'Owner', hr: 'HR', manager: 'Manager', supervisor: 'Supervisor',
+    owner: 'Owner', admin: 'Admin', hr: 'HR',
+    manager: 'Manager', supervisor: 'Supervisor',
   }[r] || r);
+
+  // ── Change-password state ─────────────────────────────
+  const [pwdOpen, setPwdOpen] = React.useState(false);
+  const [curPwd, setCurPwd]   = React.useState('');
+  const [newPwd, setNewPwd]   = React.useState('');
+  const [cfmPwd, setCfmPwd]   = React.useState('');
+  const [pwdBusy, setPwdBusy] = React.useState(false);
+
+  const changePassword = async (e) => {
+    e.preventDefault();
+    if (pwdBusy) return;
+    if (!userId) { toast('No user session'); return; }
+    if (!curPwd || !newPwd) { toast('Fill current and new password'); return; }
+    if (newPwd.length < 4)  { toast('Password must be ≥ 4 characters'); return; }
+    if (newPwd !== cfmPwd)  { toast('Confirmation does not match');     return; }
+    setPwdBusy(true);
+    try {
+      const curHash = await window.sha256(curPwd);
+      const { data: row } = await window.sb.from('user_access')
+        .select('password_sha256').eq('employee_id', userId).maybeSingle();
+      if (!row || row.password_sha256 !== curHash) {
+        toast('Current password is wrong'); return;
+      }
+      const newHash = await window.sha256(newPwd);
+      const { error } = await window.sb.from('user_access')
+        .update({ password_sha256: newHash }).eq('employee_id', userId);
+      if (error) { toast('Could not update'); console.error(error); return; }
+      setCurPwd(''); setNewPwd(''); setCfmPwd(''); setPwdOpen(false);
+      toast('Password updated');
+    } finally { setPwdBusy(false); }
+  };
+
+  // ── Kiosk PIN change (Owner + Admin) ─────────────────
+  const [pinOpen, setPinOpen] = React.useState(false);
+  const [curPin, setCurPin]   = React.useState('');
+  const [newPin, setNewPin]   = React.useState('');
+  const [pinBusy, setPinBusy] = React.useState(false);
+
+  const changeKioskPin = async (e) => {
+    e.preventDefault();
+    if (pinBusy) return;
+    if (!newPin || newPin.length < 4) { toast('PIN must be ≥ 4 digits'); return; }
+    setPinBusy(true);
+    try {
+      const { data: row } = await window.sb.from('settings')
+        .select('value').eq('key', 'kiosk_pin').maybeSingle();
+      const existing = row?.value || '0000';
+      if ((curPin || '0000') !== existing) {
+        toast('Current PIN is wrong'); return;
+      }
+      const { error } = await window.sb.from('settings')
+        .upsert({ key: 'kiosk_pin', value: newPin }, { onConflict: 'key' });
+      if (error) { toast('Could not save PIN'); console.error(error); return; }
+      setCurPin(''); setNewPin(''); setPinOpen(false);
+      toast('Kiosk PIN updated');
+    } finally { setPinBusy(false); }
+  };
+
+  const sectionTitle = (text) => (
+    <div style={{
+      fontSize: 11, letterSpacing: 0.9, textTransform: 'uppercase',
+      color: T_.inkMuted, fontWeight: 600, padding: '0 4px 10px',
+    }}>{text}</div>
+  );
+
+  const row = ({ key, icon, label, sub, onClick, danger, tone, last }) => (
+    <button key={key} onClick={onClick} style={{
+      width: '100%', background: 'none', border: 'none',
+      padding: '14px 14px',
+      borderBottom: last ? 'none' : `1px solid ${T_.borderSoft}`,
+      display: 'flex', alignItems: 'center', gap: 12,
+      cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
+    }}>
+      <div style={{
+        width: 34, height: 34, borderRadius: 10,
+        background: tone || T_.surfaceAlt,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}>
+        <Icon name={icon} size={16} color={danger ? T_.danger : T_.ink} />
+      </div>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: danger ? T_.danger : T_.ink }}>{label}</div>
+        {sub && <div style={{ fontSize: 11.5, color: T_.inkMuted, marginTop: 2 }}>{sub}</div>}
+      </div>
+      <Icon name="chevron" size={14} color={T_.inkFaint} />
+    </button>
+  );
 
   return (
     <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 120 }}>
@@ -7281,31 +7373,21 @@ const SettingsScreen = () => {
         }}>
           {lang === 'ta' ? 'உங்கள் கணக்கு' : 'Your account'}
         </div>
-        <div style={{ fontSize: 14, color: T_.inkMuted, marginTop: 6 }}>
-          {lang === 'ta'
-            ? 'பங்கு மாற்றவும், மொழி மாற்றவும்'
-            : 'Switch role or change language'}
-        </div>
       </div>
 
-      {/* Signed-in user card */}
+      {/* Signed-in user card with link to Profile */}
       <div style={{ padding: '24px 16px 0' }}>
-        <div style={{
-          fontSize: 11, letterSpacing: 0.9, textTransform: 'uppercase',
-          color: T_.inkMuted, fontWeight: 600, padding: '0 4px 10px',
-        }}>
-          {lang === 'ta' ? 'உள்நுழைந்துள்ளீர்' : 'Signed in as'}
-        </div>
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 14,
-          padding: 16, borderRadius: 16,
-          background: T_.surface, border: `1px solid ${T_.border}`,
-        }}>
+        {sectionTitle(lang === 'ta' ? 'உள்நுழைந்துள்ளீர்' : 'Signed in as')}
+        <button
+          onClick={() => nav.go('profile')}
+          style={{
+            width: '100%', display: 'flex', alignItems: 'center', gap: 14,
+            padding: 16, borderRadius: 16,
+            background: T_.surface, border: `1px solid ${T_.border}`,
+            cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
+          }}>
           {me ? <Avatar name={me.name} size={44} /> : (
-            <div style={{
-              width: 44, height: 44, borderRadius: 12,
-              background: T_.surfaceAlt,
-            }} />
+            <div style={{ width: 44, height: 44, borderRadius: 12, background: T_.surfaceAlt }} />
           )}
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 16, fontWeight: 600, color: T_.ink }}>
@@ -7317,32 +7399,26 @@ const SettingsScreen = () => {
               {me?.section_id && ` · ${SECTION_LABEL[me.section_id] || me.section_id}`}
             </div>
           </div>
-        </div>
-        <button
-          onClick={signOut}
-          style={{
-            width: '100%', padding: 12, borderRadius: 12,
-            background: T_.surfaceAlt, border: `1px solid ${T_.border}`,
-            color: T_.inkSoft, fontSize: 13, fontWeight: 600,
-            fontFamily: 'inherit', cursor: 'pointer', marginTop: 10,
-          }}>
-          {lang === 'ta' ? 'பயனரை மாற்று' : 'Switch user'}
+          <Icon name="chevron" size={16} color={T_.inkFaint} />
         </button>
       </div>
 
-      {/* Preview mode — dev bypass to jump between roles while the app is
-         still being built. Skips the password check. Remove this block
-         before going live. */}
-      <SettingsPreviewSwitcher />
-
-      {/* Language */}
+      {/* Account section */}
       <div style={{ padding: '28px 16px 0' }}>
-        <div style={{
-          fontSize: 11, letterSpacing: 0.9, textTransform: 'uppercase',
-          color: T_.inkMuted, fontWeight: 600, padding: '0 4px 10px',
-        }}>
-          {lang === 'ta' ? 'மொழி' : 'Language'}
+        {sectionTitle(lang === 'ta' ? 'கணக்கு' : 'Account')}
+        <div style={{ background: T_.surface, borderRadius: 14, border: `1px solid ${T_.border}`, overflow: 'hidden' }}>
+          {row({ key: 'profile', icon: 'user', label: lang === 'ta' ? 'சுயவிவரம்' : 'Profile',
+                 sub: lang === 'ta' ? 'உங்கள் விவரங்கள்' : 'Your details and statutory IDs',
+                 onClick: () => nav.go('profile') })}
+          {row({ key: 'pwd', icon: 'settings', label: lang === 'ta' ? 'கடவுச்சொல்லை மாற்று' : 'Change password',
+                 sub: 'Update your own login password',
+                 onClick: () => setPwdOpen(true), last: true })}
         </div>
+      </div>
+
+      {/* Preferences */}
+      <div style={{ padding: '28px 16px 0' }}>
+        {sectionTitle(lang === 'ta' ? 'மொழி' : 'Language')}
         <div style={{
           display: 'flex', padding: 4, gap: 4,
           background: T_.surfaceAlt, borderRadius: 14,
@@ -7353,26 +7429,35 @@ const SettingsScreen = () => {
           ].map(l => {
             const active = lang === l.id;
             return (
-              <button
-                key={l.id}
-                onClick={() => setLang(l.id)}
+              <button key={l.id} onClick={() => setLang(l.id)}
                 style={{
-                  flex: 1, padding: '10px 12px', borderRadius: 10,
-                  border: 'none',
+                  flex: 1, padding: '10px 12px', borderRadius: 10, border: 'none',
                   background: active ? T_.surface : 'transparent',
                   boxShadow: active ? '0 1px 3px rgba(0,0,0,0.06)' : 'none',
-                  fontFamily: 'inherit',
-                  fontSize: 14, fontWeight: 600,
-                  color: active ? T_.ink : T_.inkMuted,
-                  cursor: 'pointer',
-                }}
-              >
+                  fontFamily: 'inherit', fontSize: 14, fontWeight: 600,
+                  color: active ? T_.ink : T_.inkMuted, cursor: 'pointer',
+                }}>
                 {l.label}
               </button>
             );
           })}
         </div>
       </div>
+
+      {/* Admin controls (Owner + Admin only) */}
+      {isAdmin && (
+        <div style={{ padding: '28px 16px 0' }}>
+          {sectionTitle(lang === 'ta' ? 'நிர்வாகம்' : 'Admin controls')}
+          <div style={{ background: T_.surface, borderRadius: 14, border: `1px solid ${T_.border}`, overflow: 'hidden' }}>
+            {row({ key: 'pin', icon: 'clock', label: 'Kiosk exit PIN',
+                   sub: 'PIN required to leave kiosk mode',
+                   onClick: () => setPinOpen(true), last: true })}
+          </div>
+        </div>
+      )}
+
+      {/* Owner-only dev panel */}
+      <SettingsPreviewSwitcher />
 
       {/* Sign out */}
       <div style={{ padding: '28px 16px 0' }}>
@@ -7384,22 +7469,196 @@ const SettingsScreen = () => {
             border: `1px solid ${T_.border}`,
             color: T_.danger, fontSize: 15, fontWeight: 600,
             fontFamily: 'inherit', cursor: 'pointer',
-          }}
-        >
+          }}>
           {lang === 'ta' ? 'வெளியேறு' : 'Sign out'}
         </button>
         <div style={{
           fontSize: 11, color: T_.inkFaint, textAlign: 'center',
           marginTop: 16, letterSpacing: 0.3,
         }}>
-          Seemaatti · Concept Prototype v0.1
+          Seemaatti · v2026-04-21-auth
         </div>
       </div>
+
+      {/* Change password sheet */}
+      {pwdOpen && (
+        <div onClick={() => setPwdOpen(false)} style={{
+          position: 'absolute', inset: 0, background: 'rgba(11,13,14,0.55)',
+          display: 'flex', alignItems: 'flex-end', zIndex: 200,
+        }}>
+          <form onSubmit={changePassword} onClick={e => e.stopPropagation()} style={{
+            width: '100%', background: T_.surface,
+            borderRadius: '20px 20px 0 0', padding: '22px 22px 28px',
+          }}>
+            <h3 style={{ margin: '0 0 12px' }}>Change password</h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <input type="password" placeholder="Current password"
+                value={curPwd} onChange={e => setCurPwd(e.target.value)}
+                style={{ padding: '14px 16px', borderRadius: 12, border: `1px solid ${T_.border}`, fontSize: 16, fontFamily: 'inherit', color: T_.ink, boxSizing: 'border-box' }} />
+              <input type="password" placeholder="New password"
+                value={newPwd} onChange={e => setNewPwd(e.target.value)}
+                style={{ padding: '14px 16px', borderRadius: 12, border: `1px solid ${T_.border}`, fontSize: 16, fontFamily: 'inherit', color: T_.ink, boxSizing: 'border-box' }} />
+              <input type="password" placeholder="Confirm new password"
+                value={cfmPwd} onChange={e => setCfmPwd(e.target.value)}
+                style={{ padding: '14px 16px', borderRadius: 12, border: `1px solid ${T_.border}`, fontSize: 16, fontFamily: 'inherit', color: T_.ink, boxSizing: 'border-box' }} />
+              <button type="submit" disabled={pwdBusy} style={{
+                padding: 14, borderRadius: 12, background: T_.maroon, color: '#fff',
+                border: 'none', fontFamily: 'inherit', fontSize: 14, fontWeight: 600,
+                cursor: pwdBusy ? 'not-allowed' : 'pointer',
+              }}>{pwdBusy ? 'Saving…' : 'Update password'}</button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Kiosk PIN sheet */}
+      {pinOpen && (
+        <div onClick={() => setPinOpen(false)} style={{
+          position: 'absolute', inset: 0, background: 'rgba(11,13,14,0.55)',
+          display: 'flex', alignItems: 'flex-end', zIndex: 200,
+        }}>
+          <form onSubmit={changeKioskPin} onClick={e => e.stopPropagation()} style={{
+            width: '100%', background: T_.surface,
+            borderRadius: '20px 20px 0 0', padding: '22px 22px 28px',
+          }}>
+            <h3 style={{ margin: '0 0 6px' }}>Change kiosk PIN</h3>
+            <div style={{ fontSize: 12, color: T_.inkMuted, marginBottom: 12 }}>
+              This PIN unlocks exit from kiosk mode. Digits only.
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <input type="password" inputMode="numeric" placeholder="Current PIN (blank = 0000)"
+                value={curPin} onChange={e => setCurPin(e.target.value)}
+                style={{ padding: '14px 16px', borderRadius: 12, border: `1px solid ${T_.border}`, fontSize: 16, fontFamily: 'inherit', color: T_.ink, boxSizing: 'border-box' }} />
+              <input type="password" inputMode="numeric" placeholder="New PIN"
+                value={newPin} onChange={e => setNewPin(e.target.value)}
+                style={{ padding: '14px 16px', borderRadius: 12, border: `1px solid ${T_.border}`, fontSize: 16, fontFamily: 'inherit', color: T_.ink, boxSizing: 'border-box' }} />
+              <button type="submit" disabled={pinBusy} style={{
+                padding: 14, borderRadius: 12, background: T_.maroon, color: '#fff',
+                border: 'none', fontFamily: 'inherit', fontSize: 14, fontWeight: 600,
+                cursor: pinBusy ? 'not-allowed' : 'pointer',
+              }}>{pinBusy ? 'Saving…' : 'Update PIN'}</button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 };
 
 window.SettingsScreen = SettingsScreen;
+
+
+// ─────────────────────────────────────────────────────────────
+// Profile screen — full details of the signed-in user.
+// ─────────────────────────────────────────────────────────────
+const ProfileScreen = () => {
+  const { user, userId, nav, lang } = useApp();
+  const T_ = window.TOKENS;
+  const [emp, setEmp]         = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+
+  React.useEffect(() => {
+    if (!window.sb || !userId) { setLoading(false); return; }
+    (async () => {
+      const { data } = await window.sb.from('employees')
+        .select('id, name, role, section_id, user_type, phone, city, employee_code, company, joined_date, tmb_account_no, esi_no, epf_no, uan_no')
+        .eq('id', userId).maybeSingle();
+      setEmp(data || null);
+      setLoading(false);
+    })();
+  }, [userId]);
+
+  const field = (label, value, mono) => (
+    <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T_.borderSoft}` }}>
+      <div style={{ fontSize: 10.5, fontWeight: 700, color: T_.inkFaint, letterSpacing: 0.4, textTransform: 'uppercase', marginBottom: 4 }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 14, color: T_.ink, fontFamily: mono ? 'JetBrains Mono, Menlo, monospace' : 'inherit' }}>
+        {value || <span style={{ color: T_.inkFaint }}>—</span>}
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 120 }}>
+      {/* Header */}
+      <div style={{ padding: 'var(--screen-top) 20px 0' }}>
+        <button onClick={() => nav.back()} style={{
+          background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+          color: T_.inkMuted, fontSize: 13, display: 'flex', alignItems: 'center', gap: 4,
+          fontFamily: 'inherit', marginBottom: 14,
+        }}>
+          <Icon name="arrowLeft" size={14} /> Back
+        </button>
+        <div style={{
+          fontFamily: 'Fraunces, Georgia, serif',
+          fontSize: 30, fontWeight: 500, letterSpacing: -0.7,
+          color: T_.ink,
+        }}>
+          {lang === 'ta' ? 'சுயவிவரம்' : 'Profile'}
+        </div>
+      </div>
+
+      {loading && (
+        <div style={{ padding: 40, textAlign: 'center', color: T_.inkMuted }}>Loading…</div>
+      )}
+
+      {!loading && emp && (
+        <>
+          <div style={{ padding: '20px 16px 0' }}>
+            <div style={{
+              background: T_.surface, border: `1px solid ${T_.border}`,
+              borderRadius: 16, padding: '18px 16px',
+              display: 'flex', alignItems: 'center', gap: 14,
+            }}>
+              <Avatar name={emp.name} size={56} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 17, fontWeight: 600, color: T_.ink }}>{emp.name}</div>
+                <div style={{ fontSize: 12.5, color: T_.inkMuted, marginTop: 2 }}>
+                  {emp.role}
+                  {emp.section_id && ` · ${SECTION_LABEL[emp.section_id] || emp.section_id}`}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ padding: '20px 16px 0' }}>
+            <div style={{ background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 14, overflow: 'hidden' }}>
+              {field('Employee ID',    emp.id, true)}
+              {field('Employee code',  emp.employee_code, true)}
+              {field('Company',        emp.company)}
+              {field('User type',      emp.user_type)}
+              {field('Phone',          emp.phone, true)}
+              {field('City',           emp.city)}
+              {field('Joined',         emp.joined_date)}
+            </div>
+          </div>
+
+          <div style={{ padding: '20px 16px 0' }}>
+            <div style={{
+              fontSize: 11, letterSpacing: 0.9, textTransform: 'uppercase',
+              color: T_.inkMuted, fontWeight: 600, padding: '0 4px 10px',
+            }}>Statutory IDs</div>
+            <div style={{ background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 14, overflow: 'hidden' }}>
+              {field('TMB A/C', emp.tmb_account_no, true)}
+              {field('ESI no.', emp.esi_no, true)}
+              {field('EPF no.', emp.epf_no, true)}
+              {field('UAN',     emp.uan_no, true)}
+            </div>
+          </div>
+        </>
+      )}
+
+      {!loading && !emp && (
+        <div style={{ padding: 40, textAlign: 'center', color: T_.inkMuted }}>
+          Could not load your profile.
+        </div>
+      )}
+    </div>
+  );
+};
+
+window.ProfileScreen = ProfileScreen;
 
 
 // ─────────────────────────────────────────────────────────────
@@ -8780,6 +9039,7 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     announcements:   makeScreen('AnnouncementsScreen'),
     visitors:        makeScreen('VisitorsScreen'),
     settings:        makeScreen('SettingsScreen'),
+    profile:         makeScreen('ProfileScreen'),
     checklist:       makeScreen('ChecklistScreen'),
     managerHome:     makeScreen('ManagerHomeScreen'),
     advances:        makeScreen('AdvancesScreen'),
@@ -8802,6 +9062,7 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     kiosk:          '13 Kiosk Scanner',
     enroll:         '14 Enroll Joiner',
     settings:       '15 Settings',
+    profile:        '15b Profile',
     checklist:      '16 Checklist',
     managerHome:    '17 Manager Home',
     advances:       '18 Advances',
@@ -8863,7 +9124,7 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
       nav, toast, layout: tweakLayout,
     }}>
       <div className="stage" data-screen-label={screenTitles[current] || current}>
-        <div className="sidePanel">
+        {user === 'owner' && <div className="sidePanel">
           <div>
             <div className="side-sub">Concept · Mobile app</div>
             <div className="side-title">Seemaatti<br/>Admin</div>
@@ -8905,7 +9166,7 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
           <div style={{fontSize: 11, color: '#8A8278', lineHeight: 1.55, marginTop: 4}}>
             Tap any screen to jump to it. Toggle Tweaks (bottom-right) for English / தமிழ், density and dashboard layout variations.
           </div>
-        </div>
+        </div>}
 
         <IOSDevice width={390} height={844}>
           <div style={{
@@ -8934,7 +9195,7 @@ const REQUIRED = [
   'LoginScreen','OwnerHomeScreen','StaffHomeScreen','AttendanceScreen',
   'LeavesScreen','ApplyLeaveScreen','TasksScreen','PayslipScreen',
   'AnnouncementsScreen','VisitorsScreen','HRHomeScreen','HRToolsScreen','MarkAttendanceScreen',
-  'KioskScannerScreen','EnrollJoinerScreen','SettingsScreen','ChecklistScreen','ManagerHomeScreen','AdvancesScreen',
+  'KioskScannerScreen','EnrollJoinerScreen','SettingsScreen','ProfileScreen','ChecklistScreen','ManagerHomeScreen','AdvancesScreen',
   'AppCtx','IOSDevice','TabBar','Toast','TOKENS','MOCK',
 ];
 const mountWhenReady = (attempts = 0) => {
