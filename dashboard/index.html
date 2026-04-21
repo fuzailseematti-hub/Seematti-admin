@@ -4902,6 +4902,7 @@ const PayslipsPage = () => {
               <th>Employee</th>
               <th style={{ width: 100 }}>Type</th>
               <th style={{ width: 140 }}>Company</th>
+              <th style={{ width: 110 }}>Salary</th>
               <th style={{ width: 110 }}>Days (P+L)</th>
               <th style={{ width: 120 }}>Gross</th>
               <th style={{ width: 120 }}>Deductions</th>
@@ -4913,7 +4914,7 @@ const PayslipsPage = () => {
           <tbody>
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={readOnly ? 10 : 11} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                <td colSpan={readOnly ? 11 : 12} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
                   {loading ? 'Loading…' : 'No payslips for this month.'}
                 </td>
               </tr>
@@ -4939,6 +4940,12 @@ const PayslipsPage = () => {
                     </span>
                   </td>
                   <td>{emp?.company || <span className="muted">—</span>}</td>
+                  <td style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
+                    {(() => {
+                      const sal = num(r.monthly_salary ?? emp?.monthly_salary);
+                      return sal ? rupees(sal) : <span className="muted">—</span>;
+                    })()}
+                  </td>
                   <td className="muted" style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
                     {r.p_days != null
                       ? `${r.p_days} + ${r.l_days || 0} / ${r.days_in_month || daysInMonthIso(r.month)}`
