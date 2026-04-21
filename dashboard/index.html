@@ -1252,8 +1252,8 @@ const AttendancePage = () => {
 // ──────────────────────────────────────────────────────────
 // Employees page — directory with add / edit / deactivate / delete.
 // ──────────────────────────────────────────────────────────
-const TYPE_LABEL = { owner: 'Owner', hr: 'HR', staff: 'Staff' };
-const TYPE_TONE  = { owner: 'brand', hr: 'info', staff: 'gold' };
+const TYPE_LABEL = { owner: 'Owner', admin: 'Admin', hr: 'HR', staff: 'Staff' };
+const TYPE_TONE  = { owner: 'brand', admin: 'brand', hr: 'info', staff: 'gold' };
 
 const EmployeesPage = () => {
   const toast = useToast();
@@ -1852,7 +1852,7 @@ const EmployeesPage = () => {
                 <td>{r.role}</td>
                 <td>{SECTION_META[r.section_id]?.label || <span className="muted">—</span>}</td>
                 <td>
-                  <span className={`status-pill ${r.user_type === 'owner' ? 'present' : r.user_type === 'hr' ? 'leave' : 'unmarked'}`}
+                  <span className={`status-pill ${r.user_type === 'owner' || r.user_type === 'admin' ? 'present' : r.user_type === 'hr' ? 'leave' : 'unmarked'}`}
                     style={{ letterSpacing: 0.4 }}>
                     {TYPE_LABEL[r.user_type] || r.user_type}
                   </span>
@@ -7013,6 +7013,7 @@ const TeamAccessPage = () => {
 
   const sectionLabel = (id) => sections.find(s => s.id === id)?.name || id;
   const roleLabel = (r) => r === 'owner' ? 'Owner'
+                       : r === 'admin' ? 'Admin'
                        : r === 'hr' ? 'HR'
                        : r === 'manager' ? 'Manager'
                        : r === 'supervisor' ? 'Supervisor'
@@ -7023,6 +7024,7 @@ const TeamAccessPage = () => {
       <div className="stat-strip">
         <div className="stat"><div className="k">Login users</div><div className="v">{access.length}</div></div>
         <div className="stat present"><div className="k">Owners</div><div className="v">{access.filter(a => a.employees.user_type === 'owner').length}</div></div>
+        <div className="stat present"><div className="k">Admins</div><div className="v">{access.filter(a => a.employees.user_type === 'admin').length}</div></div>
         <div className="stat leave"><div className="k">HR</div><div className="v">{access.filter(a => a.employees.user_type === 'hr').length}</div></div>
         <div className="stat late"><div className="k">Managers</div><div className="v">{access.filter(a => a.employees.user_type === 'manager').length}</div></div>
         <div className="stat"><div className="k">Supervisors</div><div className="v">{access.filter(a => a.employees.user_type === 'supervisor').length}</div></div>
@@ -7083,7 +7085,7 @@ const TeamAccessPage = () => {
                     </div>
                   </td>
                   <td>
-                    <span className={`status-pill ${e.user_type === 'owner' ? 'present' : e.user_type === 'hr' ? 'leave' : e.user_type === 'manager' ? 'late' : 'unmarked'}`}>
+                    <span className={`status-pill ${e.user_type === 'owner' || e.user_type === 'admin' ? 'present' : e.user_type === 'hr' ? 'leave' : e.user_type === 'manager' ? 'late' : 'unmarked'}`}>
                       {roleLabel(e.user_type)}
                     </span>
                   </td>
