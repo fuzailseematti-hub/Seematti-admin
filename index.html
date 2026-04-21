@@ -2165,27 +2165,46 @@ window.KioskPinPrompt = KioskPinPrompt;
 
 const LoginScreen = () => {
   const { nav, setUser, setUserId } = useApp();
-  const t = useT();
   const T_ = window.TOKENS;
-  const M = window.MOCK;
-  const { users, loading } = useLoginUsers();
 
-  // Group users by user_type. Only show a role card if ≥1 user exists.
-  const grouped = React.useMemo(() => {
-    const g = { owner: [], hr: [], manager: [], supervisor: [] };
-    users.forEach(u => { if (g[u.user_type]) g[u.user_type].push(u); });
-    return g;
-  }, [users]);
-
-  // Which role's picker is currently open.
-  const [openRole, setOpenRole] = React.useState(null);
-  // If a user has a password, show a prompt instead of logging in immediately.
-  const [pwdFor, setPwdFor] = React.useState(null); // { role, emp }
-  const [pwdInput, setPwdInput] = React.useState('');
-  const [pwdErr, setPwdErr] = React.useState(false);
-  const [pwdBusy, setPwdBusy] = React.useState(false);
-  // Kiosk launch state
+  const [username, setUsername] = React.useState('');
+  const [pwd, setPwd]           = React.useState('');
+  const [err, setErr]           = React.useState('');
+  const [busy, setBusy]         = React.useState(false);
   const [kioskPromptOpen, setKioskPromptOpen] = React.useState(false);
+
+  const submit = async (e) => {
+    if (e) e.preventDefault();
+    if (busy) return;
+    setBusy(true); setErr('');
+    const uname = username.trim().toLowerCase();
+    if (!uname) { setErr('Enter your username'); setBusy(false); return; }
+    if (!pwd)   { setErr('Enter your password'); setBusy(false); return; }
+    try {
+      const hash = await window.sha256(pwd);
+      const { data, error } = await window.sb
+        .from('user_access')
+        .select('employee_id, password_sha256, employees(id, name, user_type, is_active)')
+        .eq('username', uname)
+        .maybeSingle();
+      if (error) throw error;
+      if (!data || !data.password_sha256 || data.password_sha256 !== hash) {
+        setErr('Wrong username or password'); setBusy(false); return;
+      }
+      if (data.employees?.is_active === false) {
+        setErr('This account has been deactivated'); setBusy(false); return;
+      }
+      const role = data.employees?.user_type || 'hr';
+      const empId = data.employee_id;
+      setUser(role);
+      setUserId(empId);
+      nav.reset(ROLE_HOME[role] || 'ownerHome');
+    } catch (ex) {
+      console.error(ex);
+      setErr('Could not sign in. Check your connection and try again.');
+      setBusy(false);
+    }
+  };
 
   const doSignIn = (role, emp) => {
     setUser(role);
@@ -2226,8 +2245,6 @@ const LoginScreen = () => {
     setOpenRole(openRole === role ? null : role);
   };
 
-  const roleOrder = ['owner', 'hr', 'manager', 'supervisor'];
-
   return (
     <div style={{
       height: '100%', display: 'flex', flexDirection: 'column',
@@ -2239,8 +2256,8 @@ const LoginScreen = () => {
         <div style={{ marginBottom: 32 }}>
           <img src={LOGO_SRC} alt="Seemaatti"
             style={{ height: 56, width: 'auto', display: 'block', marginBottom: 14 }} />
-          <div style={{ fontSize: 10.5, color: T_.inkMuted, letterSpacing: 0.6, textTransform: 'uppercase', fontWeight: 600 }}>
-            {M.company.location}
+          <div style={{ fontSize: 10.5, color: window.MOCK?.company ? T_.inkMuted : T_.inkMuted, letterSpacing: 0.6, textTransform: 'uppercase', fontWeight: 600 }}>
+            {window.MOCK?.company?.location || ''}
           </div>
         </div>
 
@@ -2248,79 +2265,65 @@ const LoginScreen = () => {
           fontFamily: 'Fraunces, Georgia, serif',
           fontSize: 32, fontWeight: 500, color: T_.ink,
           letterSpacing: -0.8, lineHeight: 1.15, marginBottom: 8,
-        }}>{t('welcome')}</div>
+        }}>Welcome back</div>
         <div style={{ fontSize: 14, color: T_.inkMuted, marginBottom: 28 }}>
-          {t('signIn')}
+          Sign in to continue
         </div>
 
-        {/* Role cards — shown only for roles with ≥1 user */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {loading && (
-            <div style={{ fontSize: 12.5, color: T_.inkMuted, textAlign: 'center', padding: 10 }}>
-              Loading…
-            </div>
-          )}
-          {!loading && roleOrder.map(role => {
-            const list = grouped[role];
-            if (!list || list.length === 0) return null;
-            const ui = ROLE_UI[role];
-            const firstName = list[0]?.name;
-            const subtitle = list.length === 1
-              ? `${list[0].name}${list[0].role ? ' · ' + list[0].role : ''}`
-              : `${list.length} users · Tap to pick`;
-            const expanded = openRole === role && list.length > 1;
-            return (
-              <React.Fragment key={role}>
-                <RoleCard
-                  icon={ui.icon}
-                  title={`I am ${ui.title}`}
-                  subtitle={subtitle}
-                  tone={ui.tone}
-                  onClick={() => handleRoleTap(role)}
-                />
-                {expanded && (
-                  <div style={{
-                    marginTop: -4, marginBottom: 4,
-                    background: T_.surface, border: `1px solid ${T_.border}`,
-                    borderRadius: 16, padding: 6,
-                    display: 'flex', flexDirection: 'column', gap: 2,
-                  }}>
-                    {list.map(emp => (
-                      <button key={emp.id}
-                        onClick={() => signIn(role, emp)}
-                        style={{
-                          background: 'none', border: 'none', textAlign: 'left',
-                          padding: '10px 12px', borderRadius: 10,
-                          cursor: 'pointer', fontFamily: 'inherit',
-                          display: 'flex', alignItems: 'center', gap: 10,
-                        }}>
-                        <Avatar name={emp.name} size={32} />
-                        <div style={{ flex: 1 }}>
-                          <div style={{ fontSize: 13.5, fontWeight: 600, color: T_.ink }}>{emp.name}</div>
-                          <div style={{ fontSize: 11.5, color: T_.inkMuted }}>
-                            {emp.role}
-                            {emp.section_id && ` · ${SECTION_LABEL[emp.section_id] || emp.section_id}`}
-                            {emp.all_sections && ' · All sections'}
-                          </div>
-                        </div>
-                        <Icon name="chevron" size={16} color={T_.inkFaint} />
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </React.Fragment>
-            );
-          })}
-          {!loading && Object.values(grouped).every(l => l.length === 0) && (
+        {/* Sign-in form */}
+        <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div>
             <div style={{
-              padding: 16, fontSize: 13, color: T_.inkMuted,
-              background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 14,
-              textAlign: 'center',
-            }}>
-              No users configured. Grant access in the admin dashboard first.
-            </div>
+              fontSize: 11, fontWeight: 700, color: T_.inkMuted,
+              letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 6,
+            }}>Username</div>
+            <input type="text"
+              autoFocus
+              autoComplete="username"
+              value={username}
+              onChange={e => setUsername(e.target.value)}
+              placeholder="your username"
+              style={{
+                width: '100%', padding: '14px 16px', borderRadius: 12,
+                background: T_.bg, border: `1px solid ${T_.border}`,
+                fontSize: 15, fontFamily: 'inherit', color: T_.ink,
+                boxSizing: 'border-box', outline: 'none',
+              }} />
+          </div>
+          <div>
+            <div style={{
+              fontSize: 11, fontWeight: 700, color: T_.inkMuted,
+              letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 6,
+            }}>Password</div>
+            <input type="password"
+              autoComplete="current-password"
+              value={pwd}
+              onChange={e => setPwd(e.target.value)}
+              placeholder="••••••••"
+              style={{
+                width: '100%', padding: '14px 16px', borderRadius: 12,
+                background: T_.bg, border: `1px solid ${err ? T_.danger : T_.border}`,
+                fontSize: 15, fontFamily: 'inherit', color: T_.ink,
+                boxSizing: 'border-box', outline: 'none', letterSpacing: 2,
+              }} />
+          </div>
+          {err && (
+            <div style={{ fontSize: 12.5, color: T_.danger }}>{err}</div>
           )}
-        </div>
+          <button type="submit" disabled={busy} style={{
+            marginTop: 6, padding: 14, borderRadius: 12,
+            background: T_.maroon, color: '#fff', border: 'none',
+            fontSize: 14, fontWeight: 600, fontFamily: 'inherit',
+            cursor: busy ? 'not-allowed' : 'pointer',
+            opacity: busy ? 0.6 : 1,
+            boxShadow: '0 6px 16px -6px rgba(14, 124, 58, 0.45)',
+          }}>
+            {busy ? 'Signing in…' : 'Sign in'}
+          </button>
+          <div style={{ fontSize: 11.5, color: T_.inkMuted, marginTop: 4 }}>
+            Don't have a username? Ask your Admin to create one in Team Access.
+          </div>
+        </form>
 
         {/* Kiosk launch — separate from user logins. Always available. */}
         <div style={{ marginTop: 22 }}>
@@ -2381,72 +2384,6 @@ const LoginScreen = () => {
         />
       )}
 
-      {/* Password sheet — shown when the picked user has a password_sha256 */}
-      {pwdFor && (
-        <div onClick={() => setPwdFor(null)} style={{
-          position: 'absolute', inset: 0,
-          background: 'rgba(11, 13, 14, 0.55)',
-          display: 'flex', alignItems: 'flex-end', zIndex: 200,
-        }}>
-          <form onSubmit={submitPassword}
-            onClick={e => e.stopPropagation()}
-            style={{
-              width: '100%', background: T_.surface,
-              borderRadius: '20px 20px 0 0',
-              padding: '22px 22px 28px',
-              maxHeight: '80%', overflowY: 'auto',
-            }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 18 }}>
-              <Avatar name={pwdFor.emp.name} size={42} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 15, fontWeight: 600, color: T_.ink }}>
-                  {pwdFor.emp.name}
-                </div>
-                <div style={{ fontSize: 12, color: T_.inkMuted, marginTop: 2 }}>
-                  {pwdFor.emp.username ? `@${pwdFor.emp.username}` : ''}
-                  {pwdFor.emp.role ? `  ·  ${pwdFor.emp.role}` : ''}
-                </div>
-              </div>
-              <button type="button" onClick={() => setPwdFor(null)} style={{
-                background: 'none', border: 'none', cursor: 'pointer',
-                color: T_.inkMuted, fontSize: 18, padding: 4,
-              }}>×</button>
-            </div>
-
-            <div style={{
-              fontSize: 11, fontWeight: 600, color: T_.inkMuted,
-              letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 6,
-            }}>Password</div>
-            <input type="password"
-              autoFocus
-              value={pwdInput}
-              onChange={e => { setPwdInput(e.target.value); setPwdErr(false); }}
-              placeholder="Enter your password"
-              style={{
-                width: '100%', padding: '14px 16px', borderRadius: 12,
-                background: T_.bg, border: `1px solid ${pwdErr ? T_.danger : T_.border}`,
-                fontSize: 15, fontFamily: 'inherit', color: T_.ink,
-                boxSizing: 'border-box', outline: 'none', letterSpacing: 2,
-              }} />
-            {pwdErr && (
-              <div style={{
-                fontSize: 12, color: T_.danger, marginTop: 8,
-              }}>Incorrect password — try again</div>
-            )}
-
-            <button type="submit" disabled={pwdBusy || !pwdInput} style={{
-              width: '100%', marginTop: 16, padding: 14, borderRadius: 12,
-              background: T_.maroon, color: '#fff', border: 'none',
-              fontSize: 14, fontWeight: 600, fontFamily: 'inherit',
-              cursor: (pwdBusy || !pwdInput) ? 'not-allowed' : 'pointer',
-              opacity: (pwdBusy || !pwdInput) ? 0.5 : 1,
-              boxShadow: '0 6px 16px -6px rgba(14, 124, 58, 0.45)',
-            }}>
-              {pwdBusy ? 'Checking…' : 'Sign in'}
-            </button>
-          </form>
-        </div>
-      )}
     </div>
   );
 };

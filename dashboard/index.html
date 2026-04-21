@@ -730,6 +730,8 @@ const PERMS = {
   },
 };
 const can = (role, area, action='read') => {
+  if (area === '__everyone') return true;
+  if (area === '__ownerAdmin') return role === 'owner' || role === 'admin';
   const p = PERMS[role];
   if (!p) return false;
   if (p.all) return true;
@@ -760,6 +762,10 @@ const NAV = [
   ]},
   { section: 'Insights', items: [
     { id: 'reports', label: 'Reports & exports', area: 'reports' },
+  ]},
+  { section: 'Account', items: [
+    { id: 'profile',  label: 'Profile',  area: '__everyone' },
+    { id: 'settings', label: 'Settings', area: '__ownerAdmin' },
   ]},
 ];
 
@@ -6310,6 +6316,255 @@ const ReportsPage = () => {
 };
 
 // ──────────────────────────────────────────────────────────
+// Profile — the signed-in user's own details + change password.
+// ──────────────────────────────────────────────────────────
+const ProfilePage = () => {
+  const toast = useToast();
+  const { session, role } = useContext(AppCtx);
+  const [emp, setEmp]         = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const [curPwd, setCurPwd]   = useState('');
+  const [newPwd, setNewPwd]   = useState('');
+  const [cfmPwd, setCfmPwd]   = useState('');
+  const [pwdBusy, setPwdBusy] = useState(false);
+
+  const employeeId = session?.employee_id;
+  const username   = session?.username;
+
+  useEffect(() => {
+    if (!window.sb || !employeeId) { setLoading(false); return; }
+    (async () => {
+      const { data } = await window.sb.from('employees')
+        .select('id, name, role, section_id, user_type, phone, city, employee_code, company, joined_date, tmb_account_no, esi_no, epf_no, uan_no')
+        .eq('id', employeeId).maybeSingle();
+      setEmp(data || null);
+      setLoading(false);
+    })();
+  }, [employeeId]);
+
+  const changePassword = async (e) => {
+    e.preventDefault();
+    if (pwdBusy) return;
+    if (!username) { toast('Bootstrap Owner has no password to change from here'); return; }
+    if (!curPwd || !newPwd) { toast('Fill both current and new password'); return; }
+    if (newPwd.length < 4) { toast('New password must be at least 4 characters'); return; }
+    if (newPwd !== cfmPwd) { toast('New password confirmation does not match'); return; }
+    setPwdBusy(true);
+    try {
+      const currentHash = await window.sha256(curPwd);
+      const { data: row } = await window.sb.from('user_access')
+        .select('password_sha256').eq('employee_id', employeeId).maybeSingle();
+      if (!row || row.password_sha256 !== currentHash) {
+        toast('Current password is wrong'); return;
+      }
+      const newHash = await window.sha256(newPwd);
+      const { error } = await window.sb.from('user_access')
+        .update({ password_sha256: newHash }).eq('employee_id', employeeId);
+      if (error) { toast('Could not update password'); console.error(error); return; }
+      setCurPwd(''); setNewPwd(''); setCfmPwd('');
+      toast('Password updated');
+    } finally { setPwdBusy(false); }
+  };
+
+  if (loading) {
+    return <div style={{ padding: 40, color: 'var(--inkMuted)' }}>Loading profile…</div>;
+  }
+
+  return (
+    <div>
+      <div className="stat-strip">
+        <div className="stat"><div className="k">Signed in as</div><div className="v" style={{ fontSize: 18 }}>{session?.display_name || 'Owner'}</div></div>
+        <div className="stat"><div className="k">Role</div><div className="v" style={{ fontSize: 18 }}>{role}</div></div>
+        {employeeId && <div className="stat"><div className="k">Employee ID</div><div className="v" style={{ fontSize: 18 }}>{employeeId}</div></div>}
+        {username && <div className="stat"><div className="k">Username</div><div className="v" style={{ fontSize: 18 }}>{username}</div></div>}
+      </div>
+
+      {!employeeId && (
+        <div style={{
+          padding: 16, background: 'var(--warningSoft)', borderRadius: 10,
+          color: 'var(--warning)', fontSize: 13, marginBottom: 16,
+        }}>
+          You're signed in via the bootstrap Owner password. Create a Team Access
+          account in Team Access → + Grant access with your username so you can
+          change your password and see your full profile here.
+        </div>
+      )}
+
+      {emp && (
+        <div className="card" style={{ padding: 20, marginBottom: 16 }}>
+          <h2 style={{ marginTop: 0, marginBottom: 16 }}>Employee details</h2>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16 }}>
+            <ProfileField label="Name"          value={emp.name} />
+            <ProfileField label="Role"          value={emp.role} />
+            <ProfileField label="Employee code" value={emp.employee_code} mono />
+            <ProfileField label="Company"       value={emp.company} />
+            <ProfileField label="Section"       value={SECTION_META[emp.section_id]?.full || emp.section_id} />
+            <ProfileField label="User type"     value={emp.user_type} />
+            <ProfileField label="Phone"         value={emp.phone} mono />
+            <ProfileField label="City"          value={emp.city} />
+            <ProfileField label="Joined"        value={emp.joined_date ? fmtDate(emp.joined_date) : '—'} />
+            <ProfileField label="TMB A/C"       value={emp.tmb_account_no} mono />
+            <ProfileField label="ESI no."       value={emp.esi_no} mono />
+            <ProfileField label="EPF no."       value={emp.epf_no} mono />
+            <ProfileField label="UAN"           value={emp.uan_no} mono />
+          </div>
+        </div>
+      )}
+
+      <div className="card" style={{ padding: 20 }}>
+        <h2 style={{ marginTop: 0, marginBottom: 6 }}>Change password</h2>
+        <p style={{ color: 'var(--inkMuted)', marginTop: 0, fontSize: 12.5 }}>
+          Updates only your own login. 4-character minimum.
+        </p>
+        {username ? (
+          <form onSubmit={changePassword} style={{ display: 'grid', gap: 12, maxWidth: 420 }}>
+            <div>
+              <label>Current password</label>
+              <input type="password" autoComplete="current-password"
+                value={curPwd} onChange={e => setCurPwd(e.target.value)} />
+            </div>
+            <div>
+              <label>New password</label>
+              <input type="password" autoComplete="new-password"
+                value={newPwd} onChange={e => setNewPwd(e.target.value)} />
+            </div>
+            <div>
+              <label>Confirm new password</label>
+              <input type="password" autoComplete="new-password"
+                value={cfmPwd} onChange={e => setCfmPwd(e.target.value)} />
+            </div>
+            <div>
+              <button type="submit" className="btn primary" disabled={pwdBusy}>
+                {pwdBusy ? 'Saving…' : 'Change password'}
+              </button>
+            </div>
+          </form>
+        ) : (
+          <div style={{ fontSize: 13, color: 'var(--inkMuted)' }}>
+            Change password is only available when you're signed in with a username.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const ProfileField = ({ label, value, mono }) => (
+  <div>
+    <div style={{ fontSize: 10.5, fontWeight: 700, color: 'var(--inkFaint)', letterSpacing: 0.4, textTransform: 'uppercase', marginBottom: 4 }}>{label}</div>
+    <div style={{ fontSize: 13.5, color: 'var(--ink)', fontFamily: mono ? 'JetBrains Mono, Menlo, monospace' : 'inherit' }}>
+      {value || <span className="muted">—</span>}
+    </div>
+  </div>
+);
+
+// ──────────────────────────────────────────────────────────
+// Settings — app-wide preferences. Gated to Owner and Admin.
+// ──────────────────────────────────────────────────────────
+const SettingsPage = () => {
+  const toast = useToast();
+  const { role } = useContext(AppCtx);
+  const isAdmin = role === 'owner' || role === 'admin';
+
+  const [da, setDa]           = useState('');
+  const [daBusy, setDaBusy]   = useState(false);
+  const [loaded, setLoaded]   = useState(false);
+
+  useEffect(() => {
+    if (!window.sb) return;
+    (async () => {
+      const { data } = await window.sb.from('app_settings')
+        .select('value').eq('key', 'payroll.da').maybeSingle();
+      setDa(String(data?.value?.amount ?? 7313));
+      setLoaded(true);
+    })();
+  }, []);
+
+  const saveDa = async (e) => {
+    e.preventDefault();
+    if (daBusy) return;
+    const amt = Number(da);
+    if (!Number.isFinite(amt) || amt <= 0) { toast('DA must be a positive number'); return; }
+    setDaBusy(true);
+    try {
+      const { error } = await window.sb.from('app_settings')
+        .upsert({ key: 'payroll.da', value: { amount: amt }, updated_at: new Date().toISOString() },
+                { onConflict: 'key' });
+      if (error) { toast('Could not save DA'); console.error(error); return; }
+      toast(`DA saved: ${rupees(amt)}/mo`);
+    } finally { setDaBusy(false); }
+  };
+
+  if (!isAdmin) {
+    return (
+      <div style={{ padding: 40, color: 'var(--inkMuted)' }}>
+        Settings are available to the Owner and Admin only. Your current role
+        ({role}) can change its own password in Profile.
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="card" style={{ padding: 20, marginBottom: 16 }}>
+        <h2 style={{ marginTop: 0, marginBottom: 6 }}>Payroll</h2>
+        <p style={{ color: 'var(--inkMuted)', marginTop: 0, fontSize: 12.5 }}>
+          Dearness Allowance used for every ESI/PF payslip. Change it once and
+          every new payslip will use the updated amount.
+        </p>
+        {loaded && (
+          <form onSubmit={saveDa} style={{ display: 'flex', gap: 10, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+            <div>
+              <label>DA per month (₹)</label>
+              <input type="number" min="0" step="1"
+                value={da} onChange={e => setDa(e.target.value)}
+                style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }} />
+            </div>
+            <button type="submit" className="btn primary" disabled={daBusy}>
+              {daBusy ? 'Saving…' : 'Save'}
+            </button>
+          </form>
+        )}
+      </div>
+
+      <div className="card" style={{ padding: 20, marginBottom: 16 }}>
+        <h2 style={{ marginTop: 0, marginBottom: 6 }}>Kiosk &amp; face</h2>
+        <p style={{ color: 'var(--inkMuted)', marginTop: 0, fontSize: 12.5 }}>
+          Late cutoff, face match threshold, exit PIN and enrolled faces live
+          on their own page for now.
+        </p>
+        <button className="btn" onClick={() => { location.hash = '#kiosk'; }}>
+          Open Kiosk &amp; face settings
+        </button>
+      </div>
+
+      {role === 'owner' && (
+        <div className="card" style={{ padding: 20, border: '1px dashed var(--border)' }}>
+          <h2 style={{ marginTop: 0, marginBottom: 6 }}>Developer (Owner only)</h2>
+          <p style={{ color: 'var(--inkMuted)', marginTop: 0, fontSize: 12.5 }}>
+            Temporarily preview the dashboard as another role. Affects this
+            browser only; reload to return to Owner.
+          </p>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {['admin', 'manager', 'supervisor', 'hr'].map(r => (
+              <button key={r} className="btn"
+                onClick={() => {
+                  const s = loadSession() || { role: 'owner', display_name: 'Owner' };
+                  saveSession({ ...s, role: r, display_name: s.display_name + ` (preview: ${r})` });
+                  location.reload();
+                }}>
+                Preview as {r}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ──────────────────────────────────────────────────────────
 // Kiosk & face settings — late cutoff, match threshold, enrolled faces.
 // ──────────────────────────────────────────────────────────
 const KioskSettingsPage = () => {
@@ -7687,6 +7942,8 @@ const Page = ({ name }) => {
   if (name === 'reports')       return <ReportsPage />;
   if (name === 'kiosk')         return <KioskSettingsPage />;
   if (name === 'team_access')   return <TeamAccessPage />;
+  if (name === 'profile')       return <ProfilePage />;
+  if (name === 'settings')      return <SettingsPage />;
   return (
     <div className="empty">
       <h3>Coming soon</h3>
