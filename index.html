@@ -961,7 +961,7 @@ const useLiveAttendance = () => {
 
   const fetchAll = React.useCallback(async () => {
     if (!window.sb) return;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
 
     const [secRes, staffCountRes, attRes] = await Promise.all([
       window.sb
@@ -1043,6 +1043,18 @@ const fmtTime = (t) => {
   return `${hh}:${m}`;
 };
 
+// Attendance is keyed by the store's calendar day (India/Kolkata).
+// Using toISOString().slice(0,10) would give the UTC date, so a late-
+// evening IST scan (e.g. 11 PM IST) would still work but a post-midnight
+// IST scan (12:30 AM) would land on the previous UTC date — breaking the
+// day's tally. Pin to Asia/Kolkata so the date boundary matches the shop.
+const todayISO = () =>
+  new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+const dateISO = (d) =>
+  new Date(d).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+window.todayISO = todayISO;
+window.dateISO = dateISO;
+
 const DB_TO_UI = { present: 'present', late: 'late', absent: 'absent', on_leave: 'leave' };
 const UI_TO_DB = { present: 'present', late: 'late', absent: 'absent', leave:  'on_leave' };
 
@@ -1052,7 +1064,7 @@ const useLiveRoster = () => {
 
   const fetchAll = React.useCallback(async () => {
     if (!window.sb) return;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
 
     const { data: emp } = await window.sb
       .from('employees')
@@ -1103,7 +1115,7 @@ const useLiveRoster = () => {
   // Persist a status change to Supabase (upsert one row).
   const setStatus = React.useCallback(async (employeeId, uiStatus, markedBy) => {
     if (!window.sb) return;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
     const dbStatus = UI_TO_DB[uiStatus];
     const now = new Date();
     const hh = String(now.getHours()).padStart(2, '0');
@@ -1138,7 +1150,7 @@ const useLiveRoster = () => {
   // Bulk mark all pending employees (no attendance row today) as present.
   const markAllPresent = React.useCallback(async (predicate, markedBy) => {
     if (!window.sb) return 0;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
     const now = new Date();
     const hh = String(now.getHours()).padStart(2, '0');
     const mm = String(now.getMinutes()).padStart(2, '0');
@@ -1170,9 +1182,20 @@ window.useLiveRoster = useLiveRoster;
 // ──────────────────────────────────────────────────────────
 // Live leave-requests hook — joined with employees for display.
 // ──────────────────────────────────────────────────────────
-const SECTION_LABEL = {
-  fancy: 'Fancy', cotton: 'Cotton', silk: 'Silk', dhoti: 'Dhoti',
+// Live section label map — populated from the `sections` table at app
+// boot and refreshed via the 'sections' realtime channel subscribed in
+// mountWhenReady(). UI code reads SECTION_LABEL[id] exactly as before.
+const SECTION_LABEL = {};
+const refreshSectionLabels = async () => {
+  if (!window.sb) return;
+  const { data } = await window.sb.from('sections').select('id, name').order('sort_order');
+  for (const k of Object.keys(SECTION_LABEL)) delete SECTION_LABEL[k];
+  (data || []).forEach(s => {
+    SECTION_LABEL[s.id] = s.name || s.id;
+  });
 };
+window.SECTION_LABEL = SECTION_LABEL;
+window.refreshSectionLabels = refreshSectionLabels;
 
 const fmtFromDate = (iso) => {
   if (!iso) return '—';
@@ -1324,7 +1347,7 @@ const useLiveTasks = ({ scope, assigneeId } = {}) => {
 
   const fetchAll = React.useCallback(async () => {
     if (!window.sb) return;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
     let q = window.sb
       .from('tasks')
       .select('id, scope, assignee_id, label, owner_label, done, priority, sort_order, due_date')
@@ -1541,7 +1564,7 @@ const useLiveStaffEmployee = (employeeId) => {
 
   const fetchAll = React.useCallback(async () => {
     if (!window.sb || !employeeId) return;
-    const dateStr = new Date().toISOString().slice(0, 10);
+    const dateStr = todayISO();
     const [empRes, attRes] = await Promise.all([
       window.sb.from('employees').select('id, name, role, section_id, joined_date, user_type').eq('id', employeeId).maybeSingle(),
       window.sb.from('attendance').select('status, punch_in_time, punch_out_time').eq('employee_id', employeeId).eq('date', dateStr).maybeSingle(),
@@ -1570,7 +1593,7 @@ const useLiveStaffEmployee = (employeeId) => {
     const mm = String(now.getMinutes()).padStart(2, '0');
     await window.sb.from('attendance').upsert({
       employee_id: employeeId,
-      date:        now.toISOString().slice(0, 10),
+      date:        dateISO(now),
       status:      now.getHours() >= 10 ? 'late' : 'present',
       punch_in_time: `${hh}:${mm}:00`,
       source:      'self',
@@ -1585,7 +1608,7 @@ const useLiveStaffEmployee = (employeeId) => {
     await window.sb.from('attendance')
       .update({ punch_out_time: `${hh}:${mm}:00` })
       .eq('employee_id', employeeId)
-      .eq('date', now.toISOString().slice(0, 10));
+      .eq('date', dateISO(now));
   }, [employeeId, today]);
 
   return { employee, today, loading, punchIn, punchOut };
@@ -1610,8 +1633,8 @@ const useLiveHRStats = () => {
     const today = new Date();
     const weekAgo = new Date(today);
     weekAgo.setDate(today.getDate() - 7);
-    const todayStr   = today.toISOString().slice(0, 10);
-    const weekAgoStr = weekAgo.toISOString().slice(0, 10);
+    const todayStr   = dateISO(today);
+    const weekAgoStr = dateISO(weekAgo);
 
     const [joinersRes, lateRes, absentRes, lastJoinerRes] = await Promise.all([
       // New joiners (last 7 days)
@@ -2033,6 +2056,7 @@ Object.assign(window, {
 
 const ROLE_HOME = {
   owner:      'ownerHome',
+  admin:      'ownerHome',
   hr:         'hrHome',
   manager:    'managerHome',
   supervisor: 'managerHome',
@@ -2040,6 +2064,7 @@ const ROLE_HOME = {
 
 const ROLE_UI = {
   owner:      { icon: 'sparkle', tone: 'brand', title: 'Owner',      titleTa: 'உரிமையாளர்' },
+  admin:      { icon: 'sparkle', tone: 'brand', title: 'Admin',      titleTa: 'நிர்வாகி' },
   hr:         { icon: 'people',  tone: 'info',  title: 'HR',         titleTa: 'மனிதவள துறை' },
   manager:    { icon: 'store',   tone: 'gold',  title: 'Manager',    titleTa: 'மேலாளர்' },
   supervisor: { icon: 'user',    tone: 'gold',  title: 'Supervisor', titleTa: 'கண்காணிப்பாளர்' },
@@ -3101,7 +3126,7 @@ const AttendanceScreen = () => {
 
   // Section scoping — owner/hr/all_sections see everyone; manager/supervisor
   // see only their assigned sections.
-  const isAdmin = user === 'owner' || user === 'hr';
+  const isAdmin = user === 'owner' || user === 'admin' || user === 'hr';
   const hasAll = isAdmin || !!(userAccess && userAccess.all_sections);
   const allowed = hasAll ? null : (userAccess?.section_ids || []);
 
@@ -3296,7 +3321,7 @@ const RosterRow = ({ row, last, sectionLabel, onOpen }) => {
 const EmployeeDetailSheet = ({ employeeId, onClose }) => {
   const { user, toast } = useApp();
   const T_ = window.TOKENS;
-  const canEdit = user === 'owner' || user === 'hr';
+  const canEdit = user === 'owner' || user === 'admin' || user === 'hr';
 
   const [emp, setEmp] = React.useState(null);
   const [faceCount, setFaceCount] = React.useState(0);
@@ -3797,12 +3822,12 @@ const LeavesScreen = () => {
     : { items: [], loading: false, decide: async () => {} };
   const [active, setActive] = React.useState(null);
 
-  const isAdmin = user === 'owner' || user === 'hr';
+  const isAdmin = user === 'owner' || user === 'admin' || user === 'hr';
   const hasAll = isAdmin || !!(userAccess && userAccess.all_sections);
   const allowed = hasAll ? null : (userAccess?.section_ids || []);
   // Approval is owner/hr-only by policy. Managers + Supervisors can
   // submit leave requests (via Apply Leave) but cannot approve them.
-  const canApprove = user === 'owner' || user === 'hr';
+  const canApprove = user === 'owner' || user === 'admin' || user === 'hr';
 
   // Manager/Supervisor see their sections' requests + always their own.
   const items = allItems.filter(r =>
@@ -4004,7 +4029,7 @@ const ApplyLeaveScreen = () => {
   }, [userId, employeeId]);
 
   // Pool of employees the user can file a leave for.
-  const isAdmin = user === 'owner' || user === 'hr';
+  const isAdmin = user === 'owner' || user === 'admin' || user === 'hr';
   const hasAll  = isAdmin || !!(userAccess && userAccess.all_sections);
   const allowed = hasAll ? null : (userAccess?.section_ids || []);
 
@@ -4044,7 +4069,7 @@ const ApplyLeaveScreen = () => {
         employeeId,
         type,
         days,
-        fromDate: fromDate.toISOString().slice(0, 10),
+        fromDate: dateISO(fromDate),
         reason: reason.trim(),
       });
       toast(employeeId === userId
@@ -4173,9 +4198,9 @@ const TasksScreen = () => {
   // Only Owner + HR can assign tasks to other people. Managers / Supervisors
   // — even ones with can_manage_tasks (which gates the Checklist tab) —
   // can only create tasks for themselves on this screen.
-  const canManage = user === 'owner' || user === 'hr';
+  const canManage = user === 'owner' || user === 'admin' || user === 'hr';
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayISO();
   const [tasks, setTasks]     = React.useState([]);
   const [loading, setLoading] = React.useState(true);
   const [mode, setMode]       = React.useState('mine'); // 'mine' | 'assigned' (admins only)
@@ -4705,7 +4730,7 @@ const AnnouncementsScreen = () => {
     ? window.useLiveAnnouncements()
     : { items: [], loading: false };
   const rows = items.length ? items : M.announcements;
-  const canPost = user === 'owner' || user === 'hr' ||
+  const canPost = user === 'owner' || user === 'admin' || user === 'hr' ||
     (userAccess && userAccess.can_post_announcements);
 
   const post = async () => {
@@ -4717,7 +4742,7 @@ const AnnouncementsScreen = () => {
       .from('announcements')
       .insert({
         title: title.trim(),
-        posted_by: user === 'owner' ? 'Owner' : 'HR',
+        posted_by: user === 'owner' ? 'Owner' : user === 'admin' ? 'Admin' : 'HR',
         pinned,
       });
     toast('Announcement posted');
@@ -4899,7 +4924,7 @@ const HRHomeScreen = () => {
   const T_ = window.TOKENS;
   const M = window.MOCK;
 
-  const isAdmin = user === 'owner' || user === 'hr';
+  const isAdmin = user === 'owner' || user === 'admin' || user === 'hr';
   const hasAll  = isAdmin || !!(userAccess && userAccess.all_sections);
   const allowed = hasAll ? null : (userAccess?.section_ids || []);
 
@@ -5270,7 +5295,7 @@ const HRToolsScreen = () => {
   const T_ = window.TOKENS;
   const M = window.MOCK;
 
-  const isAdmin = user === 'owner' || user === 'hr';
+  const isAdmin = user === 'owner' || user === 'admin' || user === 'hr';
   const hasAll  = isAdmin || !!(userAccess && userAccess.all_sections);
   const allowed = hasAll ? null : (userAccess?.section_ids || []);
 
@@ -5448,7 +5473,7 @@ const ManagerHomeScreen = () => {
   const pct = totals.total ? Math.round((totals.present / totals.total) * 100) : 0;
 
   // Today's checklist progress (scoped to the user's sections + company-wide)
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayISO();
   const [chk, setChk]   = React.useState({ total: 0, done: 0 });
   const [tsk, setTsk]   = React.useState({ total: 0, done: 0 });
 
@@ -5795,12 +5820,12 @@ const MarkAttendanceScreen = () => {
     ? window.useLiveRoster()
     : { roster: [], loading: false, setStatus: async () => {}, markAllPresent: async () => 0 };
 
-  const isAdmin = user === 'owner' || user === 'hr';
+  const isAdmin = user === 'owner' || user === 'admin' || user === 'hr';
   const hasAll  = isAdmin || !!(userAccess && userAccess.all_sections);
   const allowed = hasAll ? null : (userAccess?.section_ids || []);
   // Marking attendance is owner/hr-only by policy. Managers/Supervisors
   // see the roster read-only.
-  const canEdit = user === 'owner' || user === 'hr';
+  const canEdit = user === 'owner' || user === 'admin' || user === 'hr';
 
   // Scope the roster down to the user's sections.
   const roster = fullRoster.filter(r => hasAll || allowed.includes(r.section));
@@ -6114,18 +6139,6 @@ const KioskScannerScreen = () => {
     return () => clearInterval(handle);
   }, []);
 
-  // Queue of fake matches for the Simulate button (keeps the demo usable
-  // even without enrolled faces).
-  const queue = React.useRef([
-    { id: 'E004', name: 'Deepa S.',     section: 'Silk',   role: 'Sales Associate', confidence: 0.94 },
-    { id: 'E015', name: 'Divya P.',     section: 'Cotton', role: 'Trainee',         confidence: 0.91 },
-    { id: 'E008', name: 'Anitha R.',    section: 'Silk',   role: 'Sales Associate', confidence: 0.96 },
-    { id: 'E010', name: 'Murali T.',    section: 'Dhoti',  role: 'Packer',          confidence: 0.89 },
-    { id: 'E006', name: 'Meena S.',     section: 'Silk',   role: 'Sales Associate', confidence: 0.97 },
-    { id: 'E014', name: 'Shanmugam R.', section: 'Dhoti',  role: 'Packer',          confidence: 0.92 },
-  ]);
-  const queueIdx = React.useRef(0);
-
   const [now, setNow] = React.useState(new Date());
   React.useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
@@ -6186,7 +6199,7 @@ const KioskScannerScreen = () => {
   // and keep them fresh via the realtime subscription.
   React.useEffect(() => {
     if (!window.sb) return;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
     const fetchLive = async () => {
       const { data } = await window.sb
         .from('attendance')
@@ -6222,9 +6235,13 @@ const KioskScannerScreen = () => {
       const { data } = await window.sb
         .from('face_embeddings')
         .select('employee_id, pose, embedding, employees(name, role, section_id, is_active)');
-      // Only keep active staff.
-      const active = (data || []).filter(r => r.employees?.is_active !== false);
-      setFaces(active);
+      // Only keep active staff with a usable embedding. Partial enrollments
+      // (embedding IS NULL) would throw inside cosineSim and break matching
+      // for everyone.
+      const usable = (data || []).filter(r =>
+        r.employees?.is_active !== false && Array.isArray(r.embedding) && r.embedding.length > 0
+      );
+      setFaces(usable);
     };
     const fetchMeta = async () => {
       const [{ count }, { data: set }] = await Promise.all([
@@ -6260,7 +6277,7 @@ const KioskScannerScreen = () => {
   const persistScan = async (emp, dir) => {
     if (!window.sb) return;
     const n = new Date();
-    const today = n.toISOString().slice(0, 10);
+    const today = dateISO(n);
     const hh = String(n.getHours()).padStart(2, '0');
     const mm = String(n.getMinutes()).padStart(2, '0');
     const stamp = `${hh}:${mm}:00`;
@@ -6365,20 +6382,13 @@ const KioskScannerScreen = () => {
     return () => { cancelled = true; clearTimeout(handle); };
   }, [modelsReady, cameraReady, phase, faces, threshold, showMatchUI]);
 
-  // Legacy Simulate button — cycles through the mock queue regardless of
-  // enrolled faces. Useful for demos and when the camera is unavailable.
-  const triggerSimulate = () => {
-    if (phase !== 'idle') return;
-    const next = queue.current[queueIdx.current % queue.current.length];
-    queueIdx.current++;
-    setPhase('detecting');
-    setTimeout(() => showMatchUI(next), 600);
-  };
-
   const direction = current && clockedIn.has(current.id) ? 'out' : 'in';
   const hh = now.getHours() % 12 || 12;
   const mm = String(now.getMinutes()).padStart(2, '0');
   const ampm = now.getHours() >= 12 ? 'PM' : 'AM';
+
+  const dateLabel = now.toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: 'short' });
+  const matched = phase === 'matched' && current;
 
   return (
     <div style={{
@@ -6388,8 +6398,8 @@ const KioskScannerScreen = () => {
     }}>
       {/* Top bar */}
       <div style={{
-        padding: 'var(--screen-top-sm) 20px 16px', display: 'flex',
-        alignItems: 'flex-start', justifyContent: 'space-between',
+        padding: 'var(--screen-top-sm) 20px 14px', display: 'flex',
+        alignItems: 'flex-start', justifyContent: 'space-between', gap: 12,
       }}>
         <div>
           <div style={{
@@ -6401,174 +6411,212 @@ const KioskScannerScreen = () => {
             fontSize: 22, fontWeight: 500, marginTop: 2, letterSpacing: -0.4,
           }}>Attendance Kiosk</div>
         </div>
-        <div style={{ textAlign: 'right' }}>
-          <div style={{
-            fontFamily: 'Fraunces, Georgia, serif',
-            fontSize: 26, fontWeight: 500, letterSpacing: -0.6, lineHeight: 1,
-            fontFeatureSettings: '"tnum"',
-          }}>{hh}:{mm}</div>
-          <div style={{
-            fontSize: 10, color: 'rgba(255,255,255,0.45)',
-            letterSpacing: 0.6, marginTop: 4,
-          }}>{ampm} · Sat 18 Apr</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ textAlign: 'right' }}>
+            <div style={{
+              fontFamily: 'Fraunces, Georgia, serif',
+              fontSize: 26, fontWeight: 500, letterSpacing: -0.6, lineHeight: 1,
+              fontFeatureSettings: '"tnum"',
+            }}>{hh}:{mm}</div>
+            <div style={{
+              fontSize: 10, color: 'rgba(255,255,255,0.45)',
+              letterSpacing: 0.6, marginTop: 4,
+            }}>{ampm} · {dateLabel}</div>
+          </div>
+          {/* Flip camera — small icon button, only before a match */}
+          {!matched && (
+            <button
+              onClick={() => setFacingMode(m => m === 'user' ? 'environment' : 'user')}
+              aria-label="Flip camera"
+              title="Flip camera"
+              style={{
+                background: 'rgba(255,255,255,0.08)',
+                border: '1px solid rgba(255,255,255,0.15)', borderRadius: 10,
+                width: 38, height: 38, padding: 0,
+                color: 'rgba(255,255,255,0.85)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                cursor: 'pointer', flex: 'none',
+              }}
+            >
+              <Icon name="arrowRight" size={16} />
+            </button>
+          )}
         </div>
       </div>
 
       {/* Camera frame */}
-      <div style={{ flex: 1, padding: '0 20px', position: 'relative' }}>
+      <div style={{ flex: 1, padding: '0 20px', position: 'relative', minHeight: 0 }}>
         <KioskCameraFrame phase={phase} current={current} pulse={pulse}
           videoRef={videoRef} cameraErr={cameraErr} facingMode={facingMode}
           faceSeen={faceSeen}
           enrolledCount={faces.length ? new Set(faces.map(f => f.employee_id)).size : 0} />
       </div>
 
-      {/* Instruction + bilingual prompt / match confirm */}
-      <div style={{ padding: '16px 20px 8px', textAlign: 'center', minHeight: 88 }}>
-        {phase === 'idle' && (
-          <>
-            <div style={{
-              fontFamily: 'Fraunces, Georgia, serif',
-              fontSize: 22, fontWeight: 500, letterSpacing: -0.3, lineHeight: 1.2,
-            }}>Stand here &amp; look at the camera</div>
-            <div style={{ fontSize: 15, color: 'rgba(255,255,255,0.6)', marginTop: 6 }}>
-              கேமராவை நேராக பாருங்கள்
-            </div>
-          </>
-        )}
-        {phase === 'detecting' && (
-          <>
-            <div style={{
-              fontFamily: 'Fraunces, Georgia, serif',
-              fontSize: 20, fontWeight: 500, letterSpacing: -0.3, color: '#E8C65A',
-            }}>Face detected…</div>
-            <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.5)', marginTop: 6 }}>
-              முகம் கண்டறியப்பட்டது…
-            </div>
-          </>
-        )}
-        {phase === 'matching' && (
-          <>
-            <div style={{
-              fontFamily: 'Fraunces, Georgia, serif',
-              fontSize: 20, fontWeight: 500, letterSpacing: -0.3, color: '#E8C65A',
-            }}>Matching…</div>
-            <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.5)', marginTop: 6 }}>
-              அடையாளம் காண்கிறது…
-            </div>
-          </>
-        )}
-        {phase === 'matched' && current && (
-          <>
-            <KioskMatchedConfirm person={current} direction={direction} />
-            <div style={{
-              display: 'flex', flexDirection: 'column', gap: 10,
-              marginTop: 18, alignItems: 'stretch',
-            }}>
-              <button onClick={confirmMatch} style={{
-                background: '#0E7C3A', border: 'none', borderRadius: 16,
-                padding: '18px 22px', color: '#fff',
-                fontFamily: 'inherit', fontSize: 18, fontWeight: 700,
-                letterSpacing: 0.3, cursor: 'pointer',
-                display: 'inline-flex', alignItems: 'center',
-                justifyContent: 'center', gap: 10,
-                boxShadow: '0 12px 28px -10px rgba(14,124,58,0.55)',
-              }}>
-                <Icon name="check" size={22} color="#fff" />
-                {direction === 'in' ? 'Confirm clock in' : 'Confirm clock out'}
-              </button>
-              <button onClick={tryAgainMatch} style={{
-                background: 'rgba(255,255,255,0.06)',
-                border: '1px solid rgba(255,255,255,0.18)', borderRadius: 12,
-                padding: '10px 14px',
-                color: 'rgba(255,255,255,0.8)',
-                fontFamily: 'inherit', fontSize: 12.5, fontWeight: 600,
-                cursor: 'pointer', alignSelf: 'center',
-              }}>
-                Not me — try again
-              </button>
-            </div>
-          </>
-        )}
-      </div>
+      {/* Instruction label — only when NOT matched */}
+      {!matched && (
+        <div style={{ padding: '14px 20px 6px', textAlign: 'center', minHeight: 64 }}>
+          {phase === 'idle' && (
+            <>
+              <div style={{
+                fontFamily: 'Fraunces, Georgia, serif',
+                fontSize: 22, fontWeight: 500, letterSpacing: -0.3, lineHeight: 1.2,
+              }}>Stand here &amp; look at the camera</div>
+              <div style={{ fontSize: 15, color: 'rgba(255,255,255,0.6)', marginTop: 6 }}>
+                கேமராவை நேராக பாருங்கள்
+              </div>
+            </>
+          )}
+          {phase === 'detecting' && (
+            <>
+              <div style={{
+                fontFamily: 'Fraunces, Georgia, serif',
+                fontSize: 20, fontWeight: 500, letterSpacing: -0.3, color: '#E8C65A',
+              }}>Face detected…</div>
+              <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.5)', marginTop: 6 }}>
+                முகம் கண்டறியப்பட்டது…
+              </div>
+            </>
+          )}
+          {phase === 'matching' && (
+            <>
+              <div style={{
+                fontFamily: 'Fraunces, Georgia, serif',
+                fontSize: 20, fontWeight: 500, letterSpacing: -0.3, color: '#E8C65A',
+              }}>Matching…</div>
+              <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.5)', marginTop: 6 }}>
+                அடையாளம் காண்கிறது…
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
-      {/* Tally strip */}
-      <div style={{
-        margin: '12px 20px 0', padding: '12px 14px',
-        background: 'rgba(255,255,255,0.05)', borderRadius: 12,
-        border: '1px solid rgba(255,255,255,0.08)',
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-      }}>
-        <div>
-          <div style={{
-            fontSize: 9.5, letterSpacing: 1, textTransform: 'uppercase',
-            color: 'rgba(255,255,255,0.4)', fontWeight: 600,
-          }}>Today's check-ins</div>
-          <div style={{
-            fontFamily: 'Fraunces, Georgia, serif',
-            fontSize: 20, fontWeight: 500, marginTop: 2, letterSpacing: -0.4,
-            fontFeatureSettings: '"tnum"',
-          }}>
-            {clockedIn.size}<span style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)' }}> / {totalStaff || '—'}</span>
+      {/* Tally strip — only when NOT matched */}
+      {!matched && (
+        <div style={{
+          margin: '6px 20px 0', padding: '10px 14px',
+          background: 'rgba(255,255,255,0.05)', borderRadius: 12,
+          border: '1px solid rgba(255,255,255,0.08)',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        }}>
+          <div>
+            <div style={{
+              fontSize: 9.5, letterSpacing: 1, textTransform: 'uppercase',
+              color: 'rgba(255,255,255,0.4)', fontWeight: 600,
+            }}>Today's check-ins</div>
+            <div style={{
+              fontFamily: 'Fraunces, Georgia, serif',
+              fontSize: 20, fontWeight: 500, marginTop: 2, letterSpacing: -0.4,
+              fontFeatureSettings: '"tnum"',
+            }}>
+              {clockedIn.size}<span style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)' }}> / {totalStaff || '—'}</span>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {recent.slice(0, 4).map((r, i) => (
+              <div key={i} title={`${r.name} · clocked ${r.dir} at ${r.time}`}
+                style={{
+                  width: 28, height: 28, borderRadius: '50%',
+                  background: r.dir === 'in' ? 'rgba(14, 124, 58, 0.3)' : 'rgba(232, 198, 90, 0.25)',
+                  border: `1.5px solid ${r.dir === 'in' ? '#0E7C3A' : '#E8C65A'}`,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 10, fontWeight: 700, color: '#fff',
+                }}>
+                {r.name.split(' ').map(s => s[0]).slice(0, 2).join('')}
+              </div>
+            ))}
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 6 }}>
-          {recent.slice(0, 4).map((r, i) => (
-            <div key={i} title={`${r.name} · clocked ${r.dir} at ${r.time}`}
-              style={{
-                width: 28, height: 28, borderRadius: '50%',
-                background: r.dir === 'in' ? 'rgba(14, 124, 58, 0.3)' : 'rgba(232, 198, 90, 0.25)',
-                border: `1.5px solid ${r.dir === 'in' ? '#0E7C3A' : '#E8C65A'}`,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: 10, fontWeight: 700, color: '#fff',
-              }}>
-              {r.name.split(' ').map(s => s[0]).slice(0, 2).join('')}
-            </div>
-          ))}
-        </div>
-      </div>
+      )}
 
-      {/* Footer */}
-      <div style={{
-        padding: '14px 20px 24px', display: 'flex',
-        alignItems: 'center', justifyContent: 'space-between', gap: 10,
-      }}>
-        <button onClick={() => setShowExitPrompt(true)} style={{
-          background: 'none', border: '1px solid rgba(255,255,255,0.15)',
-          borderRadius: 10, padding: '8px 12px',
-          color: 'rgba(255,255,255,0.6)', fontSize: 11, fontWeight: 600,
-          fontFamily: 'inherit', cursor: 'pointer',
-          display: 'flex', alignItems: 'center', gap: 4,
+      {/* Footer — only when NOT matched. Just the Exit button, centered. */}
+      {!matched && (
+        <div style={{
+          padding: '12px 20px 24px', display: 'flex',
+          alignItems: 'center', justifyContent: 'center',
         }}>
-          <Icon name="close" size={12} /> Exit kiosk
-        </button>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button
-            onClick={() => setFacingMode(m => m === 'user' ? 'environment' : 'user')}
-            style={{
-              background: 'rgba(255,255,255,0.08)',
-              border: '1px solid rgba(255,255,255,0.15)', borderRadius: 10,
-              padding: '10px 14px',
-              color: 'rgba(255,255,255,0.85)', fontSize: 11, fontWeight: 600,
-              cursor: 'pointer', fontFamily: 'inherit', letterSpacing: 0.3,
-              display: 'flex', alignItems: 'center', gap: 6,
-            }}
-            title="Switch between front and back camera"
-          >
-            <Icon name="arrowRight" size={12} /> {facingMode === 'user' ? 'Back cam' : 'Front cam'}
-          </button>
-          <button onClick={triggerSimulate} disabled={phase !== 'idle'} style={{
-            background: phase === 'idle' ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.04)',
-            border: '1px solid rgba(255,255,255,0.15)', borderRadius: 10, padding: '10px 16px',
-            color: 'rgba(255,255,255,0.7)', fontSize: 11, fontWeight: 600,
-            cursor: phase === 'idle' ? 'pointer' : 'default',
-            fontFamily: 'inherit', letterSpacing: 0.3,
+          <button onClick={() => setShowExitPrompt(true)} style={{
+            background: 'none', border: '1px solid rgba(255,255,255,0.15)',
+            borderRadius: 10, padding: '10px 16px',
+            color: 'rgba(255,255,255,0.6)', fontSize: 12, fontWeight: 600,
+            fontFamily: 'inherit', cursor: 'pointer',
             display: 'flex', alignItems: 'center', gap: 6,
-            opacity: phase === 'idle' ? 1 : 0.4,
           }}>
-            <Icon name="sparkle" size={12} /> Simulate (demo)
+            <Icon name="close" size={14} /> Exit kiosk
           </button>
         </div>
-      </div>
+      )}
+
+      {/* Matched state — full-screen takeover so nothing can overlap. */}
+      {matched && (
+        <div style={{
+          position: 'absolute', inset: 0,
+          background: 'linear-gradient(180deg, rgba(11,13,14,0.96) 0%, rgba(8,28,18,0.98) 100%)',
+          backdropFilter: 'blur(10px)',
+          display: 'flex', flexDirection: 'column',
+          padding: 'calc(var(--screen-top-sm) + 12px) 22px 28px',
+          animation: 'kioskMatchIn 260ms ease-out',
+          zIndex: 20, overflow: 'hidden',
+        }}>
+          {/* Big success check */}
+          <div style={{ display: 'flex', justifyContent: 'center', marginTop: 20 }}>
+            <div style={{
+              width: 118, height: 118, borderRadius: '50%',
+              background: 'rgba(14, 124, 58, 0.25)', border: '3px solid #0E7C3A',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              boxShadow: '0 0 50px rgba(14, 124, 58, 0.55)',
+            }}>
+              <Icon name="check" size={60} color="#5BC47E" />
+            </div>
+          </div>
+
+          {/* Name block */}
+          <div style={{ textAlign: 'center', marginTop: 28 }}>
+            <div style={{
+              fontSize: 11, letterSpacing: 1.4, textTransform: 'uppercase',
+              color: '#5BC47E', fontWeight: 700,
+            }}>
+              {direction === 'in' ? 'Clocking in · உள்நுழைய' : 'Clocking out · வெளியேற'}
+            </div>
+            <div style={{
+              fontFamily: 'Fraunces, Georgia, serif',
+              fontSize: 34, fontWeight: 500, letterSpacing: -0.6, lineHeight: 1.1,
+              marginTop: 12,
+            }}>{current.name}</div>
+            <div style={{ fontSize: 15, color: 'rgba(255,255,255,0.65)', marginTop: 10 }}>
+              {[current.role, current.section && `${current.section} Section`, `${hh}:${mm}`]
+                .filter(Boolean).join(' · ')}
+            </div>
+          </div>
+
+          <div style={{ flex: 1 }} />
+
+          {/* Huge confirm button — designed to be easy to tap */}
+          <button onClick={confirmMatch} style={{
+            background: '#0E7C3A', border: 'none', borderRadius: 20,
+            padding: '24px 22px', color: '#fff',
+            fontFamily: 'inherit', fontSize: 21, fontWeight: 700,
+            letterSpacing: 0.4, cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12,
+            boxShadow: '0 16px 36px -14px rgba(14,124,58,0.7)',
+            width: '100%',
+          }}>
+            <Icon name="check" size={26} color="#fff" />
+            {direction === 'in' ? 'Confirm clock in' : 'Confirm clock out'}
+          </button>
+
+          {/* Not me — small link-style button */}
+          <button onClick={tryAgainMatch} style={{
+            background: 'none', border: 'none',
+            padding: '16px 14px',
+            color: 'rgba(255,255,255,0.6)', fontSize: 14, fontWeight: 600,
+            cursor: 'pointer', fontFamily: 'inherit',
+            width: '100%', textAlign: 'center', marginTop: 6,
+          }}>
+            Not me — try again · மீண்டும் முயற்சிக்க
+          </button>
+        </div>
+      )}
 
       {/* Exit PIN prompt */}
       {showExitPrompt && (
@@ -6766,28 +6814,6 @@ const KioskCameraFrame = ({ phase, current, pulse, videoRef, cameraErr, enrolled
   );
 };
 
-const KioskMatchedConfirm = ({ person, direction }) => {
-  const hh = new Date().getHours() % 12 || 12;
-  const mm = String(new Date().getMinutes()).padStart(2, '0');
-  return (
-    <div style={{ animation: 'kioskMatchIn 260ms ease-out' }}>
-      <div style={{
-        fontSize: 10, letterSpacing: 1.2, textTransform: 'uppercase',
-        color: '#5BC47E', fontWeight: 700, marginBottom: 6,
-      }}>
-        {direction === 'in' ? 'CLOCKED IN · உள்நுழைந்தார்' : 'CLOCKED OUT · வெளியேறினார்'}
-      </div>
-      <div style={{
-        fontFamily: 'Fraunces, Georgia, serif',
-        fontSize: 26, fontWeight: 500, letterSpacing: -0.5, lineHeight: 1.15,
-      }}>{person.name}</div>
-      <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.55)', marginTop: 6 }}>
-        {person.role} · {person.section} Section · {hh}:{mm}
-      </div>
-    </div>
-  );
-};
-
 window.KioskScannerScreen = KioskScannerScreen;
 
 
@@ -6838,7 +6864,7 @@ const EnrollJoinerScreen = () => {
         role:        details.role.trim(),
         section_id:  details.section,
         user_type:   'staff',
-        joined_date: new Date().toISOString().slice(0, 10),
+        joined_date: todayISO(),
       });
       if (empErr) {
         toast(empErr.message.includes('duplicate')
@@ -7788,7 +7814,7 @@ const ChecklistScreen = () => {
   const { nav, user, userId, userAccess, toast } = useApp();
   const T_ = window.TOKENS;
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayISO();
   const [rows, setRows]       = React.useState([]);
   const [loading, setLoading] = React.useState(true);
   const [editing, setEditing] = React.useState(null);
@@ -7798,7 +7824,7 @@ const ChecklistScreen = () => {
 
   // Only Owner/HR can assign checklist items to other people. Managers/
   // Supervisors can still add items to their own checklist.
-  const canAssignOthers = user === 'owner' || user === 'hr';
+  const canAssignOthers = user === 'owner' || user === 'admin' || user === 'hr';
 
   // Fetch today's checklist rows. For the user's 'Mine' view we filter
   // by assignee_id; admins' 'All I've assigned' view returns everyone's.
@@ -8184,8 +8210,8 @@ const fmtRupees = (n) => {
 const AdvancesScreen = () => {
   const { user, userId, toast, nav } = useApp();
   const T_ = window.TOKENS;
-  const canFile    = user === 'hr' || user === 'owner';
-  const canApprove = user === 'owner';
+  const canFile    = user === 'owner' || user === 'admin' || user === 'hr';
+  const canApprove = user === 'owner' || user === 'admin';
 
   const { items, loading, file, decide, cancel } = window.useLiveAdvances
     ? window.useLiveAdvances()
@@ -9186,7 +9212,7 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     advances:       '18 Advances',
   };
 
-  const isHrLike = user === 'hr' || user === 'owner';
+  const isHrLike = user === 'owner' || user === 'admin' || user === 'hr';
   const tabs = [
     { id: 'home',      icon: 'home',     label: lang === 'ta' ? 'முகப்பு' : 'Home' },
     ...(isHrLike ? [{ id: 'tools', icon: 'grid', label: lang === 'ta' ? 'கருவிகள்' : 'Tools' }] : []),
@@ -9316,11 +9342,20 @@ const REQUIRED = [
   'KioskScannerScreen','EnrollJoinerScreen','SettingsScreen','ProfileScreen','ChecklistScreen','ManagerHomeScreen','AdvancesScreen',
   'AppCtx','IOSDevice','TabBar','Toast','TOKENS','MOCK',
 ];
-const mountWhenReady = (attempts = 0) => {
+const mountWhenReady = async (attempts = 0) => {
   const missing = REQUIRED.filter(k => typeof window[k] === 'undefined');
   if (missing.length === 0) {
+    // Preload sections so labels are correct on first paint, then keep
+    // them fresh via the realtime channel.
+    try { await refreshSectionLabels(); } catch (_) {}
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(<RootApp />);
+    if (window.sb) {
+      window.sb.channel('pwa-sections')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'sections' },
+          () => refreshSectionLabels())
+        .subscribe();
+    }
   } else if (attempts < 200) {
     setTimeout(() => mountWhenReady(attempts + 1), 30);
   } else {

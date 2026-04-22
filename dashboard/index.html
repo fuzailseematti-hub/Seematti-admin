@@ -845,7 +845,7 @@ const App = () => {
               <h1>{visiblePage.label}</h1>
             </div>
             <div style={{ fontSize: 10, color: 'var(--inkFaint)', letterSpacing: 0.3, marginLeft: 'auto', alignSelf: 'flex-end' }}>
-              v2026-04-21-auth
+              v2026-04-22-sections-dd
             </div>
           </div>
           <div className="content">
@@ -879,12 +879,44 @@ const useToast = () => useContext(ToastCtx);
 // ──────────────────────────────────────────────────────────
 // Shared hooks (employees list + per-date attendance)
 // ──────────────────────────────────────────────────────────
-const SECTION_META = {
-  fancy:  { label: 'Fancy',  full: 'Fancy Section' },
-  cotton: { label: 'Cotton', full: 'Cotton Section' },
-  silk:   { label: 'Silk',   full: 'Silk Section' },
-  dhoti:  { label: 'Dhoti',  full: 'Dhoties & Shirting' },
+// Live section map — populated from the `sections` table at app boot
+// and kept fresh by a realtime channel subscribed inside mount().
+// UI code reads SECTION_META[id] just like before; components that
+// iterate the map to render dropdowns / filters should call
+// useLiveSections() so they re-render when sections change.
+const SECTION_META = {};
+const _sectionListeners = new Set();
+const refreshSectionMeta = async () => {
+  if (!window.sb) return;
+  const { data } = await window.sb.from('sections').select('*').order('sort_order');
+  for (const k of Object.keys(SECTION_META)) delete SECTION_META[k];
+  (data || []).forEach(s => {
+    SECTION_META[s.id] = {
+      label: s.name || s.id,
+      full:  s.name ? `${s.name} Section` : s.id,
+      monogram: s.monogram || null,
+      sort_order: s.sort_order ?? 0,
+      name_ta: s.name_ta || null,
+    };
+  });
+  _sectionListeners.forEach(fn => { try { fn(); } catch {} });
 };
+const useLiveSections = () => {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const fn = () => setTick(v => v + 1);
+    _sectionListeners.add(fn);
+    return () => { _sectionListeners.delete(fn); };
+  }, []);
+  return useMemo(
+    () => Object.entries(SECTION_META)
+      .map(([id, m]) => ({ id, ...m }))
+      .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)),
+    [tick]
+  );
+};
+window.SECTION_META = SECTION_META;
+window.refreshSectionMeta = refreshSectionMeta;
 
 // The three Seematti companies used on the Employees + Payslips pages.
 const COMPANIES = [
@@ -998,11 +1030,105 @@ const writeAttendance = async (employeeId, dateStr, uiStatus, existingInTime) =>
 // ──────────────────────────────────────────────────────────
 // Attendance page
 // ──────────────────────────────────────────────────────────
-const fmtDateISO = (d) => d.toISOString().slice(0, 10);
+// Use India/Kolkata timezone for attendance dates so a post-midnight IST
+// scan doesn't land on the previous UTC day.
+const fmtDateISO = (d) =>
+  new Date(d).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+const todayISO = () =>
+  new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+
+// Collapsible section picker — a single button that expands into a
+// dropdown list. Used wherever 13+ sections would otherwise wrap an
+// ugly row of chips. Closes when the Owner clicks outside or picks
+// a value.
+const SectionDropdown = ({ value, onChange, sectionsList, allLabel = 'All sections' }) => {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e) => {
+      if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [open]);
+
+  const options = useMemo(
+    () => [{ id: 'all', label: allLabel }, ...sectionsList.map(s => ({ id: s.id, label: s.label }))],
+    [sectionsList, allLabel]
+  );
+  const current = options.find(o => o.id === value) || options[0];
+
+  return (
+    <div ref={rootRef} style={{ position: 'relative', display: 'inline-block' }}>
+      <button
+        type="button"
+        className={'btn' + (value !== 'all' ? ' primary' : '')}
+        onClick={() => setOpen(v => !v)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        style={{
+          minWidth: 150, display: 'inline-flex', alignItems: 'center',
+          justifyContent: 'space-between', gap: 8,
+        }}
+      >
+        <span style={{
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          maxWidth: 200,
+        }}>
+          {current.label}
+        </span>
+        <span style={{ fontSize: 10, opacity: 0.7, transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 150ms' }}>
+          ▾
+        </span>
+      </button>
+      {open && (
+        <div
+          role="listbox"
+          style={{
+            position: 'absolute', top: 'calc(100% + 4px)', left: 0,
+            minWidth: 220, maxHeight: 340, overflowY: 'auto',
+            background: 'var(--surface)', border: '1px solid var(--border)',
+            borderRadius: 10, boxShadow: '0 10px 30px -10px rgba(0,0,0,0.2)',
+            zIndex: 40, padding: 4,
+          }}
+        >
+          {options.map(o => (
+            <button
+              key={o.id}
+              type="button"
+              role="option"
+              aria-selected={value === o.id}
+              onClick={() => { onChange(o.id); setOpen(false); }}
+              style={{
+                display: 'block', width: '100%', textAlign: 'left',
+                padding: '8px 12px', border: 'none',
+                background: value === o.id ? 'var(--accentSoft, rgba(14,124,58,0.1))' : 'transparent',
+                color: value === o.id ? 'var(--accent, #0E7C3A)' : 'var(--ink)',
+                fontWeight: value === o.id ? 600 : 500,
+                fontFamily: 'inherit',
+                borderRadius: 8, cursor: 'pointer', fontSize: 13.5,
+              }}
+              onMouseEnter={e => {
+                if (value !== o.id) e.currentTarget.style.background = 'var(--surfaceAlt, rgba(0,0,0,0.04))';
+              }}
+              onMouseLeave={e => {
+                if (value !== o.id) e.currentTarget.style.background = 'transparent';
+              }}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const AttendancePage = () => {
   const toast = useToast();
   const { can } = useContext(AppCtx);
+  const sectionsList = useLiveSections();
 
   const [date, setDate]     = useState(() => fmtDateISO(new Date()));
   const [section, setSection] = useState('all');
@@ -1115,16 +1241,11 @@ const AttendancePage = () => {
         <button className="btn" onClick={() => setDate(fmtDateISO(new Date()))}
           disabled={isToday}>Today</button>
 
-        <div className="seg">
-          {[{ id: 'all', label: 'All' }, ...Object.entries(SECTION_META).map(([k, v]) => ({ id: k, label: v.label }))]
-            .map(s => (
-              <button key={s.id}
-                className={section === s.id ? 'active' : ''}
-                onClick={() => setSection(s.id)}>
-                {s.label}
-              </button>
-            ))}
-        </div>
+        <SectionDropdown
+          value={section}
+          onChange={setSection}
+          sectionsList={sectionsList}
+        />
 
         <div className="seg">
           {[
@@ -1252,12 +1373,13 @@ const AttendancePage = () => {
 // ──────────────────────────────────────────────────────────
 // Employees page — directory with add / edit / deactivate / delete.
 // ──────────────────────────────────────────────────────────
-const TYPE_LABEL = { owner: 'Owner', hr: 'HR', staff: 'Staff' };
-const TYPE_TONE  = { owner: 'brand', hr: 'info', staff: 'gold' };
+const TYPE_LABEL = { owner: 'Owner', admin: 'Admin', hr: 'HR', staff: 'Staff' };
+const TYPE_TONE  = { owner: 'brand', admin: 'brand', hr: 'info', staff: 'gold' };
 
 const EmployeesPage = () => {
   const toast = useToast();
   const { can } = useContext(AppCtx);
+  const sectionsList = useLiveSections();
 
   const [search, setSearch] = useState('');
   const [section, setSection] = useState('all');
@@ -1361,7 +1483,7 @@ const EmployeesPage = () => {
 
   const startNew = () => setEditing({
     id: '', name: '', role: '', section_id: 'fancy',
-    user_type: 'staff', is_active: true, joined_date: new Date().toISOString().slice(0, 10),
+    user_type: 'staff', is_active: true, joined_date: todayISO(),
     phone: '', city: '',
     salary_type: 'new_joined', monthly_salary: '', hra: '', wa: '',
     tmb_account_no: '', esi_no: '', epf_no: '', uan_no: '',
@@ -1569,7 +1691,7 @@ const EmployeesPage = () => {
             name,
             user_type: 'staff',
             is_active: true,
-            joined_date: new Date().toISOString().slice(0, 10),
+            joined_date: todayISO(),
             section_id: 'fancy',
             ...fields,
           };
@@ -1852,7 +1974,7 @@ const EmployeesPage = () => {
                 <td>{r.role}</td>
                 <td>{SECTION_META[r.section_id]?.label || <span className="muted">—</span>}</td>
                 <td>
-                  <span className={`status-pill ${r.user_type === 'owner' ? 'present' : r.user_type === 'hr' ? 'leave' : 'unmarked'}`}
+                  <span className={`status-pill ${r.user_type === 'owner' || r.user_type === 'admin' ? 'present' : r.user_type === 'hr' ? 'leave' : 'unmarked'}`}
                     style={{ letterSpacing: 0.4 }}>
                     {TYPE_LABEL[r.user_type] || r.user_type}
                   </span>
@@ -1992,8 +2114,8 @@ const EmployeesPage = () => {
                   onChange={e => setEditing({ ...editing, section_id: e.target.value || null })}
                   disabled={editing.user_type !== 'staff'}>
                   <option value="">— none —</option>
-                  {Object.entries(SECTION_META).map(([k, v]) => (
-                    <option key={k} value={k}>{v.full}</option>
+                  {sectionsList.map(s => (
+                    <option key={s.id} value={s.id}>{s.full}</option>
                   ))}
                 </select>
               </div>
@@ -2703,7 +2825,7 @@ const fmtDateTime = (iso) => iso
 
 const LeavesPage = () => {
   const toast = useToast();
-  const { can, role } = useContext(AppCtx);
+  const { can, role, session } = useContext(AppCtx);
 
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -2750,7 +2872,10 @@ const LeavesPage = () => {
 
   useEffect(() => { setSelected(new Set()); }, [statusFilter, search]);
 
-  const deciderId = role === 'owner' ? 'E000' : 'E001';
+  // Use the actual logged-in user's employee_id for the audit trail.
+  // Bootstrap Owner sessions have no employee_id, so fall back to the
+  // legacy placeholder so the column is never null.
+  const deciderId = session?.employee_id || (role === 'owner' ? 'E000' : 'E001');
 
   const decide = async (id, action) => {
     if (!can('leaves', 'edit')) return;
@@ -2790,9 +2915,11 @@ const LeavesPage = () => {
     s.size === rows.length ? new Set() : new Set(rows.map(r => r.id)));
 
   const decidedByName = (id) => {
+    if (!id) return '—';
     if (id === 'E000') return 'Owner';
     if (id === 'E001') return 'HR';
-    return id || '—';
+    if (session?.employee_id === id && session?.display_name) return session.display_name;
+    return id;
   };
 
   return (
@@ -3146,7 +3273,9 @@ const AnnouncementsPage = () => {
   };
 
   const startNew = () => setEditing({
-    id: null, title: '', body: '', posted_by: role === 'owner' ? 'Owner' : 'HR', pinned: false,
+    id: null, title: '', body: '',
+    posted_by: role === 'owner' ? 'Owner' : role === 'admin' ? 'Admin' : 'HR',
+    pinned: false,
   });
   const startEdit = (row) => setEditing({ ...row });
   const close = () => setEditing(null);
@@ -3312,6 +3441,7 @@ const AnnouncementsPage = () => {
                   value={editing.posted_by}
                   onChange={e => setEditing({ ...editing, posted_by: e.target.value })}>
                   <option value="Owner">Owner</option>
+                  <option value="Admin">Admin</option>
                   <option value="HR">HR</option>
                 </select>
               </div>
@@ -4724,10 +4854,23 @@ const PayslipsPage = () => {
       return;
     }
     if (!missing.length) { toast(`All ${pool.length} employees already have a payslip this month`); return; }
-    if (!window.confirm(
-      `Generate ${missing.length} ${kind === 'esi_pf' ? 'ESI / PF' : 'new-joined'} payslip${missing.length === 1 ? '' : 's'} for ${monthLabel}?\n\n` +
-      `P.DAYS and L.DAYS are auto-filled from attendance (${PAID_LEAVE_BANK}-day paid-leave bank). You can edit each row after.`
-    )) return;
+
+    // Flag anyone with no attendance for the month — the default fallback
+    // would credit them with a full 30-day month, which is usually wrong
+    // for new joiners / people who never clocked in.
+    const noAttendance = missing.filter(e => !attendance[e.id]);
+    const kindLabel = kind === 'esi_pf' ? 'ESI / PF' : 'new-joined';
+
+    let confirmMsg = `Generate ${missing.length} ${kindLabel} payslip${missing.length === 1 ? '' : 's'} for ${monthLabel}?\n\n` +
+      `P.DAYS and L.DAYS are auto-filled from attendance (${PAID_LEAVE_BANK}-day paid-leave bank). You can edit each row after.`;
+
+    if (noAttendance.length) {
+      const preview = noAttendance.slice(0, 8).map(e => `• ${e.name}`).join('\n');
+      const extra   = noAttendance.length > 8 ? `\n…and ${noAttendance.length - 8} more` : '';
+      confirmMsg += `\n\n⚠ ${noAttendance.length} employee${noAttendance.length === 1 ? '' : 's'} ha${noAttendance.length === 1 ? 's' : 've'} NO attendance for ${monthLabel} — they will be credited with a full ${daysInMonth}-day month:\n${preview}${extra}\n\nClick OK to generate for all ${missing.length}, or Cancel to review attendance first.`;
+    }
+
+    if (!window.confirm(confirmMsg)) return;
     setBulkBusy(true);
     try {
       const payloads = [];
@@ -6016,6 +6159,7 @@ const ReportCard = ({ title, description, children }) => (
 const ReportsPage = () => {
   const toast = useToast();
   const { rows: employees } = useEmployees();
+  const sectionsList = useLiveSections();
   const empById = useMemo(() => {
     const m = {};
     employees.forEach(e => { m[e.id] = e; });
@@ -6205,7 +6349,7 @@ const ReportsPage = () => {
           <span style={{ fontSize: 12, color: 'var(--inkMuted)' }}>to</span>
           <input type="date" value={attTo} onChange={e => setAttTo(e.target.value)} />
           <div className="seg">
-            {[{ id: 'all', label: 'All sections' }, ...Object.entries(SECTION_META).map(([k, v]) => ({ id: k, label: v.label }))]
+            {[{ id: 'all', label: 'All sections' }, ...sectionsList.map(s => ({ id: s.id, label: s.label }))]
               .map(s => (
                 <button key={s.id}
                   className={attSection === s.id ? 'active' : ''}
@@ -6236,7 +6380,7 @@ const ReportsPage = () => {
           <input type="month" value={payMonth.slice(0, 7)}
             onChange={e => setPayMonth(e.target.value + '-01')} />
           <div className="seg">
-            {[{ id: 'all', label: 'All sections' }, ...Object.entries(SECTION_META).map(([k, v]) => ({ id: k, label: v.label }))]
+            {[{ id: 'all', label: 'All sections' }, ...sectionsList.map(s => ({ id: s.id, label: s.label }))]
               .map(s => (
                 <button key={s.id}
                   className={paySection === s.id ? 'active' : ''}
@@ -6746,6 +6890,57 @@ const KioskSettingsPage = () => {
         </div>
       </div>
 
+      {/* Dedicated kiosk phone — setup guide */}
+      <div style={{
+        background: 'var(--surface)', border: '1px solid var(--border)',
+        borderRadius: 16, padding: 24, marginBottom: 16,
+      }}>
+        <div style={{
+          fontFamily: 'Fraunces, Georgia, serif', fontSize: 20, fontWeight: 500,
+          letterSpacing: -0.3, marginBottom: 4,
+        }}>Set up a dedicated kiosk phone</div>
+        <div style={{ fontSize: 13, color: 'var(--inkMuted)', marginBottom: 16 }}>
+          Turn any phone or tablet into the attendance kiosk at the staff entrance. Once the phone enters kiosk mode, it stays in kiosk mode even after reboot — only someone with the PIN above can exit it.
+        </div>
+
+        <ol style={{ fontSize: 13.5, lineHeight: 1.65, color: 'var(--inkSoft)', paddingLeft: 20, margin: 0 }}>
+          <li style={{ marginBottom: 10 }}>
+            On the kiosk phone, open a browser (Safari on iPhone, Chrome on Android) and go to the <strong>staff app URL</strong> — the same link you use on your own phone.
+          </li>
+          <li style={{ marginBottom: 10 }}>
+            <strong>Install to home screen</strong> so it looks like an app (no browser bar):
+            <ul style={{ marginTop: 4, paddingLeft: 18 }}>
+              <li><em>iPhone</em>: tap Share → "Add to Home Screen".</li>
+              <li><em>Android</em>: tap menu (⋮) → "Install app" or "Add to Home screen".</li>
+            </ul>
+          </li>
+          <li style={{ marginBottom: 10 }}>
+            Open the new app icon. Log in with an <strong>Owner</strong> or <strong>HR</strong> account, then go to <strong>HR Tools → Kiosk scanner</strong>, enter the Kiosk PIN, and the kiosk screen opens.
+          </li>
+          <li style={{ marginBottom: 10 }}>
+            Allow the camera when the phone asks. The kiosk will remember the permission from here on.
+          </li>
+          <li style={{ marginBottom: 10 }}>
+            The phone is now "locked" to the kiosk — if staff close the app or the phone reboots, opening the app takes them straight back to the kiosk screen. The only way out is the Exit kiosk button + PIN.
+          </li>
+          <li style={{ marginBottom: 10 }}>
+            To stop staff from leaving the kiosk app entirely (swiping home, opening other apps), turn on the phone's built-in kiosk mode:
+            <ul style={{ marginTop: 4, paddingLeft: 18 }}>
+              <li><em>iPhone</em>: Settings → Accessibility → <strong>Guided Access</strong> → turn on. Then open the kiosk app and triple-click the side button to lock it.</li>
+              <li><em>Android</em>: Settings → Security → <strong>Screen pinning</strong> (or "App pinning") → turn on. Open the kiosk app, open Recents, and pin it.</li>
+            </ul>
+          </li>
+        </ol>
+
+        <div style={{
+          marginTop: 16, padding: 12, borderRadius: 10,
+          background: 'var(--surfaceAlt)', border: '1px solid var(--border)',
+          fontSize: 12.5, color: 'var(--inkSoft)',
+        }}>
+          <strong>Tip</strong>: Plug the kiosk phone into a charger at the entrance so it never runs out of battery. Set Auto-Lock to "Never" (iPhone: Settings → Display & Brightness; Android: Settings → Display → Screen timeout) so the screen stays on.
+        </div>
+      </div>
+
       {/* Partials list + danger zone */}
       <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 24, marginBottom: 16 }}>
         <div style={{
@@ -7013,6 +7208,7 @@ const TeamAccessPage = () => {
 
   const sectionLabel = (id) => sections.find(s => s.id === id)?.name || id;
   const roleLabel = (r) => r === 'owner' ? 'Owner'
+                       : r === 'admin' ? 'Admin'
                        : r === 'hr' ? 'HR'
                        : r === 'manager' ? 'Manager'
                        : r === 'supervisor' ? 'Supervisor'
@@ -7023,6 +7219,7 @@ const TeamAccessPage = () => {
       <div className="stat-strip">
         <div className="stat"><div className="k">Login users</div><div className="v">{access.length}</div></div>
         <div className="stat present"><div className="k">Owners</div><div className="v">{access.filter(a => a.employees.user_type === 'owner').length}</div></div>
+        <div className="stat present"><div className="k">Admins</div><div className="v">{access.filter(a => a.employees.user_type === 'admin').length}</div></div>
         <div className="stat leave"><div className="k">HR</div><div className="v">{access.filter(a => a.employees.user_type === 'hr').length}</div></div>
         <div className="stat late"><div className="k">Managers</div><div className="v">{access.filter(a => a.employees.user_type === 'manager').length}</div></div>
         <div className="stat"><div className="k">Supervisors</div><div className="v">{access.filter(a => a.employees.user_type === 'supervisor').length}</div></div>
@@ -7083,7 +7280,7 @@ const TeamAccessPage = () => {
                     </div>
                   </td>
                   <td>
-                    <span className={`status-pill ${e.user_type === 'owner' ? 'present' : e.user_type === 'hr' ? 'leave' : e.user_type === 'manager' ? 'late' : 'unmarked'}`}>
+                    <span className={`status-pill ${e.user_type === 'owner' || e.user_type === 'admin' ? 'present' : e.user_type === 'hr' ? 'leave' : e.user_type === 'manager' ? 'late' : 'unmarked'}`}>
                       {roleLabel(e.user_type)}
                     </span>
                   </td>
@@ -7287,7 +7484,7 @@ const ADV_STATUS_TONE = {
 
 const AdvancesPage = () => {
   const toast = useToast();
-  const { role, can } = useContext(AppCtx);
+  const { role, can, session } = useContext(AppCtx);
   const canDecide = role === 'owner';
 
   const [rows, setRows] = useState([]);
@@ -7377,7 +7574,7 @@ const AdvancesPage = () => {
         months_total: months,
         reason: (filing.reason || '').trim() || null,
         status: 'pending',
-        filed_by: localStorage.getItem('seematti_admin_role_userid') || null,
+        filed_by: session?.employee_id || null,
       });
       toast('Advance request filed');
       setFiling(null);
@@ -7406,6 +7603,7 @@ const AdvancesPage = () => {
       const patch = {
         status: action,
         decided_at: new Date().toISOString(),
+        decided_by: session?.employee_id || null,
         owner_note: (detail._note || '').trim() || null,
       };
       if (action === 'approved') {
@@ -7983,9 +8181,19 @@ const Root = () => {
   return <ToastHost><App /></ToastHost>;
 };
 
-const mount = (attempts = 0) => {
+const mount = async (attempts = 0) => {
   if (window.React && window.ReactDOM && window.supabase) {
+    // Preload sections so the first render already knows every section's
+    // name, not just the four hardcoded ones.
+    try { await refreshSectionMeta(); } catch (_) {}
     ReactDOM.createRoot(document.getElementById('root')).render(<Root />);
+    // Keep the map fresh when the Owner adds / renames / reorders a section.
+    if (window.sb) {
+      window.sb.channel('global-sections')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'sections' },
+          () => refreshSectionMeta())
+        .subscribe();
+    }
   } else if (attempts < 100) {
     setTimeout(() => mount(attempts + 1), 30);
   }
