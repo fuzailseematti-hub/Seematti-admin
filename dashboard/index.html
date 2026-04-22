@@ -4737,10 +4737,23 @@ const PayslipsPage = () => {
       return;
     }
     if (!missing.length) { toast(`All ${pool.length} employees already have a payslip this month`); return; }
-    if (!window.confirm(
-      `Generate ${missing.length} ${kind === 'esi_pf' ? 'ESI / PF' : 'new-joined'} payslip${missing.length === 1 ? '' : 's'} for ${monthLabel}?\n\n` +
-      `P.DAYS and L.DAYS are auto-filled from attendance (${PAID_LEAVE_BANK}-day paid-leave bank). You can edit each row after.`
-    )) return;
+
+    // Flag anyone with no attendance for the month — the default fallback
+    // would credit them with a full 30-day month, which is usually wrong
+    // for new joiners / people who never clocked in.
+    const noAttendance = missing.filter(e => !attendance[e.id]);
+    const kindLabel = kind === 'esi_pf' ? 'ESI / PF' : 'new-joined';
+
+    let confirmMsg = `Generate ${missing.length} ${kindLabel} payslip${missing.length === 1 ? '' : 's'} for ${monthLabel}?\n\n` +
+      `P.DAYS and L.DAYS are auto-filled from attendance (${PAID_LEAVE_BANK}-day paid-leave bank). You can edit each row after.`;
+
+    if (noAttendance.length) {
+      const preview = noAttendance.slice(0, 8).map(e => `• ${e.name}`).join('\n');
+      const extra   = noAttendance.length > 8 ? `\n…and ${noAttendance.length - 8} more` : '';
+      confirmMsg += `\n\n⚠ ${noAttendance.length} employee${noAttendance.length === 1 ? '' : 's'} ha${noAttendance.length === 1 ? 's' : 've'} NO attendance for ${monthLabel} — they will be credited with a full ${daysInMonth}-day month:\n${preview}${extra}\n\nClick OK to generate for all ${missing.length}, or Cancel to review attendance first.`;
+    }
+
+    if (!window.confirm(confirmMsg)) return;
     setBulkBusy(true);
     try {
       const payloads = [];
