@@ -961,7 +961,7 @@ const useLiveAttendance = () => {
 
   const fetchAll = React.useCallback(async () => {
     if (!window.sb) return;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
 
     const [secRes, staffCountRes, attRes] = await Promise.all([
       window.sb
@@ -1043,6 +1043,18 @@ const fmtTime = (t) => {
   return `${hh}:${m}`;
 };
 
+// Attendance is keyed by the store's calendar day (India/Kolkata).
+// Using toISOString().slice(0,10) would give the UTC date, so a late-
+// evening IST scan (e.g. 11 PM IST) would still work but a post-midnight
+// IST scan (12:30 AM) would land on the previous UTC date — breaking the
+// day's tally. Pin to Asia/Kolkata so the date boundary matches the shop.
+const todayISO = () =>
+  new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+const dateISO = (d) =>
+  new Date(d).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+window.todayISO = todayISO;
+window.dateISO = dateISO;
+
 const DB_TO_UI = { present: 'present', late: 'late', absent: 'absent', on_leave: 'leave' };
 const UI_TO_DB = { present: 'present', late: 'late', absent: 'absent', leave:  'on_leave' };
 
@@ -1052,7 +1064,7 @@ const useLiveRoster = () => {
 
   const fetchAll = React.useCallback(async () => {
     if (!window.sb) return;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
 
     const { data: emp } = await window.sb
       .from('employees')
@@ -1103,7 +1115,7 @@ const useLiveRoster = () => {
   // Persist a status change to Supabase (upsert one row).
   const setStatus = React.useCallback(async (employeeId, uiStatus, markedBy) => {
     if (!window.sb) return;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
     const dbStatus = UI_TO_DB[uiStatus];
     const now = new Date();
     const hh = String(now.getHours()).padStart(2, '0');
@@ -1138,7 +1150,7 @@ const useLiveRoster = () => {
   // Bulk mark all pending employees (no attendance row today) as present.
   const markAllPresent = React.useCallback(async (predicate, markedBy) => {
     if (!window.sb) return 0;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
     const now = new Date();
     const hh = String(now.getHours()).padStart(2, '0');
     const mm = String(now.getMinutes()).padStart(2, '0');
@@ -1324,7 +1336,7 @@ const useLiveTasks = ({ scope, assigneeId } = {}) => {
 
   const fetchAll = React.useCallback(async () => {
     if (!window.sb) return;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
     let q = window.sb
       .from('tasks')
       .select('id, scope, assignee_id, label, owner_label, done, priority, sort_order, due_date')
@@ -1541,7 +1553,7 @@ const useLiveStaffEmployee = (employeeId) => {
 
   const fetchAll = React.useCallback(async () => {
     if (!window.sb || !employeeId) return;
-    const dateStr = new Date().toISOString().slice(0, 10);
+    const dateStr = todayISO();
     const [empRes, attRes] = await Promise.all([
       window.sb.from('employees').select('id, name, role, section_id, joined_date, user_type').eq('id', employeeId).maybeSingle(),
       window.sb.from('attendance').select('status, punch_in_time, punch_out_time').eq('employee_id', employeeId).eq('date', dateStr).maybeSingle(),
@@ -1570,7 +1582,7 @@ const useLiveStaffEmployee = (employeeId) => {
     const mm = String(now.getMinutes()).padStart(2, '0');
     await window.sb.from('attendance').upsert({
       employee_id: employeeId,
-      date:        now.toISOString().slice(0, 10),
+      date:        dateISO(now),
       status:      now.getHours() >= 10 ? 'late' : 'present',
       punch_in_time: `${hh}:${mm}:00`,
       source:      'self',
@@ -1585,7 +1597,7 @@ const useLiveStaffEmployee = (employeeId) => {
     await window.sb.from('attendance')
       .update({ punch_out_time: `${hh}:${mm}:00` })
       .eq('employee_id', employeeId)
-      .eq('date', now.toISOString().slice(0, 10));
+      .eq('date', dateISO(now));
   }, [employeeId, today]);
 
   return { employee, today, loading, punchIn, punchOut };
@@ -1610,8 +1622,8 @@ const useLiveHRStats = () => {
     const today = new Date();
     const weekAgo = new Date(today);
     weekAgo.setDate(today.getDate() - 7);
-    const todayStr   = today.toISOString().slice(0, 10);
-    const weekAgoStr = weekAgo.toISOString().slice(0, 10);
+    const todayStr   = dateISO(today);
+    const weekAgoStr = dateISO(weekAgo);
 
     const [joinersRes, lateRes, absentRes, lastJoinerRes] = await Promise.all([
       // New joiners (last 7 days)
@@ -3103,7 +3115,7 @@ const AttendanceScreen = () => {
 
   // Section scoping — owner/hr/all_sections see everyone; manager/supervisor
   // see only their assigned sections.
-  const isAdmin = user === 'owner' || user === 'hr';
+  const isAdmin = user === 'owner' || user === 'admin' || user === 'hr';
   const hasAll = isAdmin || !!(userAccess && userAccess.all_sections);
   const allowed = hasAll ? null : (userAccess?.section_ids || []);
 
@@ -3298,7 +3310,7 @@ const RosterRow = ({ row, last, sectionLabel, onOpen }) => {
 const EmployeeDetailSheet = ({ employeeId, onClose }) => {
   const { user, toast } = useApp();
   const T_ = window.TOKENS;
-  const canEdit = user === 'owner' || user === 'hr';
+  const canEdit = user === 'owner' || user === 'admin' || user === 'hr';
 
   const [emp, setEmp] = React.useState(null);
   const [faceCount, setFaceCount] = React.useState(0);
@@ -3799,12 +3811,12 @@ const LeavesScreen = () => {
     : { items: [], loading: false, decide: async () => {} };
   const [active, setActive] = React.useState(null);
 
-  const isAdmin = user === 'owner' || user === 'hr';
+  const isAdmin = user === 'owner' || user === 'admin' || user === 'hr';
   const hasAll = isAdmin || !!(userAccess && userAccess.all_sections);
   const allowed = hasAll ? null : (userAccess?.section_ids || []);
   // Approval is owner/hr-only by policy. Managers + Supervisors can
   // submit leave requests (via Apply Leave) but cannot approve them.
-  const canApprove = user === 'owner' || user === 'hr';
+  const canApprove = user === 'owner' || user === 'admin' || user === 'hr';
 
   // Manager/Supervisor see their sections' requests + always their own.
   const items = allItems.filter(r =>
@@ -4006,7 +4018,7 @@ const ApplyLeaveScreen = () => {
   }, [userId, employeeId]);
 
   // Pool of employees the user can file a leave for.
-  const isAdmin = user === 'owner' || user === 'hr';
+  const isAdmin = user === 'owner' || user === 'admin' || user === 'hr';
   const hasAll  = isAdmin || !!(userAccess && userAccess.all_sections);
   const allowed = hasAll ? null : (userAccess?.section_ids || []);
 
@@ -4046,7 +4058,7 @@ const ApplyLeaveScreen = () => {
         employeeId,
         type,
         days,
-        fromDate: fromDate.toISOString().slice(0, 10),
+        fromDate: dateISO(fromDate),
         reason: reason.trim(),
       });
       toast(employeeId === userId
@@ -4175,9 +4187,9 @@ const TasksScreen = () => {
   // Only Owner + HR can assign tasks to other people. Managers / Supervisors
   // — even ones with can_manage_tasks (which gates the Checklist tab) —
   // can only create tasks for themselves on this screen.
-  const canManage = user === 'owner' || user === 'hr';
+  const canManage = user === 'owner' || user === 'admin' || user === 'hr';
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayISO();
   const [tasks, setTasks]     = React.useState([]);
   const [loading, setLoading] = React.useState(true);
   const [mode, setMode]       = React.useState('mine'); // 'mine' | 'assigned' (admins only)
@@ -4707,7 +4719,7 @@ const AnnouncementsScreen = () => {
     ? window.useLiveAnnouncements()
     : { items: [], loading: false };
   const rows = items.length ? items : M.announcements;
-  const canPost = user === 'owner' || user === 'hr' ||
+  const canPost = user === 'owner' || user === 'admin' || user === 'hr' ||
     (userAccess && userAccess.can_post_announcements);
 
   const post = async () => {
@@ -4719,7 +4731,7 @@ const AnnouncementsScreen = () => {
       .from('announcements')
       .insert({
         title: title.trim(),
-        posted_by: user === 'owner' ? 'Owner' : 'HR',
+        posted_by: user === 'owner' ? 'Owner' : user === 'admin' ? 'Admin' : 'HR',
         pinned,
       });
     toast('Announcement posted');
@@ -4901,7 +4913,7 @@ const HRHomeScreen = () => {
   const T_ = window.TOKENS;
   const M = window.MOCK;
 
-  const isAdmin = user === 'owner' || user === 'hr';
+  const isAdmin = user === 'owner' || user === 'admin' || user === 'hr';
   const hasAll  = isAdmin || !!(userAccess && userAccess.all_sections);
   const allowed = hasAll ? null : (userAccess?.section_ids || []);
 
@@ -5272,7 +5284,7 @@ const HRToolsScreen = () => {
   const T_ = window.TOKENS;
   const M = window.MOCK;
 
-  const isAdmin = user === 'owner' || user === 'hr';
+  const isAdmin = user === 'owner' || user === 'admin' || user === 'hr';
   const hasAll  = isAdmin || !!(userAccess && userAccess.all_sections);
   const allowed = hasAll ? null : (userAccess?.section_ids || []);
 
@@ -5450,7 +5462,7 @@ const ManagerHomeScreen = () => {
   const pct = totals.total ? Math.round((totals.present / totals.total) * 100) : 0;
 
   // Today's checklist progress (scoped to the user's sections + company-wide)
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayISO();
   const [chk, setChk]   = React.useState({ total: 0, done: 0 });
   const [tsk, setTsk]   = React.useState({ total: 0, done: 0 });
 
@@ -5797,12 +5809,12 @@ const MarkAttendanceScreen = () => {
     ? window.useLiveRoster()
     : { roster: [], loading: false, setStatus: async () => {}, markAllPresent: async () => 0 };
 
-  const isAdmin = user === 'owner' || user === 'hr';
+  const isAdmin = user === 'owner' || user === 'admin' || user === 'hr';
   const hasAll  = isAdmin || !!(userAccess && userAccess.all_sections);
   const allowed = hasAll ? null : (userAccess?.section_ids || []);
   // Marking attendance is owner/hr-only by policy. Managers/Supervisors
   // see the roster read-only.
-  const canEdit = user === 'owner' || user === 'hr';
+  const canEdit = user === 'owner' || user === 'admin' || user === 'hr';
 
   // Scope the roster down to the user's sections.
   const roster = fullRoster.filter(r => hasAll || allowed.includes(r.section));
@@ -6176,7 +6188,7 @@ const KioskScannerScreen = () => {
   // and keep them fresh via the realtime subscription.
   React.useEffect(() => {
     if (!window.sb) return;
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
     const fetchLive = async () => {
       const { data } = await window.sb
         .from('attendance')
@@ -6212,9 +6224,13 @@ const KioskScannerScreen = () => {
       const { data } = await window.sb
         .from('face_embeddings')
         .select('employee_id, pose, embedding, employees(name, role, section_id, is_active)');
-      // Only keep active staff.
-      const active = (data || []).filter(r => r.employees?.is_active !== false);
-      setFaces(active);
+      // Only keep active staff with a usable embedding. Partial enrollments
+      // (embedding IS NULL) would throw inside cosineSim and break matching
+      // for everyone.
+      const usable = (data || []).filter(r =>
+        r.employees?.is_active !== false && Array.isArray(r.embedding) && r.embedding.length > 0
+      );
+      setFaces(usable);
     };
     const fetchMeta = async () => {
       const [{ count }, { data: set }] = await Promise.all([
@@ -6250,7 +6266,7 @@ const KioskScannerScreen = () => {
   const persistScan = async (emp, dir) => {
     if (!window.sb) return;
     const n = new Date();
-    const today = n.toISOString().slice(0, 10);
+    const today = dateISO(n);
     const hh = String(n.getHours()).padStart(2, '0');
     const mm = String(n.getMinutes()).padStart(2, '0');
     const stamp = `${hh}:${mm}:00`;
@@ -6837,7 +6853,7 @@ const EnrollJoinerScreen = () => {
         role:        details.role.trim(),
         section_id:  details.section,
         user_type:   'staff',
-        joined_date: new Date().toISOString().slice(0, 10),
+        joined_date: todayISO(),
       });
       if (empErr) {
         toast(empErr.message.includes('duplicate')
@@ -7787,7 +7803,7 @@ const ChecklistScreen = () => {
   const { nav, user, userId, userAccess, toast } = useApp();
   const T_ = window.TOKENS;
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayISO();
   const [rows, setRows]       = React.useState([]);
   const [loading, setLoading] = React.useState(true);
   const [editing, setEditing] = React.useState(null);
@@ -7797,7 +7813,7 @@ const ChecklistScreen = () => {
 
   // Only Owner/HR can assign checklist items to other people. Managers/
   // Supervisors can still add items to their own checklist.
-  const canAssignOthers = user === 'owner' || user === 'hr';
+  const canAssignOthers = user === 'owner' || user === 'admin' || user === 'hr';
 
   // Fetch today's checklist rows. For the user's 'Mine' view we filter
   // by assignee_id; admins' 'All I've assigned' view returns everyone's.
@@ -8183,8 +8199,8 @@ const fmtRupees = (n) => {
 const AdvancesScreen = () => {
   const { user, userId, toast, nav } = useApp();
   const T_ = window.TOKENS;
-  const canFile    = user === 'hr' || user === 'owner';
-  const canApprove = user === 'owner';
+  const canFile    = user === 'owner' || user === 'admin' || user === 'hr';
+  const canApprove = user === 'owner' || user === 'admin';
 
   const { items, loading, file, decide, cancel } = window.useLiveAdvances
     ? window.useLiveAdvances()
@@ -9185,7 +9201,7 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     advances:       '18 Advances',
   };
 
-  const isHrLike = user === 'hr' || user === 'owner';
+  const isHrLike = user === 'owner' || user === 'admin' || user === 'hr';
   const tabs = [
     { id: 'home',      icon: 'home',     label: lang === 'ta' ? 'முகப்பு' : 'Home' },
     ...(isHrLike ? [{ id: 'tools', icon: 'grid', label: lang === 'ta' ? 'கருவிகள்' : 'Tools' }] : []),

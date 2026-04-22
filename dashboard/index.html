@@ -998,7 +998,12 @@ const writeAttendance = async (employeeId, dateStr, uiStatus, existingInTime) =>
 // ──────────────────────────────────────────────────────────
 // Attendance page
 // ──────────────────────────────────────────────────────────
-const fmtDateISO = (d) => d.toISOString().slice(0, 10);
+// Use India/Kolkata timezone for attendance dates so a post-midnight IST
+// scan doesn't land on the previous UTC day.
+const fmtDateISO = (d) =>
+  new Date(d).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+const todayISO = () =>
+  new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 
 const AttendancePage = () => {
   const toast = useToast();
@@ -1361,7 +1366,7 @@ const EmployeesPage = () => {
 
   const startNew = () => setEditing({
     id: '', name: '', role: '', section_id: 'fancy',
-    user_type: 'staff', is_active: true, joined_date: new Date().toISOString().slice(0, 10),
+    user_type: 'staff', is_active: true, joined_date: todayISO(),
     phone: '', city: '',
     salary_type: 'new_joined', monthly_salary: '', hra: '', wa: '',
     tmb_account_no: '', esi_no: '', epf_no: '', uan_no: '',
@@ -1569,7 +1574,7 @@ const EmployeesPage = () => {
             name,
             user_type: 'staff',
             is_active: true,
-            joined_date: new Date().toISOString().slice(0, 10),
+            joined_date: todayISO(),
             section_id: 'fancy',
             ...fields,
           };
@@ -2703,7 +2708,7 @@ const fmtDateTime = (iso) => iso
 
 const LeavesPage = () => {
   const toast = useToast();
-  const { can, role } = useContext(AppCtx);
+  const { can, role, session } = useContext(AppCtx);
 
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -2750,7 +2755,10 @@ const LeavesPage = () => {
 
   useEffect(() => { setSelected(new Set()); }, [statusFilter, search]);
 
-  const deciderId = role === 'owner' ? 'E000' : 'E001';
+  // Use the actual logged-in user's employee_id for the audit trail.
+  // Bootstrap Owner sessions have no employee_id, so fall back to the
+  // legacy placeholder so the column is never null.
+  const deciderId = session?.employee_id || (role === 'owner' ? 'E000' : 'E001');
 
   const decide = async (id, action) => {
     if (!can('leaves', 'edit')) return;
@@ -2790,9 +2798,11 @@ const LeavesPage = () => {
     s.size === rows.length ? new Set() : new Set(rows.map(r => r.id)));
 
   const decidedByName = (id) => {
+    if (!id) return '—';
     if (id === 'E000') return 'Owner';
     if (id === 'E001') return 'HR';
-    return id || '—';
+    if (session?.employee_id === id && session?.display_name) return session.display_name;
+    return id;
   };
 
   return (
@@ -3146,7 +3156,9 @@ const AnnouncementsPage = () => {
   };
 
   const startNew = () => setEditing({
-    id: null, title: '', body: '', posted_by: role === 'owner' ? 'Owner' : 'HR', pinned: false,
+    id: null, title: '', body: '',
+    posted_by: role === 'owner' ? 'Owner' : role === 'admin' ? 'Admin' : 'HR',
+    pinned: false,
   });
   const startEdit = (row) => setEditing({ ...row });
   const close = () => setEditing(null);
@@ -3312,6 +3324,7 @@ const AnnouncementsPage = () => {
                   value={editing.posted_by}
                   onChange={e => setEditing({ ...editing, posted_by: e.target.value })}>
                   <option value="Owner">Owner</option>
+                  <option value="Admin">Admin</option>
                   <option value="HR">HR</option>
                 </select>
               </div>
@@ -7340,7 +7353,7 @@ const ADV_STATUS_TONE = {
 
 const AdvancesPage = () => {
   const toast = useToast();
-  const { role, can } = useContext(AppCtx);
+  const { role, can, session } = useContext(AppCtx);
   const canDecide = role === 'owner';
 
   const [rows, setRows] = useState([]);
@@ -7430,7 +7443,7 @@ const AdvancesPage = () => {
         months_total: months,
         reason: (filing.reason || '').trim() || null,
         status: 'pending',
-        filed_by: localStorage.getItem('seematti_admin_role_userid') || null,
+        filed_by: session?.employee_id || null,
       });
       toast('Advance request filed');
       setFiling(null);
@@ -7459,6 +7472,7 @@ const AdvancesPage = () => {
       const patch = {
         status: action,
         decided_at: new Date().toISOString(),
+        decided_by: session?.employee_id || null,
         owner_note: (detail._note || '').trim() || null,
       };
       if (action === 'approved') {
