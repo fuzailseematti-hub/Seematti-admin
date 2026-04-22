@@ -879,12 +879,44 @@ const useToast = () => useContext(ToastCtx);
 // ──────────────────────────────────────────────────────────
 // Shared hooks (employees list + per-date attendance)
 // ──────────────────────────────────────────────────────────
-const SECTION_META = {
-  fancy:  { label: 'Fancy',  full: 'Fancy Section' },
-  cotton: { label: 'Cotton', full: 'Cotton Section' },
-  silk:   { label: 'Silk',   full: 'Silk Section' },
-  dhoti:  { label: 'Dhoti',  full: 'Dhoties & Shirting' },
+// Live section map — populated from the `sections` table at app boot
+// and kept fresh by a realtime channel subscribed inside mount().
+// UI code reads SECTION_META[id] just like before; components that
+// iterate the map to render dropdowns / filters should call
+// useLiveSections() so they re-render when sections change.
+const SECTION_META = {};
+const _sectionListeners = new Set();
+const refreshSectionMeta = async () => {
+  if (!window.sb) return;
+  const { data } = await window.sb.from('sections').select('*').order('sort_order');
+  for (const k of Object.keys(SECTION_META)) delete SECTION_META[k];
+  (data || []).forEach(s => {
+    SECTION_META[s.id] = {
+      label: s.name || s.id,
+      full:  s.name ? `${s.name} Section` : s.id,
+      monogram: s.monogram || null,
+      sort_order: s.sort_order ?? 0,
+      name_ta: s.name_ta || null,
+    };
+  });
+  _sectionListeners.forEach(fn => { try { fn(); } catch {} });
 };
+const useLiveSections = () => {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const fn = () => setTick(v => v + 1);
+    _sectionListeners.add(fn);
+    return () => { _sectionListeners.delete(fn); };
+  }, []);
+  return useMemo(
+    () => Object.entries(SECTION_META)
+      .map(([id, m]) => ({ id, ...m }))
+      .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0)),
+    [tick]
+  );
+};
+window.SECTION_META = SECTION_META;
+window.refreshSectionMeta = refreshSectionMeta;
 
 // The three Seematti companies used on the Employees + Payslips pages.
 const COMPANIES = [
@@ -1008,6 +1040,7 @@ const todayISO = () =>
 const AttendancePage = () => {
   const toast = useToast();
   const { can } = useContext(AppCtx);
+  const sectionsList = useLiveSections();
 
   const [date, setDate]     = useState(() => fmtDateISO(new Date()));
   const [section, setSection] = useState('all');
@@ -1121,7 +1154,7 @@ const AttendancePage = () => {
           disabled={isToday}>Today</button>
 
         <div className="seg">
-          {[{ id: 'all', label: 'All' }, ...Object.entries(SECTION_META).map(([k, v]) => ({ id: k, label: v.label }))]
+          {[{ id: 'all', label: 'All' }, ...sectionsList.map(s => ({ id: s.id, label: s.label }))]
             .map(s => (
               <button key={s.id}
                 className={section === s.id ? 'active' : ''}
@@ -1263,6 +1296,7 @@ const TYPE_TONE  = { owner: 'brand', admin: 'brand', hr: 'info', staff: 'gold' }
 const EmployeesPage = () => {
   const toast = useToast();
   const { can } = useContext(AppCtx);
+  const sectionsList = useLiveSections();
 
   const [search, setSearch] = useState('');
   const [section, setSection] = useState('all');
@@ -1997,8 +2031,8 @@ const EmployeesPage = () => {
                   onChange={e => setEditing({ ...editing, section_id: e.target.value || null })}
                   disabled={editing.user_type !== 'staff'}>
                   <option value="">— none —</option>
-                  {Object.entries(SECTION_META).map(([k, v]) => (
-                    <option key={k} value={k}>{v.full}</option>
+                  {sectionsList.map(s => (
+                    <option key={s.id} value={s.id}>{s.full}</option>
                   ))}
                 </select>
               </div>
@@ -6042,6 +6076,7 @@ const ReportCard = ({ title, description, children }) => (
 const ReportsPage = () => {
   const toast = useToast();
   const { rows: employees } = useEmployees();
+  const sectionsList = useLiveSections();
   const empById = useMemo(() => {
     const m = {};
     employees.forEach(e => { m[e.id] = e; });
@@ -6231,7 +6266,7 @@ const ReportsPage = () => {
           <span style={{ fontSize: 12, color: 'var(--inkMuted)' }}>to</span>
           <input type="date" value={attTo} onChange={e => setAttTo(e.target.value)} />
           <div className="seg">
-            {[{ id: 'all', label: 'All sections' }, ...Object.entries(SECTION_META).map(([k, v]) => ({ id: k, label: v.label }))]
+            {[{ id: 'all', label: 'All sections' }, ...sectionsList.map(s => ({ id: s.id, label: s.label }))]
               .map(s => (
                 <button key={s.id}
                   className={attSection === s.id ? 'active' : ''}
@@ -6262,7 +6297,7 @@ const ReportsPage = () => {
           <input type="month" value={payMonth.slice(0, 7)}
             onChange={e => setPayMonth(e.target.value + '-01')} />
           <div className="seg">
-            {[{ id: 'all', label: 'All sections' }, ...Object.entries(SECTION_META).map(([k, v]) => ({ id: k, label: v.label }))]
+            {[{ id: 'all', label: 'All sections' }, ...sectionsList.map(s => ({ id: s.id, label: s.label }))]
               .map(s => (
                 <button key={s.id}
                   className={paySection === s.id ? 'active' : ''}
@@ -8063,9 +8098,19 @@ const Root = () => {
   return <ToastHost><App /></ToastHost>;
 };
 
-const mount = (attempts = 0) => {
+const mount = async (attempts = 0) => {
   if (window.React && window.ReactDOM && window.supabase) {
+    // Preload sections so the first render already knows every section's
+    // name, not just the four hardcoded ones.
+    try { await refreshSectionMeta(); } catch (_) {}
     ReactDOM.createRoot(document.getElementById('root')).render(<Root />);
+    // Keep the map fresh when the Owner adds / renames / reorders a section.
+    if (window.sb) {
+      window.sb.channel('global-sections')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'sections' },
+          () => refreshSectionMeta())
+        .subscribe();
+    }
   } else if (attempts < 100) {
     setTimeout(() => mount(attempts + 1), 30);
   }

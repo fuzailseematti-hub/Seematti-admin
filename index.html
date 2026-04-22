@@ -1182,9 +1182,20 @@ window.useLiveRoster = useLiveRoster;
 // ──────────────────────────────────────────────────────────
 // Live leave-requests hook — joined with employees for display.
 // ──────────────────────────────────────────────────────────
-const SECTION_LABEL = {
-  fancy: 'Fancy', cotton: 'Cotton', silk: 'Silk', dhoti: 'Dhoti',
+// Live section label map — populated from the `sections` table at app
+// boot and refreshed via the 'sections' realtime channel subscribed in
+// mountWhenReady(). UI code reads SECTION_LABEL[id] exactly as before.
+const SECTION_LABEL = {};
+const refreshSectionLabels = async () => {
+  if (!window.sb) return;
+  const { data } = await window.sb.from('sections').select('id, name').order('sort_order');
+  for (const k of Object.keys(SECTION_LABEL)) delete SECTION_LABEL[k];
+  (data || []).forEach(s => {
+    SECTION_LABEL[s.id] = s.name || s.id;
+  });
 };
+window.SECTION_LABEL = SECTION_LABEL;
+window.refreshSectionLabels = refreshSectionLabels;
 
 const fmtFromDate = (iso) => {
   if (!iso) return '—';
@@ -9331,11 +9342,20 @@ const REQUIRED = [
   'KioskScannerScreen','EnrollJoinerScreen','SettingsScreen','ProfileScreen','ChecklistScreen','ManagerHomeScreen','AdvancesScreen',
   'AppCtx','IOSDevice','TabBar','Toast','TOKENS','MOCK',
 ];
-const mountWhenReady = (attempts = 0) => {
+const mountWhenReady = async (attempts = 0) => {
   const missing = REQUIRED.filter(k => typeof window[k] === 'undefined');
   if (missing.length === 0) {
+    // Preload sections so labels are correct on first paint, then keep
+    // them fresh via the realtime channel.
+    try { await refreshSectionLabels(); } catch (_) {}
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(<RootApp />);
+    if (window.sb) {
+      window.sb.channel('pwa-sections')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'sections' },
+          () => refreshSectionLabels())
+        .subscribe();
+    }
   } else if (attempts < 200) {
     setTimeout(() => mountWhenReady(attempts + 1), 30);
   } else {
