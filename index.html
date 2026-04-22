@@ -2556,13 +2556,26 @@ const OwnerHomeScreen = () => {
         </Card>
       </div>
 
-      {/* Section status */}
+      {/* Section status — cap at 5 on the home screen so 13+ sections
+          don't push 'Needs attention' off the page. Tap 'View more' to
+          open the dedicated SectionsStatusScreen. */}
       <div style={{ padding: '20px 16px 0' }}>
         <SectionTitle title={t('floors')} />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
-          {sections.map(f => (
+          {sections.slice(0, 5).map(f => (
             <FloorCard key={f.id} floor={f} />
           ))}
+          {sections.length > 5 && (
+            <button onClick={() => nav.go('sectionStatus')} style={{
+              background: T_.surface, border: `1px dashed ${T_.border}`,
+              borderRadius: 14, padding: '12px 14px', color: T_.maroon,
+              fontFamily: 'inherit', fontWeight: 600, fontSize: 13.5,
+              cursor: 'pointer', display: 'flex', alignItems: 'center',
+              justifyContent: 'center', gap: 6,
+            }}>
+              View all {sections.length} sections <Icon name="chevron" size={14} />
+            </button>
+          )}
         </div>
       </div>
 
@@ -2803,6 +2816,57 @@ const ModuleTile = ({ icon, label, onClick }) => {
 };
 
 window.OwnerHomeScreen = OwnerHomeScreen;
+
+// ─── All sections status screen — full list, opened from the Owner home
+// 'View all N sections' button when more than 5 exist.
+const SectionsStatusScreen = () => {
+  const { nav, lang } = useApp();
+  const T_ = window.TOKENS;
+  const t = useT();
+  const live = window.useLiveAttendance ? window.useLiveAttendance() : { loading: true };
+  const sections = (live.sections && live.sections.length) ? live.sections : [];
+
+  return (
+    <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 120 }}>
+      <div style={{ padding: 'var(--screen-top) 20px 0' }}>
+        <button onClick={() => nav.back()} style={{
+          background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+          color: T_.inkMuted, fontSize: 13, display: 'flex', alignItems: 'center', gap: 4,
+          fontFamily: 'inherit', marginBottom: 14,
+        }}>
+          <Icon name="arrowLeft" size={14} /> {lang === 'ta' ? 'பின்' : 'Back'}
+        </button>
+        <div style={{
+          fontFamily: 'Fraunces, Georgia, serif',
+          fontSize: 30, fontWeight: 500, letterSpacing: -0.7,
+          color: T_.ink,
+        }}>
+          {t('floors')}
+        </div>
+        <div style={{ fontSize: 12.5, color: T_.inkMuted, marginTop: 4 }}>
+          {sections.length} {lang === 'ta' ? 'பிரிவுகள்' : 'sections'}
+        </div>
+      </div>
+
+      <div style={{ padding: '18px 16px 0' }}>
+        {live.loading && (
+          <div style={{ padding: 40, textAlign: 'center', color: T_.inkMuted }}>Loading…</div>
+        )}
+        {!live.loading && sections.length === 0 && (
+          <div style={{ padding: 40, textAlign: 'center', color: T_.inkMuted, fontSize: 13 }}>
+            No sections yet.
+          </div>
+        )}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {sections.map(f => (
+            <FloorCard key={f.id} floor={f} />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+window.SectionsStatusScreen = SectionsStatusScreen;
 
 
 // ========== components/screen-staff-home.jsx ==========
@@ -5421,20 +5485,6 @@ const HRToolsScreen = () => {
             value="Open"
             sub="Wall-mounted punch in/out"
             onClick={() => nav.go('kiosk')}
-          />
-          <HRTile
-            icon="doc" tone="neutral"
-            title="My payslip"
-            value="View"
-            sub="Latest month's slip"
-            onClick={() => nav.go('payslip')}
-          />
-          <HRTile
-            icon="user" tone="brand"
-            title="My profile"
-            value="View"
-            sub="Your details · change password"
-            onClick={() => nav.go('profile')}
           />
         </div>
       </div>
@@ -9187,6 +9237,7 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     checklist:       makeScreen('ChecklistScreen'),
     managerHome:     makeScreen('ManagerHomeScreen'),
     advances:        makeScreen('AdvancesScreen'),
+    sectionStatus:   makeScreen('SectionsStatusScreen'),
   };
 
   const screenTitles = {
@@ -9210,6 +9261,7 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     checklist:      '16 Checklist',
     managerHome:    '17 Manager Home',
     advances:       '18 Advances',
+    sectionStatus:  '19 All Sections',
   };
 
   const isHrLike = user === 'owner' || user === 'admin' || user === 'hr';
@@ -9339,7 +9391,7 @@ const REQUIRED = [
   'LoginScreen','OwnerHomeScreen','StaffHomeScreen','AttendanceScreen',
   'LeavesScreen','ApplyLeaveScreen','TasksScreen','PayslipScreen',
   'AnnouncementsScreen','VisitorsScreen','HRHomeScreen','HRToolsScreen','MarkAttendanceScreen',
-  'KioskScannerScreen','EnrollJoinerScreen','SettingsScreen','ProfileScreen','ChecklistScreen','ManagerHomeScreen','AdvancesScreen',
+  'KioskScannerScreen','EnrollJoinerScreen','SettingsScreen','ProfileScreen','ChecklistScreen','ManagerHomeScreen','AdvancesScreen','SectionsStatusScreen',
   'AppCtx','IOSDevice','TabBar','Toast','TOKENS','MOCK',
 ];
 const mountWhenReady = async (attempts = 0) => {
