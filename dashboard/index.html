@@ -845,7 +845,7 @@ const App = () => {
               <h1>{visiblePage.label}</h1>
             </div>
             <div style={{ fontSize: 10, color: 'var(--inkFaint)', letterSpacing: 0.3, marginLeft: 'auto', alignSelf: 'flex-end' }}>
-              v2026-04-22-sections-dd
+              v2026-04-22-filedby
             </div>
           </div>
           <div className="content">
@@ -7503,7 +7503,7 @@ const AdvancesPage = () => {
     if (!window.sb) return;
     const [advRes, empRes] = await Promise.all([
       window.sb.from('advances')
-        .select('*, employees!advances_employee_id_fkey(id, name, role, section_id, user_type, city), decider:employees!advances_decided_by_fkey(id, name)')
+        .select('*, employees!advances_employee_id_fkey(id, name, role, section_id, user_type, city), decider:employees!advances_decided_by_fkey(id, name), filer:employees!advances_filed_by_fkey(id, name)')
         .order('created_at', { ascending: false }),
       window.sb.from('employees')
         .select('id, name, role, section_id, user_type')
@@ -7680,6 +7680,7 @@ const AdvancesPage = () => {
               <th style={{ width: 90 }}>Months</th>
               <th>Reason</th>
               <th style={{ width: 170 }}>Outstanding</th>
+              <th style={{ width: 120 }}>Filed by</th>
               <th style={{ width: 100 }}>Status</th>
               <th style={{ width: 130 }}>Actions</th>
             </tr>
@@ -7687,7 +7688,7 @@ const AdvancesPage = () => {
           <tbody>
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={9} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                <td colSpan={10} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
                   {loading ? 'Loading…' : 'No advances match.'}
                 </td>
               </tr>
@@ -7717,6 +7718,13 @@ const AdvancesPage = () => {
                 </td>
                 <td className="muted" style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
                   {formatRemaining(r)}
+                </td>
+                <td style={{ fontSize: 12.5 }}>
+                  {r.filer?.name
+                    ? r.filer.name
+                    : r.filed_by
+                      ? <span className="muted" style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{r.filed_by}</span>
+                      : <span className="muted">—</span>}
                 </td>
                 <td>
                   <span className={`status-pill ${ADV_STATUS_TONE[r.status]}`}>{r.status}</span>
@@ -7838,7 +7846,19 @@ const AdvancesPage = () => {
               <DetailField label="Requested"   value={rupees(detail.amount_requested)} mono />
               <DetailField label="Requested over" value={`${detail.months_total} month${detail.months_total === 1 ? '' : 's'}`} />
               <DetailField label="Filed at"    value={fmtDateTime(detail.created_at)} />
+              <DetailField
+                label="Filed by"
+                value={detail.filer?.name || detail.filed_by || '—'}
+                mono={!detail.filer?.name && !!detail.filed_by}
+              />
               <DetailField label="Status"      value={detail.status} />
+              {detail.status !== 'pending' && (
+                <DetailField
+                  label={detail.status === 'approved' ? 'Approved by' : 'Decided by'}
+                  value={detail.decider?.name || detail.decided_by || '—'}
+                  mono={!detail.decider?.name && !!detail.decided_by}
+                />
+              )}
               {detail.reason && (
                 <div style={{ gridColumn: '1 / -1' }}>
                   <DetailField label="Reason" value={detail.reason} />
