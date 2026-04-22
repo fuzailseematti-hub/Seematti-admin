@@ -845,7 +845,7 @@ const App = () => {
               <h1>{visiblePage.label}</h1>
             </div>
             <div style={{ fontSize: 10, color: 'var(--inkFaint)', letterSpacing: 0.3, marginLeft: 'auto', alignSelf: 'flex-end' }}>
-              v2026-04-22-sections
+              v2026-04-22-sections-dd
             </div>
           </div>
           <div className="content">
@@ -1037,6 +1037,94 @@ const fmtDateISO = (d) =>
 const todayISO = () =>
   new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 
+// Collapsible section picker — a single button that expands into a
+// dropdown list. Used wherever 13+ sections would otherwise wrap an
+// ugly row of chips. Closes when the Owner clicks outside or picks
+// a value.
+const SectionDropdown = ({ value, onChange, sectionsList, allLabel = 'All sections' }) => {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e) => {
+      if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [open]);
+
+  const options = useMemo(
+    () => [{ id: 'all', label: allLabel }, ...sectionsList.map(s => ({ id: s.id, label: s.label }))],
+    [sectionsList, allLabel]
+  );
+  const current = options.find(o => o.id === value) || options[0];
+
+  return (
+    <div ref={rootRef} style={{ position: 'relative', display: 'inline-block' }}>
+      <button
+        type="button"
+        className={'btn' + (value !== 'all' ? ' primary' : '')}
+        onClick={() => setOpen(v => !v)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        style={{
+          minWidth: 150, display: 'inline-flex', alignItems: 'center',
+          justifyContent: 'space-between', gap: 8,
+        }}
+      >
+        <span style={{
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          maxWidth: 200,
+        }}>
+          {current.label}
+        </span>
+        <span style={{ fontSize: 10, opacity: 0.7, transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 150ms' }}>
+          ▾
+        </span>
+      </button>
+      {open && (
+        <div
+          role="listbox"
+          style={{
+            position: 'absolute', top: 'calc(100% + 4px)', left: 0,
+            minWidth: 220, maxHeight: 340, overflowY: 'auto',
+            background: 'var(--surface)', border: '1px solid var(--border)',
+            borderRadius: 10, boxShadow: '0 10px 30px -10px rgba(0,0,0,0.2)',
+            zIndex: 40, padding: 4,
+          }}
+        >
+          {options.map(o => (
+            <button
+              key={o.id}
+              type="button"
+              role="option"
+              aria-selected={value === o.id}
+              onClick={() => { onChange(o.id); setOpen(false); }}
+              style={{
+                display: 'block', width: '100%', textAlign: 'left',
+                padding: '8px 12px', border: 'none',
+                background: value === o.id ? 'var(--accentSoft, rgba(14,124,58,0.1))' : 'transparent',
+                color: value === o.id ? 'var(--accent, #0E7C3A)' : 'var(--ink)',
+                fontWeight: value === o.id ? 600 : 500,
+                fontFamily: 'inherit',
+                borderRadius: 8, cursor: 'pointer', fontSize: 13.5,
+              }}
+              onMouseEnter={e => {
+                if (value !== o.id) e.currentTarget.style.background = 'var(--surfaceAlt, rgba(0,0,0,0.04))';
+              }}
+              onMouseLeave={e => {
+                if (value !== o.id) e.currentTarget.style.background = 'transparent';
+              }}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const AttendancePage = () => {
   const toast = useToast();
   const { can } = useContext(AppCtx);
@@ -1153,16 +1241,11 @@ const AttendancePage = () => {
         <button className="btn" onClick={() => setDate(fmtDateISO(new Date()))}
           disabled={isToday}>Today</button>
 
-        <div className="seg">
-          {[{ id: 'all', label: 'All' }, ...sectionsList.map(s => ({ id: s.id, label: s.label }))]
-            .map(s => (
-              <button key={s.id}
-                className={section === s.id ? 'active' : ''}
-                onClick={() => setSection(s.id)}>
-                {s.label}
-              </button>
-            ))}
-        </div>
+        <SectionDropdown
+          value={section}
+          onChange={setSection}
+          sectionsList={sectionsList}
+        />
 
         <div className="seg">
           {[
