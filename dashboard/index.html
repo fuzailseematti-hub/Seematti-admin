@@ -845,7 +845,7 @@ const App = () => {
               <h1>{visiblePage.label}</h1>
             </div>
             <div style={{ fontSize: 10, color: 'var(--inkFaint)', letterSpacing: 0.3, marginLeft: 'auto', alignSelf: 'flex-end' }}>
-              v2026-04-22-sections-dd
+              v2026-04-22-emp-sec
             </div>
           </div>
           <div className="content">
@@ -1041,7 +1041,7 @@ const todayISO = () =>
 // dropdown list. Used wherever 13+ sections would otherwise wrap an
 // ugly row of chips. Closes when the Owner clicks outside or picks
 // a value.
-const SectionDropdown = ({ value, onChange, sectionsList, allLabel = 'All sections' }) => {
+const SectionDropdown = ({ value, onChange, sectionsList, allLabel = 'All sections', counts }) => {
   const [open, setOpen] = useState(false);
   const rootRef = useRef(null);
   useEffect(() => {
@@ -1054,8 +1054,14 @@ const SectionDropdown = ({ value, onChange, sectionsList, allLabel = 'All sectio
   }, [open]);
 
   const options = useMemo(
-    () => [{ id: 'all', label: allLabel }, ...sectionsList.map(s => ({ id: s.id, label: s.label }))],
-    [sectionsList, allLabel]
+    () => [
+      { id: 'all', label: allLabel },
+      ...sectionsList.map(s => ({
+        id: s.id,
+        label: counts && counts[s.id] != null ? `${s.label} · ${counts[s.id]}` : s.label,
+      })),
+    ],
+    [sectionsList, allLabel, counts]
   );
   const current = options.find(o => o.id === value) || options[0];
 
@@ -1454,16 +1460,19 @@ const EmployeesPage = () => {
     return [...filtered].sort(cmp);
   }, [all, search, section, type, sortBy, sortDir]);
 
-  const counts = useMemo(() => ({
-    total: all.length,
-    owner: all.filter(e => e.user_type === 'owner').length,
-    hr:    all.filter(e => e.user_type === 'hr').length,
-    staff: all.filter(e => e.user_type === 'staff').length,
-    fancy:  all.filter(e => e.section_id === 'fancy').length,
-    cotton: all.filter(e => e.section_id === 'cotton').length,
-    silk:   all.filter(e => e.section_id === 'silk').length,
-    dhoti:  all.filter(e => e.section_id === 'dhoti').length,
-  }), [all]);
+  const counts = useMemo(() => {
+    const c = {
+      total: all.length,
+      owner: all.filter(e => e.user_type === 'owner').length,
+      hr:    all.filter(e => e.user_type === 'hr').length,
+      staff: all.filter(e => e.user_type === 'staff').length,
+      bySection: {},
+    };
+    all.forEach(e => {
+      if (e.section_id) c.bySection[e.section_id] = (c.bySection[e.section_id] || 0) + 1;
+    });
+    return c;
+  }, [all]);
 
   const clickSort = (col) => {
     if (sortBy === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -1855,21 +1864,13 @@ const EmployeesPage = () => {
       </div>
 
       <div className="toolbar">
-        <div className="seg">
-          {[
-            { id: 'all',    label: `All · ${counts.total}` },
-            { id: 'fancy',  label: `Fancy · ${counts.fancy}` },
-            { id: 'cotton', label: `Cotton · ${counts.cotton}` },
-            { id: 'silk',   label: `Silk · ${counts.silk}` },
-            { id: 'dhoti',  label: `Dhoti · ${counts.dhoti}` },
-          ].map(s => (
-            <button key={s.id}
-              className={section === s.id ? 'active' : ''}
-              onClick={() => setSection(s.id)}>
-              {s.label}
-            </button>
-          ))}
-        </div>
+        <SectionDropdown
+          value={section}
+          onChange={setSection}
+          sectionsList={sectionsList}
+          allLabel={`All sections · ${counts.total}`}
+          counts={counts.bySection}
+        />
 
         <div className="seg">
           {[
@@ -7503,7 +7504,7 @@ const AdvancesPage = () => {
     if (!window.sb) return;
     const [advRes, empRes] = await Promise.all([
       window.sb.from('advances')
-        .select('*, employees!advances_employee_id_fkey(id, name, role, section_id, user_type, city), decider:employees!advances_decided_by_fkey(id, name)')
+        .select('*, employees!advances_employee_id_fkey(id, name, role, section_id, user_type, city), decider:employees!advances_decided_by_fkey(id, name), filer:employees!advances_filed_by_fkey(id, name)')
         .order('created_at', { ascending: false }),
       window.sb.from('employees')
         .select('id, name, role, section_id, user_type')
@@ -7680,6 +7681,7 @@ const AdvancesPage = () => {
               <th style={{ width: 90 }}>Months</th>
               <th>Reason</th>
               <th style={{ width: 170 }}>Outstanding</th>
+              <th style={{ width: 120 }}>Filed by</th>
               <th style={{ width: 100 }}>Status</th>
               <th style={{ width: 130 }}>Actions</th>
             </tr>
@@ -7687,7 +7689,7 @@ const AdvancesPage = () => {
           <tbody>
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={9} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                <td colSpan={10} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
                   {loading ? 'Loading…' : 'No advances match.'}
                 </td>
               </tr>
@@ -7717,6 +7719,13 @@ const AdvancesPage = () => {
                 </td>
                 <td className="muted" style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
                   {formatRemaining(r)}
+                </td>
+                <td style={{ fontSize: 12.5 }}>
+                  {r.filer?.name
+                    ? r.filer.name
+                    : r.filed_by
+                      ? <span className="muted" style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{r.filed_by}</span>
+                      : <span className="muted">—</span>}
                 </td>
                 <td>
                   <span className={`status-pill ${ADV_STATUS_TONE[r.status]}`}>{r.status}</span>
@@ -7838,7 +7847,19 @@ const AdvancesPage = () => {
               <DetailField label="Requested"   value={rupees(detail.amount_requested)} mono />
               <DetailField label="Requested over" value={`${detail.months_total} month${detail.months_total === 1 ? '' : 's'}`} />
               <DetailField label="Filed at"    value={fmtDateTime(detail.created_at)} />
+              <DetailField
+                label="Filed by"
+                value={detail.filer?.name || detail.filed_by || '—'}
+                mono={!detail.filer?.name && !!detail.filed_by}
+              />
               <DetailField label="Status"      value={detail.status} />
+              {detail.status !== 'pending' && (
+                <DetailField
+                  label={detail.status === 'approved' ? 'Approved by' : 'Decided by'}
+                  value={detail.decider?.name || detail.decided_by || '—'}
+                  mono={!detail.decider?.name && !!detail.decided_by}
+                />
+              )}
               {detail.reason && (
                 <div style={{ gridColumn: '1 / -1' }}>
                   <DetailField label="Reason" value={detail.reason} />
