@@ -2732,6 +2732,90 @@ const SectionTitle = ({ title, action }) => {
   );
 };
 
+// Mobile filter dropdown — used in PWA pages to replace long chip rows.
+// Shows the current selection + a chevron; tapping expands a scrollable
+// list. Closes on outside-tap or selection.
+const MobileFilterDropdown = ({ value, options, onChange, placeholder = 'Select…', ariaLabel }) => {
+  const [open, setOpen] = React.useState(false);
+  const rootRef = React.useRef(null);
+  const T_ = window.TOKENS;
+  React.useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => {
+      if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('touchstart', onDoc);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('touchstart', onDoc);
+    };
+  }, [open]);
+  const current = options.find(o => o.id === value) || options[0];
+  return (
+    <div ref={rootRef} style={{ position: 'relative', flex: 1, minWidth: 0 }}>
+      <button
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={ariaLabel}
+        onClick={() => setOpen(v => !v)}
+        style={{
+          width: '100%',
+          background: T_.surface, border: `1px solid ${T_.border}`,
+          borderRadius: 12, padding: '10px 14px',
+          display: 'flex', alignItems: 'center',
+          justifyContent: 'space-between', gap: 8,
+          cursor: 'pointer', fontFamily: 'inherit',
+        }}
+      >
+        <span style={{
+          fontSize: 13, fontWeight: 600, color: T_.ink,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          textAlign: 'left',
+        }}>
+          {current?.label || placeholder}
+        </span>
+        <span style={{
+          fontSize: 10, opacity: 0.55,
+          transform: open ? 'rotate(180deg)' : 'none',
+          transition: 'transform 150ms', flex: 'none',
+        }}>▾</span>
+      </button>
+      {open && (
+        <div role="listbox" style={{
+          position: 'absolute', top: 'calc(100% + 6px)', left: 0, right: 0,
+          background: T_.surface, border: `1px solid ${T_.border}`,
+          borderRadius: 12, boxShadow: '0 14px 30px -10px rgba(0,0,0,0.25)',
+          zIndex: 50, padding: 4, maxHeight: 360, overflowY: 'auto',
+        }}>
+          {options.map(o => (
+            <button
+              key={o.id}
+              type="button"
+              role="option"
+              aria-selected={value === o.id}
+              onClick={() => { onChange(o.id); setOpen(false); }}
+              style={{
+                display: 'block', width: '100%', textAlign: 'left',
+                padding: '11px 14px', border: 'none',
+                background: value === o.id ? T_.maroonSoft : 'transparent',
+                color: value === o.id ? T_.maroon : T_.ink,
+                fontWeight: value === o.id ? 700 : 500,
+                fontFamily: 'inherit', fontSize: 13.5,
+                borderRadius: 8, cursor: 'pointer',
+              }}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+window.MobileFilterDropdown = MobileFilterDropdown;
+
 const FloorCard = ({ floor }) => {
   const T_ = window.TOKENS;
   const t = useT();
@@ -3207,16 +3291,14 @@ const AttendanceScreen = () => {
       out:     '—',
     }));
 
-  const sectionMeta = {
-    fancy:  { label: 'Fancy',   full: 'Fancy Section' },
-    cotton: { label: 'Cotton',  full: 'Cotton Section' },
-    silk:   { label: 'Silk',    full: 'Silk Section' },
-    dhoti:  { label: 'Dhoti',   full: 'Dhoties & Shirting' },
-  };
+  // Fall back to the live SECTION_LABEL map so every section the Owner
+  // added shows up, not just the original four.
+  const sectionLabel = (sid) => SECTION_LABEL[sid] || sid;
 
-  // Section tabs: 'All' + the user's allowed sections.
+  // Section dropdown options: 'All' + the user's allowed sections
+  // (all of them for owner/admin/hr; scoped for manager/supervisor).
   const availableSections = hasAll
-    ? ['fancy', 'cotton', 'silk', 'dhoti']
+    ? Object.keys(SECTION_LABEL)
     : (allowed || []);
 
   const filteredBySection = section === 'all' ? roster : roster.filter(r => r.section === section);
@@ -3250,50 +3332,36 @@ const AttendanceScreen = () => {
           <AttStat label="Absent"  value={scopedStats.absent}  color={T_.danger} />
         </div>
 
-        {/* Section filter tabs */}
-        <div style={{
-          display: 'flex', gap: 6, marginBottom: 14,
-          background: T_.surfaceAlt, padding: 4, borderRadius: 12,
-        }}>
-          {[
-            { id: 'all', label: 'All' },
-            ...availableSections.map(sid => ({ id: sid, label: sectionMeta[sid]?.label || sid })),
-          ].map(f => (
-            <button key={f.id} onClick={() => setSection(f.id)} style={{
-              flex: 1, padding: '8px 4px', borderRadius: 8,
-              background: section === f.id ? T_.surface : 'transparent',
-              border: 'none', cursor: 'pointer', fontFamily: 'inherit',
-              fontSize: 12, fontWeight: 600,
-              color: section === f.id ? T_.ink : T_.inkMuted,
-              boxShadow: section === f.id ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
-            }}>{f.label}</button>
-          ))}
+        {/* Section filter — dropdown so 13+ sections don't overflow */}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+          <MobileFilterDropdown
+            ariaLabel="Filter by section"
+            value={section}
+            onChange={setSection}
+            options={[
+              { id: 'all', label: `All sections · ${roster.length}` },
+              ...availableSections.map(sid => ({
+                id: sid,
+                label: `${sectionLabel(sid)} · ${roster.filter(r => r.section === sid).length}`,
+              })),
+            ]}
+          />
         </div>
 
-        {/* Status filter chips */}
-        <div style={{
-          display: 'flex', gap: 6, marginBottom: 14, overflowX: 'auto',
-          WebkitOverflowScrolling: 'touch',
-        }}>
-          {[
-            { id: 'all',     label: `All · ${filteredBySection.length}`, tone: null },
-            { id: 'present', label: `Present · ${filteredBySection.filter(r => r.status === 'present').length}`, tone: T_.success },
-            { id: 'late',    label: `Late · ${filteredBySection.filter(r => r.status === 'late').length}`,       tone: T_.warning },
-            { id: 'absent',  label: `Absent · ${filteredBySection.filter(r => r.status === 'absent').length}`,   tone: T_.danger },
-            { id: 'leave',   label: `Leave · ${filteredBySection.filter(r => r.status === 'leave').length}`,     tone: T_.info },
-          ].map(f => {
-            const active = statusFilter === f.id;
-            return (
-              <button key={f.id} onClick={() => setStatusFilter(f.id)} style={{
-                padding: '6px 12px', borderRadius: 999,
-                background: active ? (f.tone || T_.ink) : T_.surface,
-                border: `1px solid ${active ? (f.tone || T_.ink) : T_.border}`,
-                color: active ? '#fff' : T_.inkSoft,
-                fontSize: 11.5, fontWeight: 600, cursor: 'pointer',
-                fontFamily: 'inherit', whiteSpace: 'nowrap',
-              }}>{f.label}</button>
-            );
-          })}
+        {/* Status filter — dropdown matching the section filter style */}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
+          <MobileFilterDropdown
+            ariaLabel="Filter by status"
+            value={statusFilter}
+            onChange={setStatusFilter}
+            options={[
+              { id: 'all',     label: `All · ${filteredBySection.length}` },
+              { id: 'present', label: `Present · ${filteredBySection.filter(r => r.status === 'present').length}` },
+              { id: 'late',    label: `Late · ${filteredBySection.filter(r => r.status === 'late').length}` },
+              { id: 'absent',  label: `Absent · ${filteredBySection.filter(r => r.status === 'absent').length}` },
+              { id: 'leave',   label: `Leave · ${filteredBySection.filter(r => r.status === 'leave').length}` },
+            ]}
+          />
         </div>
 
         {/* Roster */}
@@ -3303,7 +3371,7 @@ const AttendanceScreen = () => {
         }}>
           {filtered.map((r, i) => (
             <RosterRow key={i} row={r} last={i === filtered.length - 1}
-              sectionLabel={sectionMeta[r.section]?.label}
+              sectionLabel={sectionLabel(r.section)}
               onOpen={() => r.id && setDetail(r.id)} />
           ))}
         </div>
@@ -5884,13 +5952,12 @@ const MarkAttendanceScreen = () => {
   const [filter, setFilter] = React.useState('unmarked'); // unmarked | all
   const [search, setSearch] = React.useState('');
 
-  const sectionMeta = {
-    fancy:  'Fancy',  cotton: 'Cotton',
-    silk:   'Silk',   dhoti:  'Dhoti',
-  };
+  // Derive labels from the live SECTION_LABEL map so new sections
+  // flow through automatically.
+  const sectionLabel = (sid) => SECTION_LABEL[sid] || sid;
 
   const availableSections = hasAll
-    ? ['fancy', 'cotton', 'silk', 'dhoti']
+    ? Object.keys(SECTION_LABEL)
     : (allowed || []);
 
   const setStatus = async (id, status) => {
@@ -5971,47 +6038,34 @@ const MarkAttendanceScreen = () => {
         </div>
       </div>
 
-      {/* Section tabs */}
+      {/* Section filter — dropdown (was a tab row; breaks with 13 sections) */}
       <div style={{ padding: '0 16px' }}>
-        <div style={{
-          display: 'flex', gap: 6, marginBottom: 10,
-          background: T_.surfaceAlt, padding: 4, borderRadius: 12,
-        }}>
-          {[
-            { id: 'all', label: 'All' },
-            ...availableSections.map(sid => ({ id: sid, label: sectionMeta[sid] || sid })),
-          ].map(f => (
-            <button key={f.id} onClick={() => setSection(f.id)} style={{
-              flex: 1, padding: '8px 4px', borderRadius: 8,
-              background: section === f.id ? T_.surface : 'transparent',
-              border: 'none', cursor: 'pointer', fontFamily: 'inherit',
-              fontSize: 12, fontWeight: 600,
-              color: section === f.id ? T_.ink : T_.inkMuted,
-              boxShadow: section === f.id ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
-            }}>{f.label}</button>
-          ))}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+          <MobileFilterDropdown
+            ariaLabel="Filter by section"
+            value={section}
+            onChange={setSection}
+            options={[
+              { id: 'all', label: `All sections · ${roster.length}` },
+              ...availableSections.map(sid => ({
+                id: sid,
+                label: `${sectionLabel(sid)} · ${roster.filter(p => p.section === sid).length}`,
+              })),
+            ]}
+          />
         </div>
 
-        {/* Filter toggle */}
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          marginBottom: 12,
-        }}>
-          <div style={{ display: 'flex', gap: 6 }}>
-            {[
-              { id: 'unmarked', label: `Unmarked (${roster.filter(p => p.status === null && (section === 'all' || p.section === section)).length})` },
-              { id: 'all',      label: 'Everyone' },
-            ].map(f => (
-              <button key={f.id} onClick={() => setFilter(f.id)} style={{
-                padding: '6px 12px', borderRadius: 8,
-                background: filter === f.id ? T_.ink : 'transparent',
-                border: filter === f.id ? 'none' : `1px solid ${T_.border}`,
-                fontSize: 11.5, fontWeight: 600, fontFamily: 'inherit',
-                color: filter === f.id ? '#fff' : T_.inkSoft,
-                cursor: 'pointer',
-              }}>{f.label}</button>
-            ))}
-          </div>
+        {/* Unmarked / Everyone toggle — same dropdown style */}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+          <MobileFilterDropdown
+            ariaLabel="Filter by marked status"
+            value={filter}
+            onChange={setFilter}
+            options={[
+              { id: 'unmarked', label: `Unmarked · ${roster.filter(p => p.status === null && (section === 'all' || p.section === section)).length}` },
+              { id: 'all',      label: `Everyone · ${section === 'all' ? roster.length : roster.filter(p => p.section === section).length}` },
+            ]}
+          />
         </div>
 
         {/* Roster list */}
@@ -6030,12 +6084,12 @@ const MarkAttendanceScreen = () => {
               </div>
               <div style={{ fontSize: 14, fontWeight: 600, color: T_.ink }}>All marked</div>
               <div style={{ fontSize: 12, color: T_.inkMuted, marginTop: 2 }}>
-                Nobody left in {section === 'all' ? 'any section' : sectionMeta[section]}.
+                Nobody left in {section === 'all' ? 'any section' : sectionLabel(section)}.
               </div>
             </div>
           ) : visible.map((p, i) => (
             <MarkRow
-              key={p.id} person={p} sectionLabel={sectionMeta[p.section]}
+              key={p.id} person={p} sectionLabel={sectionLabel(p.section)}
               onSet={setStatus} last={i === visible.length - 1}
             />
           ))}
