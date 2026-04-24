@@ -860,7 +860,7 @@ const App = () => {
               <h1>{visiblePage.label}</h1>
             </div>
             <div style={{ fontSize: 10, color: 'var(--inkFaint)', letterSpacing: 0.3, marginLeft: 'auto', alignSelf: 'flex-end' }}>
-              v2026-04-24-crm-B
+              v2026-04-24-crm-C1
             </div>
           </div>
           <div className="content">
@@ -9117,6 +9117,419 @@ const CustomerDetailSheet = ({ customer, onClose, onEdit, canEdit }) => {
   );
 };
 
+// ──────────────────────────────────────────────────────────
+// CRM — Interactions (call / store visit / home visit) log.
+// Reusable InteractionLogModal is used both on this page and
+// later on the Customer Detail sheet's Interactions tab.
+// ──────────────────────────────────────────────────────────
+const INTERACTION_TYPES = [
+  { id: 'call-out',    label: 'Call (out)' },
+  { id: 'call-in',     label: 'Call (in)' },
+  { id: 'whatsapp',    label: 'WhatsApp' },
+  { id: 'sms',         label: 'SMS' },
+  { id: 'store-visit', label: 'Store visit' },
+  { id: 'home-visit',  label: 'Home visit' },
+  { id: 'other',       label: 'Other' },
+];
+const INTERACTION_TOPICS = [
+  'greeting', 'follow-up', 'new-collection', 'offer',
+  'appointment', 'complaint', 'feedback', 'muhurtham', 'other',
+];
+
+const InteractionsPage = () => {
+  const toast = useToast();
+  const { can, session } = useContext(AppCtx);
+
+  const [rows, setRows]           = useState([]);
+  const [customers, setCustomers] = useState([]);
+  const [loading, setLoading]     = useState(true);
+  const [typeFilter, setTypeFilter] = useState('all');
+  const [dueFilter, setDueFilter]   = useState('all');
+  const [search, setSearch]       = useState('');
+  const [editing, setEditing]     = useState(null);
+  const [saving, setSaving]       = useState(false);
+
+  const fetchAll = useCallback(async () => {
+    if (!window.sb) return;
+    const [interRes, custRes] = await Promise.all([
+      window.sb.from('customer_interactions')
+        .select('*, customers(id, name, phone, city, is_vip, do_not_contact)')
+        .order('occurred_at', { ascending: false })
+        .limit(500),
+      window.sb.from('customers').select('id, name, phone').order('name'),
+    ]);
+    setRows((interRes.data || []).filter(r => r.customers));
+    setCustomers(custRes.data || []);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (!window.sb) return;
+    fetchAll();
+    const ch = window.sb.channel('dash-interactions')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'customer_interactions' },
+        () => fetchAll())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' },
+        () => fetchAll())
+      .subscribe();
+    return () => { window.sb.removeChannel(ch); };
+  }, [fetchAll]);
+
+  const today = todayISO();
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return rows.filter(r => {
+      if (typeFilter !== 'all' && r.type !== typeFilter) return false;
+      if (dueFilter === 'due-today' && !(r.follow_up_date === today && !r.follow_up_done)) return false;
+      if (dueFilter === 'overdue' && !(r.follow_up_date && r.follow_up_date < today && !r.follow_up_done)) return false;
+      if (dueFilter === 'upcoming' && !(r.follow_up_date && r.follow_up_date > today && !r.follow_up_done)) return false;
+      if (!matchesQuery(q, r.customers?.name, r.customers?.phone, r.topic, r.outcome, r.notes, r.logged_by_name)) return false;
+      return true;
+    });
+  }, [rows, typeFilter, dueFilter, search, today]);
+
+  const counts = useMemo(() => {
+    const isToday = (d) => d && d === today;
+    const isThisWeek = (ts) => {
+      if (!ts) return false;
+      const ms = Date.parse(ts);
+      return ms >= Date.now() - 7 * 24 * 3600 * 1000;
+    };
+    return {
+      total:    rows.length,
+      today:    rows.filter(r => r.occurred_at && isToday(dateISO(r.occurred_at))).length,
+      week:     rows.filter(r => isThisWeek(r.occurred_at)).length,
+      dueToday: rows.filter(r => r.follow_up_date === today && !r.follow_up_done).length,
+      overdue:  rows.filter(r => r.follow_up_date && r.follow_up_date < today && !r.follow_up_done).length,
+    };
+  }, [rows, today]);
+
+  const blank = (customer_id = '') => ({
+    id: null, _new: true,
+    customer_id,
+    type: 'call-out',
+    occurred_at: new Date().toISOString().slice(0, 16), // YYYY-MM-DDTHH:MM for datetime-local
+    duration_min: '',
+    topic: 'follow-up',
+    outcome: '',
+    follow_up_date: '',
+    follow_up_note: '',
+    follow_up_done: false,
+    notes: '',
+  });
+
+  const startNew = () => setEditing(blank());
+  const startEdit = (row) => setEditing({
+    ...row, _new: false,
+    occurred_at: row.occurred_at ? row.occurred_at.slice(0, 16) : '',
+    duration_min: row.duration_min ?? '',
+    follow_up_date: row.follow_up_date || '',
+    follow_up_note: row.follow_up_note || '',
+  });
+  const close = () => setEditing(null);
+
+  const save = async () => {
+    if (!editing || saving) return;
+    if (!editing.customer_id) { toast('Pick a customer'); return; }
+    if (!editing.type) { toast('Pick an interaction type'); return; }
+    setSaving(true);
+    try {
+      const payload = {
+        customer_id:    editing.customer_id,
+        type:           editing.type,
+        occurred_at:    editing.occurred_at ? new Date(editing.occurred_at).toISOString() : new Date().toISOString(),
+        duration_min:   editing.duration_min === '' ? null : Number(editing.duration_min),
+        topic:          editing.topic || null,
+        outcome:        (editing.outcome || '').trim() || null,
+        follow_up_date: editing.follow_up_date || null,
+        follow_up_note: (editing.follow_up_note || '').trim() || null,
+        follow_up_done: !!editing.follow_up_done,
+        notes:          (editing.notes || '').trim() || null,
+      };
+      if (editing._new) {
+        payload.logged_by = session?.employee_id || null;
+        payload.logged_by_name = session?.display_name || 'CC';
+        const { error } = await window.sb.from('customer_interactions').insert(payload);
+        if (error) { toast('Could not save: ' + error.message); console.error(error); return; }
+        toast('Interaction logged');
+      } else {
+        const { error } = await window.sb.from('customer_interactions').update(payload).eq('id', editing.id);
+        if (error) { toast('Could not save: ' + error.message); console.error(error); return; }
+        toast('Interaction updated');
+      }
+      close();
+    } finally { setSaving(false); }
+  };
+
+  const markDone = async (row) => {
+    await window.sb.from('customer_interactions').update({ follow_up_done: true }).eq('id', row.id);
+    toast('Follow-up marked done');
+  };
+
+  const del = async (row) => {
+    if (!can('interactions', 'delete')) return;
+    if (!window.confirm('Delete this interaction log?')) return;
+    await window.sb.from('customer_interactions').delete().eq('id', row.id);
+    toast('Deleted');
+  };
+
+  return (
+    <div>
+      <div className="stat-strip">
+        <div className="stat"><div className="k">Today</div><div className="v">{counts.today}</div></div>
+        <div className="stat present"><div className="k">This week</div><div className="v">{counts.week}</div></div>
+        <div className="stat late"><div className="k">Follow-ups today</div><div className="v">{counts.dueToday}</div></div>
+        <div className="stat absent"><div className="k">Overdue</div><div className="v">{counts.overdue}</div></div>
+        <div className="stat"><div className="k">Total logged</div><div className="v">{counts.total}</div></div>
+      </div>
+
+      <div className="toolbar">
+        <div className="seg">
+          {[
+            { id: 'all',       label: 'All' },
+            { id: 'due-today', label: `Due today · ${counts.dueToday}` },
+            { id: 'overdue',   label: `Overdue · ${counts.overdue}` },
+            { id: 'upcoming',  label: 'Upcoming' },
+          ].map(s => (
+            <button key={s.id} className={dueFilter === s.id ? 'active' : ''}
+              onClick={() => setDueFilter(s.id)}>{s.label}</button>
+          ))}
+        </div>
+        <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)}
+          style={{ height: 34 }}>
+          <option value="all">All types</option>
+          {INTERACTION_TYPES.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+        </select>
+        <input type="search" placeholder="Search customer, topic, outcome, CC…"
+          value={search} onChange={e => setSearch(e.target.value)} />
+        {can('interactions', 'create') && (
+          <button className="btn primary" onClick={startNew} style={{ marginLeft: 'auto' }}>
+            + Log interaction
+          </button>
+        )}
+      </div>
+
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th style={{ width: 150 }}>When</th>
+              <th>Customer</th>
+              <th style={{ width: 110 }}>Type</th>
+              <th style={{ width: 120 }}>Topic</th>
+              <th>Outcome / notes</th>
+              <th style={{ width: 160 }}>Follow-up</th>
+              <th style={{ width: 110 }}>Logged by</th>
+              <th style={{ width: 140 }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 && (
+              <tr>
+                <td colSpan={8} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                  {loading ? 'Loading…' : rows.length === 0
+                    ? 'No interactions logged yet. Click "+ Log interaction" to add the first.'
+                    : 'No interactions match these filters.'}
+                </td>
+              </tr>
+            )}
+            {filtered.map(r => {
+              const followDue = r.follow_up_date && !r.follow_up_done;
+              const overdue   = followDue && r.follow_up_date < today;
+              const today_    = followDue && r.follow_up_date === today;
+              return (
+                <tr key={r.id}>
+                  <td className="muted" style={{ fontSize: 12 }}>{fmtDateTime(r.occurred_at)}</td>
+                  <td className="name">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span>{r.customers?.name || r.customer_id}</span>
+                      {r.customers?.is_vip && <span className="status-pill late" style={{ fontSize: 10 }}>VIP</span>}
+                      {r.customers?.do_not_contact && <span className="status-pill absent" style={{ fontSize: 10 }}>DNC</span>}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--inkMuted)', marginTop: 2, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
+                      {r.customers?.phone || '—'}
+                    </div>
+                  </td>
+                  <td>
+                    <span className="status-pill" style={{
+                      background: 'var(--surfaceAlt)', color: 'var(--inkSoft)', fontSize: 11,
+                    }}>
+                      {INTERACTION_TYPES.find(t => t.id === r.type)?.label || r.type}
+                    </span>
+                    {r.duration_min != null && r.duration_min > 0 && (
+                      <div style={{ fontSize: 11, color: 'var(--inkMuted)', marginTop: 2 }}>
+                        {r.duration_min} min
+                      </div>
+                    )}
+                  </td>
+                  <td className="muted" style={{ fontSize: 12.5 }}>{r.topic || '—'}</td>
+                  <td style={{ maxWidth: 320 }}>
+                    {r.outcome && <div style={{ fontSize: 13 }}>{r.outcome}</div>}
+                    {r.notes && <div style={{ fontSize: 12, color: 'var(--inkMuted)', marginTop: 2, whiteSpace: 'pre-wrap' }}>{r.notes}</div>}
+                    {!r.outcome && !r.notes && <span className="muted">—</span>}
+                  </td>
+                  <td>
+                    {!r.follow_up_date && <span className="muted">—</span>}
+                    {r.follow_up_date && r.follow_up_done && (
+                      <span className="status-pill present" style={{ fontSize: 10 }}>✓ done</span>
+                    )}
+                    {followDue && (
+                      <>
+                        <span className={`status-pill ${overdue ? 'absent' : today_ ? 'late' : 'leave'}`} style={{ fontSize: 10 }}>
+                          {fmtDate(r.follow_up_date)}
+                        </span>
+                        {r.follow_up_note && <div style={{ fontSize: 11, color: 'var(--inkMuted)', marginTop: 3 }}>{r.follow_up_note}</div>}
+                      </>
+                    )}
+                  </td>
+                  <td className="muted" style={{ fontSize: 12 }}>{r.logged_by_name || '—'}</td>
+                  <td>
+                    {followDue && can('interactions', 'edit') && (
+                      <button className="btn" style={{ height: 26, padding: '0 8px', marginRight: 4, fontSize: 11 }}
+                        onClick={() => markDone(r)}>Mark done</button>
+                    )}
+                    {can('interactions', 'edit') && (
+                      <button className="btn" style={{ height: 26, padding: '0 8px', marginRight: 4, fontSize: 11 }}
+                        onClick={() => startEdit(r)}>Edit</button>
+                    )}
+                    {can('interactions', 'delete') && (
+                      <button className="btn danger" style={{ height: 26, padding: '0 8px', fontSize: 11 }}
+                        onClick={() => del(r)}>Delete</button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <InteractionLogModal
+        open={!!editing}
+        draft={editing}
+        customers={customers}
+        onChange={setEditing}
+        onClose={close}
+        onSave={save}
+        saving={saving}
+      />
+    </div>
+  );
+};
+
+// Reusable log-interaction form. Customer picker is hidden when the
+// caller passes lockCustomer (used later on the Customer Detail sheet).
+const InteractionLogModal = ({ open, draft, customers, onChange, onClose, onSave, saving, lockCustomer = false }) => {
+  if (!draft) return null;
+  const setField = (k, v) => onChange({ ...draft, [k]: v });
+  const isCall = draft.type === 'call-out' || draft.type === 'call-in';
+
+  return (
+    <Modal
+      open={open}
+      title={draft._new ? 'Log interaction' : 'Edit interaction'}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="btn primary" onClick={onSave} disabled={saving}>
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </>
+      }
+    >
+      {!lockCustomer && (
+        <div className="field-row">
+          <label>Customer *</label>
+          <select value={draft.customer_id || ''}
+            onChange={e => setField('customer_id', e.target.value)}>
+            <option value="">— Pick a customer —</option>
+            {customers.map(c => (
+              <option key={c.id} value={c.id}>
+                {c.name}{c.phone ? ` · ${c.phone}` : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <div>
+          <label>Type</label>
+          <select value={draft.type}
+            onChange={e => setField('type', e.target.value)}>
+            {INTERACTION_TYPES.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+          </select>
+        </div>
+        <div>
+          <label>Topic</label>
+          <select value={draft.topic || ''}
+            onChange={e => setField('topic', e.target.value)}>
+            <option value="">—</option>
+            {INTERACTION_TOPICS.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <div className="field-row" style={{ display: 'grid', gridTemplateColumns: isCall ? '2fr 1fr' : '1fr', gap: 12 }}>
+        <div>
+          <label>When</label>
+          <input type="datetime-local"
+            value={draft.occurred_at || ''}
+            onChange={e => setField('occurred_at', e.target.value)} />
+        </div>
+        {isCall && (
+          <div>
+            <label>Duration (min)</label>
+            <input type="number" min="0" max="240"
+              value={draft.duration_min}
+              onChange={e => setField('duration_min', e.target.value)} />
+          </div>
+        )}
+      </div>
+
+      <div className="field-row">
+        <label>Outcome (short)</label>
+        <input value={draft.outcome || ''}
+          onChange={e => setField('outcome', e.target.value)}
+          placeholder='e.g. "Interested — will visit Saturday"' />
+      </div>
+
+      <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 12 }}>
+        <div>
+          <label>Follow-up date</label>
+          <input type="date" value={draft.follow_up_date || ''}
+            onChange={e => setField('follow_up_date', e.target.value)} />
+        </div>
+        <div>
+          <label>Follow-up note</label>
+          <input value={draft.follow_up_note || ''}
+            onChange={e => setField('follow_up_note', e.target.value)}
+            placeholder='e.g. "Call to confirm saree selection"' />
+        </div>
+      </div>
+
+      {!draft._new && (
+        <label className="checkbox-row" style={{ cursor: 'pointer', marginBottom: 10 }}>
+          <input type="checkbox" checked={!!draft.follow_up_done}
+            onChange={e => setField('follow_up_done', e.target.checked)} />
+          <div>
+            <div className="label-text">Follow-up done</div>
+            <div className="sub">Hides this row from the "Follow-ups today" filter.</div>
+          </div>
+        </label>
+      )}
+
+      <div className="field-row">
+        <label>Detailed notes</label>
+        <textarea rows={3} value={draft.notes || ''}
+          onChange={e => setField('notes', e.target.value)}
+          placeholder="Anything the next CC picking up this customer should know." />
+      </div>
+    </Modal>
+  );
+};
+
 const Page = ({ name }) => {
   if (name === 'attendance')    return <AttendancePage />;
   if (name === 'employees')     return <EmployeesPage />;
@@ -9134,8 +9547,8 @@ const Page = ({ name }) => {
   if (name === 'profile')       return <ProfilePage />;
   if (name === 'settings')      return <SettingsPage />;
   if (name === 'customers')     return <CustomersPage />;
-  if (name === 'interactions')  return <CRMComingSoon module="Interactions" note="Part C — call log + follow-up timeline." />;
-  if (name === 'muhurtham')     return <CRMComingSoon module="Muhurtham" note="Part C — home-visit pipeline with pre/post checklists." />;
+  if (name === 'interactions')  return <InteractionsPage />;
+  if (name === 'muhurtham')     return <CRMComingSoon module="Muhurtham" note="Part C · next commit — home-visit pipeline with pre/post checklists." />;
   if (name === 'occasions')     return <CRMComingSoon module="Occasions" note="Part D — birthday / anniversary / festival reminders." />;
   return (
     <div className="empty">
