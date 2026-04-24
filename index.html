@@ -2505,11 +2505,52 @@ const OwnerHomeScreen = () => {
     ? window.useLiveAdvances()
     : { items: [] };
   const pendingAdvances = liveAdvances.filter(a => a.status === 'pending').length;
+  const pendingAdvanceAmt = liveAdvances
+    .filter(a => a.status === 'pending')
+    .reduce((sum, a) => sum + Number(a.amount_requested || 0), 0);
   const { tasks: openingTasks } = window.useLiveTasks
     ? window.useLiveTasks({ scope: 'owner' })
     : { tasks: [] };
   const openingDone  = openingTasks.filter(t => t.done).length;
   const openingTotal = openingTasks.length;
+
+  // Last-7-days attendance rollup for the "This week" summary card.
+  // Lightweight DB aggregation — a single SELECT bounded to 7 days
+  // avoids scanning the full attendance table.
+  const [weekStats, setWeekStats] = React.useState({ late: 0, absent: 0, leave: 0, days: 0 });
+  React.useEffect(() => {
+    if (!window.sb) return;
+    let cancelled = false;
+    const fetchWeek = async () => {
+      const end = new Date();
+      const start = new Date(); start.setDate(start.getDate() - 7);
+      const { data } = await window.sb
+        .from('attendance')
+        .select('status, date')
+        .gte('date', dateISO(start))
+        .lte('date', dateISO(end));
+      if (cancelled) return;
+      const rows = data || [];
+      const days = new Set(rows.map(r => r.date)).size;
+      setWeekStats({
+        late:   rows.filter(r => r.status === 'late').length,
+        absent: rows.filter(r => r.status === 'absent').length,
+        leave:  rows.filter(r => r.status === 'on_leave').length,
+        days,
+      });
+    };
+    fetchWeek();
+    const ch = window.sb.channel('owner-week-summary')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'attendance' },
+        () => fetchWeek())
+      .subscribe();
+    return () => { cancelled = true; window.sb.removeChannel(ch); };
+  }, []);
+
+  const weakSections = sections.filter(s => {
+    if (!s.staff) return false;
+    return (s.present / s.staff) < 0.9;
+  }).sort((a, b) => (a.present / a.staff) - (b.present / b.staff));
 
   // Owner name for greeting (first employee with user_type='owner')
   const { employee: ownerEmp } = window.useLiveStaffEmployee
@@ -2610,6 +2651,41 @@ const OwnerHomeScreen = () => {
             }}>
               View all {sections.length} sections <Icon name="chevron" size={14} />
             </button>
+          )}
+        </div>
+      </div>
+
+      {/* This week — rolling 7-day snapshot for the Owner */}
+      <div style={{ padding: '24px 16px 0' }}>
+        <SectionTitle title={lang === 'ta' ? 'இந்த வாரம்' : 'This week'} />
+        <div style={{
+          marginTop: 10, background: T_.surface, border: `1px solid ${T_.border}`,
+          borderRadius: 16, padding: 14,
+        }}>
+          <div style={{
+            display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10,
+          }}>
+            <WeekStat icon="clock"    tone="warning" label={lang === 'ta' ? 'தாமதம்'    : 'Late arrivals'} value={weekStats.late} />
+            <WeekStat icon="close"    tone="danger"  label={lang === 'ta' ? 'வரவில்லை' : 'Absent'}        value={weekStats.absent} />
+            <WeekStat icon="suitcase" tone="info"    label={lang === 'ta' ? 'விடுப்பு' : 'On leave'}      value={weekStats.leave} />
+            <WeekStat icon="wallet"   tone="brand"   label={lang === 'ta' ? 'முன்பணம் ₹'  : 'Pending adv ₹'}
+              value={pendingAdvanceAmt ? '₹' + pendingAdvanceAmt.toLocaleString('en-IN') : '—'} />
+          </div>
+          {weakSections.length > 0 && (
+            <div style={{
+              marginTop: 12, padding: 10, borderRadius: 10,
+              background: T_.warningSoft || 'rgba(232,198,90,0.12)',
+              border: `1px solid ${T_.warningSoft || 'rgba(232,198,90,0.35)'}`,
+              fontSize: 12, color: T_.inkSoft,
+            }}>
+              <strong style={{ color: T_.warning || '#C29200' }}>
+                {lang === 'ta' ? '90%-க்கு கீழே:' : 'Below 90% today:'}
+              </strong>{' '}
+              {weakSections.slice(0, 3).map(s => (
+                `${SECTION_LABEL[s.id] || s.id} (${s.staff ? Math.round((s.present / s.staff) * 100) : 0}%)`
+              )).join(' · ')}
+              {weakSections.length > 3 ? ` · +${weakSections.length - 3} more` : ''}
+            </div>
           )}
         </div>
       </div>
@@ -2882,6 +2958,47 @@ const FloorCard = ({ floor }) => {
         </div>
       </div>
       <Pill tone={tone} size="sm">{pct}%</Pill>
+    </div>
+  );
+};
+
+// Compact tile used inside the Owner 'This week' summary card. Quiet,
+// tonal — this is a reporting surface, not a CTA.
+const WeekStat = ({ icon, tone, label, value }) => {
+  const T_ = window.TOKENS;
+  const tones = {
+    warning: { bg: T_.warningSoft, fg: T_.warning },
+    danger:  { bg: T_.dangerSoft,  fg: T_.danger },
+    info:    { bg: T_.infoSoft,    fg: T_.info },
+    brand:   { bg: T_.maroonSoft,  fg: T_.maroon },
+    success: { bg: T_.successSoft, fg: T_.success },
+  };
+  const s = tones[tone] || tones.info;
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 10,
+      padding: '8px 10px', borderRadius: 12,
+      background: T_.surfaceAlt,
+    }}>
+      <div style={{
+        width: 32, height: 32, borderRadius: 9,
+        background: s.bg, color: s.fg,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        flexShrink: 0,
+      }}>
+        <Icon name={icon} size={15} />
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          fontSize: 10, letterSpacing: 0.4, textTransform: 'uppercase',
+          color: T_.inkMuted, fontWeight: 600,
+        }}>{label}</div>
+        <div style={{
+          fontSize: 16, fontWeight: 700, color: T_.ink,
+          fontFamily: 'Fraunces, Georgia, serif', letterSpacing: -0.3,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>{value}</div>
+      </div>
     </div>
   );
 };
@@ -4890,7 +5007,7 @@ window.PayslipScreen = PayslipScreen;
 // Announcements & Visitor log
 
 const AnnouncementsScreen = () => {
-  const { user, userAccess, toast } = useApp();
+  const { user, userId, userAccess, toast } = useApp();
   const T_ = window.TOKENS;
   const M = window.MOCK;
   const { items, loading } = window.useLiveAnnouncements
@@ -4899,6 +5016,73 @@ const AnnouncementsScreen = () => {
   const rows = items.length ? items : M.announcements;
   const canPost = user === 'owner' || user === 'admin' || user === 'hr' ||
     (userAccess && userAccess.can_post_announcements);
+
+  // Track which announcements this user has marked as read / acknowledged.
+  // Loaded once + kept in sync via realtime so reading on another device
+  // reflects here too.
+  const [myReads, setMyReads] = React.useState({}); // { [announcement_id]: { read_at, acknowledged } }
+
+  React.useEffect(() => {
+    if (!window.sb || !userId) return;
+    let cancelled = false;
+    const fetchMine = async () => {
+      const { data } = await window.sb
+        .from('announcement_reads')
+        .select('announcement_id, read_at, acknowledged')
+        .eq('employee_id', userId);
+      if (cancelled) return;
+      const m = {};
+      (data || []).forEach(r => { m[r.announcement_id] = r; });
+      setMyReads(m);
+    };
+    fetchMine();
+    const ch = window.sb.channel(`reads-${userId}`)
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'announcement_reads', filter: `employee_id=eq.${userId}` },
+        () => fetchMine())
+      .subscribe();
+    return () => { cancelled = true; window.sb.removeChannel(ch); };
+  }, [userId]);
+
+  // Auto-mark everything currently visible as "read" when the screen
+  // opens — but NOT as acknowledged. The explicit "Got it" button
+  // below flips the ack bit.
+  React.useEffect(() => {
+    if (!window.sb || !userId || !rows.length) return;
+    const unread = rows.filter(a => !myReads[a.id]);
+    if (!unread.length) return;
+    const payload = unread.map(a => ({
+      announcement_id: a.id,
+      employee_id: userId,
+      read_at: new Date().toISOString(),
+    }));
+    window.sb.from('announcement_reads')
+      .upsert(payload, { onConflict: 'announcement_id,employee_id', ignoreDuplicates: true })
+      .then(({ error }) => { if (error) console.error('mark-read failed', error); });
+    // Optimistic local update so the "seen" indicator flips immediately.
+    setMyReads(prev => {
+      const next = { ...prev };
+      unread.forEach(a => { next[a.id] = { ...(next[a.id] || {}), read_at: new Date().toISOString() }; });
+      return next;
+    });
+  }, [rows, userId, myReads]);
+
+  const ack = async (announcementId) => {
+    if (!window.sb || !userId) { toast('Offline — cannot acknowledge'); return; }
+    const { error } = await window.sb.from('announcement_reads').upsert({
+      announcement_id: announcementId,
+      employee_id:     userId,
+      read_at:         myReads[announcementId]?.read_at || new Date().toISOString(),
+      acknowledged:    true,
+      acked_at:        new Date().toISOString(),
+    }, { onConflict: 'announcement_id,employee_id' });
+    if (error) { toast('Could not acknowledge — try again'); console.error(error); return; }
+    setMyReads(prev => ({
+      ...prev,
+      [announcementId]: { ...(prev[announcementId] || {}), acknowledged: true, acked_at: new Date().toISOString() },
+    }));
+    toast('Acknowledged · நன்றி');
+  };
 
   const post = async () => {
     const title = window.prompt('Announcement title?');
@@ -4932,36 +5116,63 @@ const AnnouncementsScreen = () => {
 
       <div style={{ padding: '0 16px' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {rows.map(a => (
-            <div key={a.id} style={{
-              background: a.pinned ? T_.goldSoft : T_.surface,
-              border: `1px solid ${a.pinned ? T_.goldSoft : T_.border}`,
-              borderRadius: 16, padding: 14,
-              display: 'flex', alignItems: 'flex-start', gap: 12,
-            }}>
-              <div style={{
-                width: 38, height: 38, borderRadius: 11,
-                background: a.pinned ? T_.gold : T_.maroonSoft,
-                color: a.pinned ? '#fff' : T_.maroon,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                flexShrink: 0,
+          {rows.map(a => {
+            const mine = myReads[a.id];
+            const acknowledged = !!mine?.acknowledged;
+            return (
+              <div key={a.id} style={{
+                background: a.pinned ? T_.goldSoft : T_.surface,
+                border: `1px solid ${a.pinned ? T_.goldSoft : T_.border}`,
+                borderRadius: 16, padding: 14,
+                display: 'flex', flexDirection: 'column', gap: 12,
               }}>
-                <Icon name="megaphone" size={18} />
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                  {a.pinned && <Pill tone="gold" size="sm">Pinned</Pill>}
-                  <span style={{ fontSize: 10.5, color: T_.inkMuted, letterSpacing: 0.3, textTransform: 'uppercase', fontWeight: 600 }}>
-                    {a.by}
-                  </span>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+                  <div style={{
+                    width: 38, height: 38, borderRadius: 11,
+                    background: a.pinned ? T_.gold : T_.maroonSoft,
+                    color: a.pinned ? '#fff' : T_.maroon,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    flexShrink: 0,
+                  }}>
+                    <Icon name="megaphone" size={18} />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4, flexWrap: 'wrap' }}>
+                      {a.pinned && <Pill tone="gold" size="sm">Pinned</Pill>}
+                      <span style={{ fontSize: 10.5, color: T_.inkMuted, letterSpacing: 0.3, textTransform: 'uppercase', fontWeight: 600 }}>
+                        {a.by}
+                      </span>
+                      {acknowledged && <Pill tone="success" size="sm">✓ Acknowledged</Pill>}
+                    </div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: T_.ink, lineHeight: 1.35 }}>
+                      {a.title}
+                    </div>
+                    {a.body && (
+                      <div style={{ fontSize: 13, color: T_.inkSoft, marginTop: 6, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+                        {a.body}
+                      </div>
+                    )}
+                    <div style={{ fontSize: 11.5, color: T_.inkMuted, marginTop: 6 }}>{a.at}</div>
+                  </div>
                 </div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: T_.ink, lineHeight: 1.35 }}>
-                  {a.title}
-                </div>
-                <div style={{ fontSize: 11.5, color: T_.inkMuted, marginTop: 4 }}>{a.at}</div>
+                {userId && !acknowledged && (
+                  <button
+                    onClick={() => ack(a.id)}
+                    style={{
+                      background: T_.success || '#2E7D32', color: '#fff', border: 'none',
+                      borderRadius: 12, padding: '12px 14px',
+                      fontSize: 14, fontWeight: 700, letterSpacing: 0.2,
+                      cursor: 'pointer', fontFamily: 'inherit',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                    }}
+                  >
+                    <Icon name="check" size={16} color="#fff" />
+                    Got it · புரிந்தது
+                  </button>
+                )}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </div>

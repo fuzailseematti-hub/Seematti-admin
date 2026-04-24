@@ -845,7 +845,7 @@ const App = () => {
               <h1>{visiblePage.label}</h1>
             </div>
             <div style={{ fontSize: 10, color: 'var(--inkFaint)', letterSpacing: 0.3, marginLeft: 'auto', alignSelf: 'flex-end' }}>
-              v2026-04-23-face
+              v2026-04-24-engage
             </div>
           </div>
           <div className="content">
@@ -3215,6 +3215,8 @@ const AnnouncementsPage = () => {
   const { can, role } = useContext(AppCtx);
 
   const [items, setItems] = useState([]);
+  const [readStats, setReadStats] = useState({}); // announcement_id -> { reads, acks }
+  const [activeStaffCount, setActiveStaffCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [pinFilter, setPinFilter] = useState('all');
   const [search, setSearch] = useState('');
@@ -3223,12 +3225,23 @@ const AnnouncementsPage = () => {
 
   const fetchAll = useCallback(async () => {
     if (!window.sb) return;
-    const { data } = await window.sb
-      .from('announcements')
-      .select('*')
-      .order('pinned', { ascending: false })
-      .order('created_at', { ascending: false });
-    setItems(data || []);
+    const [annRes, readsRes, staffRes] = await Promise.all([
+      window.sb.from('announcements').select('*')
+        .order('pinned', { ascending: false })
+        .order('created_at', { ascending: false }),
+      window.sb.from('announcement_reads').select('announcement_id, acknowledged'),
+      window.sb.from('employees').select('*', { count: 'exact', head: true })
+        .eq('is_active', true),
+    ]);
+    const stats = {};
+    (readsRes.data || []).forEach(r => {
+      if (!stats[r.announcement_id]) stats[r.announcement_id] = { reads: 0, acks: 0 };
+      stats[r.announcement_id].reads += 1;
+      if (r.acknowledged) stats[r.announcement_id].acks += 1;
+    });
+    setItems(annRes.data || []);
+    setReadStats(stats);
+    setActiveStaffCount(staffRes.count || 0);
     setLoading(false);
   }, []);
 
@@ -3237,6 +3250,8 @@ const AnnouncementsPage = () => {
     fetchAll();
     const ch = window.sb.channel('dash-announcements')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'announcements' },
+        () => fetchAll())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'announcement_reads' },
         () => fetchAll())
       .subscribe();
     return () => { window.sb.removeChannel(ch); };
@@ -3342,13 +3357,14 @@ const AnnouncementsPage = () => {
               <th>Title</th>
               <th style={{ width: 120 }}>Posted by</th>
               <th style={{ width: 180 }}>Posted</th>
+              <th style={{ width: 150 }}>Seen / Ack</th>
               <th style={{ width: 200 }}>Actions</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={5} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                <td colSpan={6} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
                   {loading ? 'Loading…' : 'No announcements.'}
                 </td>
               </tr>
@@ -3386,6 +3402,24 @@ const AnnouncementsPage = () => {
                 </td>
                 <td className="muted" style={{ fontSize: 12 }}>
                   {fmtDateTime(row.created_at)}
+                </td>
+                <td style={{ fontSize: 12 }}>
+                  {(() => {
+                    const s = readStats[row.id] || { reads: 0, acks: 0 };
+                    const denom = activeStaffCount || '—';
+                    const pct = activeStaffCount ? Math.round((s.reads / activeStaffCount) * 100) : 0;
+                    const tone = pct >= 90 ? 'present' : pct >= 60 ? 'late' : 'unmarked';
+                    return (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        <span className={`status-pill ${tone}`} style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
+                          {s.reads} / {denom} seen
+                        </span>
+                        <span style={{ color: 'var(--inkMuted)', fontSize: 11 }}>
+                          {s.acks} acknowledged
+                        </span>
+                      </div>
+                    );
+                  })()}
                 </td>
                 <td>
                   {can('announcements', 'edit') && (
@@ -3471,7 +3505,7 @@ const AnnouncementsPage = () => {
 // ──────────────────────────────────────────────────────────
 const TasksPage = () => {
   const toast = useToast();
-  const { can } = useContext(AppCtx);
+  const { can, session } = useContext(AppCtx);
 
   const [date, setDate]     = useState(() => fmtDateISO(new Date()));
   const [scope, setScope]   = useState('owner'); // 'owner' | 'staff'
@@ -3479,21 +3513,39 @@ const TasksPage = () => {
   const [search, setSearch] = useState('');
 
   const [tasks, setTasks]   = useState([]);
+  const [commentCounts, setCommentCounts] = useState({}); // task_id -> count
   const [loading, setLoading] = useState(true);
   const { rows: employees } = useEmployees();
 
   const [editing, setEditing] = useState(null);
   const [saving, setSaving]   = useState(false);
   const [copying, setCopying] = useState(false);
+  const [commentsFor, setCommentsFor] = useState(null); // task row opened in the comments modal
 
   const fetchAll = useCallback(async () => {
     if (!window.sb) return;
     const { data } = await window.sb
       .from('tasks')
-      .select('id, scope, assignee_id, label, owner_label, done, priority, sort_order, due_date')
+      .select('id, scope, assignee_id, label, owner_label, done, priority, sort_order, due_date, parent_task_id')
       .eq('due_date', date)
       .order('sort_order');
-    setTasks(data || []);
+    const list = data || [];
+    setTasks(list);
+    // Counts of comments per task — lightweight follow-up select so the
+    // UI can show a "💬 3" badge without joining on a view.
+    if (list.length) {
+      const ids = list.map(t => t.id);
+      const { data: cData } = await window.sb
+        .from('task_comments').select('task_id')
+        .in('task_id', ids);
+      const counts = {};
+      (cData || []).forEach(c => {
+        counts[c.task_id] = (counts[c.task_id] || 0) + 1;
+      });
+      setCommentCounts(counts);
+    } else {
+      setCommentCounts({});
+    }
     setLoading(false);
   }, [date]);
 
@@ -3505,18 +3557,42 @@ const TasksPage = () => {
       .on('postgres_changes',
         { event: '*', schema: 'public', table: 'tasks', filter: `due_date=eq.${date}` },
         () => fetchAll())
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'task_comments' },
+        () => fetchAll())
       .subscribe();
     return () => { window.sb.removeChannel(ch); };
   }, [fetchAll, date]);
 
+  // Flat-but-grouped ordering: every parent task shows with its children
+  // immediately beneath it (indented in the table below). Search filters
+  // keep a child visible only if the child matches; orphan sub-tasks
+  // (parent absent in this scope/date) are shown at the top-level.
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return tasks.filter(t => {
+    const inScope = tasks.filter(t => {
       if (t.scope !== scope) return false;
       if (scope === 'staff' && assignee !== 'all' && t.assignee_id !== assignee) return false;
       if (!matchesQuery(q, t.label, t.owner_label)) return false;
       return true;
     });
+    const byId = new Map(inScope.map(t => [t.id, t]));
+    const children = {};
+    inScope.forEach(t => {
+      if (t.parent_task_id && byId.has(t.parent_task_id)) {
+        (children[t.parent_task_id] = children[t.parent_task_id] || []).push(t);
+      }
+    });
+    const ordered = [];
+    inScope
+      .filter(t => !t.parent_task_id || !byId.has(t.parent_task_id))
+      .forEach(t => {
+        ordered.push({ ...t, _depth: 0 });
+        (children[t.id] || [])
+          .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
+          .forEach(c => ordered.push({ ...c, _depth: 1 }));
+      });
+    return ordered;
   }, [tasks, scope, assignee, search]);
 
   const counts = useMemo(() => {
@@ -3552,7 +3628,7 @@ const TasksPage = () => {
     setEditing({
       id: null, scope, assignee_id: scope === 'staff' ? (assignee !== 'all' ? assignee : 'E003') : null,
       label: '', owner_label: '', priority: false, sort_order: maxOrder + 1,
-      due_date: date, done: false, _new: true,
+      due_date: date, done: false, parent_task_id: null, _new: true,
     });
   };
   const startEdit = (row) => setEditing({ ...row, _new: false });
@@ -3572,6 +3648,7 @@ const TasksPage = () => {
         priority: !!editing.priority,
         sort_order: parseInt(editing.sort_order, 10) || 0,
         due_date: editing.due_date,
+        parent_task_id: editing.parent_task_id || null,
       };
       if (editing._new) {
         await window.sb.from('tasks').insert(payload);
@@ -3685,13 +3762,14 @@ const TasksPage = () => {
                 ? <th style={{ width: 220 }}>Owner (label)</th>
                 : <th style={{ width: 220 }}>Assigned to</th>}
               <th style={{ width: 80 }}>Priority</th>
+              <th style={{ width: 110 }}>Comments</th>
               <th style={{ width: 190 }}>Actions</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={6} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                <td colSpan={7} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
                   {loading ? 'Loading…' : 'No tasks for this date / scope.'}
                 </td>
               </tr>
@@ -3707,7 +3785,11 @@ const TasksPage = () => {
                 <td className="muted">{r.sort_order}</td>
                 <td className="name" style={{
                   textDecoration: r.done ? 'line-through' : 'none',
-                }}>{r.label}</td>
+                  paddingLeft: r._depth ? 22 : undefined,
+                }}>
+                  {r._depth ? <span style={{ color: 'var(--inkFaint)', marginRight: 6 }}>↳</span> : null}
+                  {r.label}
+                </td>
                 <td className="muted">
                   {scope === 'owner'
                     ? (r.owner_label || '—')
@@ -3719,6 +3801,14 @@ const TasksPage = () => {
                   {r.priority
                     ? <span className="status-pill late">Priority</span>
                     : <span className="muted">—</span>}
+                </td>
+                <td>
+                  <button className="btn"
+                    style={{ height: 28, padding: '0 10px', fontWeight: 600 }}
+                    onClick={() => setCommentsFor(r)}
+                    title="View or add comments">
+                    💬 {commentCounts[r.id] || 0}
+                  </button>
                 </td>
                 <td>
                   {can('tasks', 'edit') && (
@@ -3827,10 +3917,139 @@ const TasksPage = () => {
                 </label>
               </div>
             </div>
+
+            <div className="field-row">
+              <label>Part of task (optional)</label>
+              <select
+                value={editing.parent_task_id || ''}
+                onChange={e => setEditing({ ...editing, parent_task_id: e.target.value || null })}
+              >
+                <option value="">— None (top-level task) —</option>
+                {tasks
+                  .filter(t =>
+                    t.scope === editing.scope &&
+                    t.id !== editing.id &&
+                    !t.parent_task_id
+                  )
+                  .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
+                  .map(t => (
+                    <option key={t.id} value={t.id}>{t.label}</option>
+                  ))}
+              </select>
+              <div className="sub" style={{ marginTop: 4, fontSize: 11.5, color: 'var(--inkMuted)' }}>
+                Pick a parent to make this a sub-task. Nesting is single-level.
+              </div>
+            </div>
           </>
         )}
       </Modal>
+
+      <TaskCommentsModal
+        task={commentsFor}
+        session={session}
+        onClose={() => setCommentsFor(null)}
+      />
     </div>
+  );
+};
+
+// Lightweight comments thread for a single task, loaded on demand.
+const TaskCommentsModal = ({ task, session, onClose }) => {
+  const [comments, setComments] = useState([]);
+  const [loading, setLoading]   = useState(false);
+  const [draft, setDraft]       = useState('');
+  const [posting, setPosting]   = useState(false);
+
+  useEffect(() => {
+    if (!task || !window.sb) return;
+    let cancelled = false;
+    setLoading(true);
+    const fetchComments = async () => {
+      const { data } = await window.sb.from('task_comments')
+        .select('id, author_id, author_name, body, created_at')
+        .eq('task_id', task.id)
+        .order('created_at', { ascending: true });
+      if (!cancelled) { setComments(data || []); setLoading(false); }
+    };
+    fetchComments();
+    const ch = window.sb.channel(`task-comments-${task.id}`)
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'task_comments', filter: `task_id=eq.${task.id}` },
+        () => fetchComments())
+      .subscribe();
+    return () => { cancelled = true; window.sb.removeChannel(ch); };
+  }, [task]);
+
+  const post = async () => {
+    const body = draft.trim();
+    if (!body || !task || posting) return;
+    setPosting(true);
+    try {
+      const { error } = await window.sb.from('task_comments').insert({
+        task_id: task.id,
+        author_id: session?.employee_id || null,
+        author_name: session?.display_name || 'Owner',
+        body,
+      });
+      if (error) { console.error(error); return; }
+      setDraft('');
+    } finally { setPosting(false); }
+  };
+
+  return (
+    <Modal
+      open={!!task}
+      title={task ? `Comments · ${task.label}` : ''}
+      onClose={onClose}
+      footer={
+        <button className="btn" onClick={onClose}>Close</button>
+      }
+    >
+      {task && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{
+            maxHeight: 320, overflowY: 'auto',
+            display: 'flex', flexDirection: 'column', gap: 8,
+            padding: 4,
+          }}>
+            {loading && (
+              <div style={{ color: 'var(--inkMuted)', fontSize: 13, padding: 8 }}>Loading…</div>
+            )}
+            {!loading && comments.length === 0 && (
+              <div style={{ color: 'var(--inkMuted)', fontSize: 13, padding: 8 }}>
+                No comments yet. Start the conversation.
+              </div>
+            )}
+            {comments.map(c => (
+              <div key={c.id} style={{
+                background: 'var(--surfaceAlt)', borderRadius: 10,
+                padding: '10px 12px',
+              }}>
+                <div style={{ fontSize: 11.5, color: 'var(--inkMuted)', marginBottom: 3 }}>
+                  <strong style={{ color: 'var(--ink)' }}>{c.author_name || '—'}</strong>
+                  {' · '}{fmtDateTime(c.created_at)}
+                </div>
+                <div style={{ fontSize: 13.5, color: 'var(--ink)', whiteSpace: 'pre-wrap' }}>
+                  {c.body}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+            <textarea
+              value={draft}
+              onChange={e => setDraft(e.target.value)}
+              placeholder="Write a comment…"
+              rows={2}
+              style={{ flex: 1, resize: 'vertical', minHeight: 44 }}
+            />
+            <button className="btn primary" onClick={post} disabled={!draft.trim() || posting}>
+              {posting ? 'Posting…' : 'Post'}
+            </button>
+          </div>
+        </div>
+      )}
+    </Modal>
   );
 };
 
