@@ -729,6 +729,15 @@ const PERMS = {
     access:       { read: false },
     reports:      { read: false },
   },
+  // Customer Care: dedicated CRM staff. They see only customer-facing
+  // modules — no payroll, attendance, access, etc. Interactions +
+  // Muhurtham land in Part C; listed here already so routing works.
+  cc: {
+    customers:    { read: true, edit: true,  delete: true,  create: true },
+    interactions: { read: true, edit: true,  delete: false, create: true },
+    muhurtham:    { read: true, edit: true,  delete: false, create: true },
+    occasions:    { read: true, edit: false, delete: false, create: false },
+  },
 };
 const can = (role, area, action='read') => {
   if (area === '__everyone') return true;
@@ -755,6 +764,12 @@ const NAV = [
     { id: 'employees',   label: 'Employees',   area: 'employees' },
     { id: 'sections',    label: 'Sections',    area: 'sections' },
     { id: 'team_access', label: 'Team access', area: 'access' },
+  ]},
+  { section: 'Customers', items: [
+    { id: 'customers',    label: 'Customers',     area: 'customers' },
+    { id: 'interactions', label: 'Interactions',  area: 'interactions' },
+    { id: 'muhurtham',    label: 'Muhurtham',     area: 'muhurtham' },
+    { id: 'occasions',    label: 'Occasions',     area: 'occasions' },
   ]},
   { section: 'Payroll', items: [
     { id: 'payslips', label: 'Payslips', area: 'payslips' },
@@ -845,7 +860,7 @@ const App = () => {
               <h1>{visiblePage.label}</h1>
             </div>
             <div style={{ fontSize: 10, color: 'var(--inkFaint)', letterSpacing: 0.3, marginLeft: 'auto', alignSelf: 'flex-end' }}>
-              v2026-04-24-engage
+              v2026-04-24-crm-B
             </div>
           </div>
           <div className="content">
@@ -1379,8 +1394,8 @@ const AttendancePage = () => {
 // ──────────────────────────────────────────────────────────
 // Employees page — directory with add / edit / deactivate / delete.
 // ──────────────────────────────────────────────────────────
-const TYPE_LABEL = { owner: 'Owner', admin: 'Admin', hr: 'HR', staff: 'Staff' };
-const TYPE_TONE  = { owner: 'brand', admin: 'brand', hr: 'info', staff: 'gold' };
+const TYPE_LABEL = { owner: 'Owner', admin: 'Admin', hr: 'HR', staff: 'Staff', cc: 'Customer Care' };
+const TYPE_TONE  = { owner: 'brand', admin: 'brand', hr: 'info', staff: 'gold', cc: 'info' };
 
 const EmployeesPage = () => {
   const toast = useToast();
@@ -7235,6 +7250,7 @@ const ROLE_OPTIONS = [
   { id: 'manager',    label: 'Manager',    sub: 'Sees their sections, full operational access' },
   { id: 'supervisor', label: 'Supervisor', sub: 'Sees their sections, limited powers by default' },
   { id: 'hr',         label: 'HR',         sub: 'Operations only — no payroll, no access management' },
+  { id: 'cc',         label: 'Customer Care', sub: 'CRM only — customers, calls, muhurtham. No payroll / attendance.' },
 ];
 
 const TeamAccessPage = () => {
@@ -7431,6 +7447,7 @@ const TeamAccessPage = () => {
                        : r === 'hr' ? 'HR'
                        : r === 'manager' ? 'Manager'
                        : r === 'supervisor' ? 'Supervisor'
+                       : r === 'cc' ? 'Customer Care'
                        : r;
 
   return (
@@ -7442,6 +7459,7 @@ const TeamAccessPage = () => {
         <div className="stat leave"><div className="k">HR</div><div className="v">{access.filter(a => a.employees.user_type === 'hr').length}</div></div>
         <div className="stat late"><div className="k">Managers</div><div className="v">{access.filter(a => a.employees.user_type === 'manager').length}</div></div>
         <div className="stat"><div className="k">Supervisors</div><div className="v">{access.filter(a => a.employees.user_type === 'supervisor').length}</div></div>
+        <div className="stat leave"><div className="k">Customer Care</div><div className="v">{access.filter(a => a.employees.user_type === 'cc').length}</div></div>
       </div>
 
       <div className="toolbar">
@@ -7499,7 +7517,7 @@ const TeamAccessPage = () => {
                     </div>
                   </td>
                   <td>
-                    <span className={`status-pill ${e.user_type === 'owner' || e.user_type === 'admin' ? 'present' : e.user_type === 'hr' ? 'leave' : e.user_type === 'manager' ? 'late' : 'unmarked'}`}>
+                    <span className={`status-pill ${e.user_type === 'owner' || e.user_type === 'admin' ? 'present' : e.user_type === 'hr' || e.user_type === 'cc' ? 'leave' : e.user_type === 'manager' ? 'late' : 'unmarked'}`}>
                       {roleLabel(e.user_type)}
                     </span>
                   </td>
@@ -8387,6 +8405,718 @@ const AdvanceReceiptsPrint = ({ rows, onClose }) => {
   );
 };
 
+// ──────────────────────────────────────────────────────────
+// CRM — Customers list, add / edit, detail sheet with
+// Preferences + Family tabs. Scoped by the `customers` PERM.
+// ──────────────────────────────────────────────────────────
+const RELATIONS = ['husband', 'wife', 'son', 'daughter', 'mother', 'father', 'sister', 'brother', 'other'];
+const SOURCES   = ['walk-in', 'referral', 'muhurtham', 'social', 'other'];
+const PREF_CATEGORIES = ['silk', 'cotton', 'dhoti', 'shirting', 'kurta', 'dress', 'other'];
+
+const CustomersPage = () => {
+  const toast = useToast();
+  const { can, session } = useContext(AppCtx);
+
+  const [rows, setRows]     = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+  const [tagFilter, setTagFilter] = useState('all');
+  const [editing, setEditing] = useState(null);    // customer being created/edited
+  const [detail, setDetail]   = useState(null);    // customer whose detail sheet is open
+  const [saving, setSaving]   = useState(false);
+
+  const fetchAll = useCallback(async () => {
+    if (!window.sb) return;
+    const { data } = await window.sb
+      .from('customers')
+      .select('*')
+      .order('created_at', { ascending: false });
+    setRows(data || []);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (!window.sb) return;
+    fetchAll();
+    const ch = window.sb.channel('dash-customers')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' },
+        () => fetchAll())
+      .subscribe();
+    return () => { window.sb.removeChannel(ch); };
+  }, [fetchAll]);
+
+  // Keep the detail sheet in sync with the underlying row (so edits made
+  // via the "Edit" button or realtime updates elsewhere flow in).
+  useEffect(() => {
+    if (!detail) return;
+    const fresh = rows.find(r => r.id === detail.id);
+    if (fresh && fresh.updated_at !== detail.updated_at) setDetail(fresh);
+  }, [rows, detail]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return rows.filter(c => {
+      if (tagFilter === 'vip' && !c.is_vip) return false;
+      if (tagFilter === 'muhurtham' && !(c.tags || []).includes('muhurtham')) return false;
+      if (tagFilter === 'dnc' && !c.do_not_contact) return false;
+      if (!matchesQuery(q, c.name, c.phone, c.alt_phone, c.email, c.city, (c.tags || []).join(' '))) return false;
+      return true;
+    });
+  }, [rows, search, tagFilter]);
+
+  const counts = useMemo(() => ({
+    total: rows.length,
+    vip:   rows.filter(c => c.is_vip).length,
+    muhurtham: rows.filter(c => (c.tags || []).includes('muhurtham')).length,
+    dnc:   rows.filter(c => c.do_not_contact).length,
+    thisMonth: rows.filter(c => {
+      const d = new Date(c.created_at);
+      const now = new Date();
+      return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+    }).length,
+  }), [rows]);
+
+  const blankCustomer = () => ({
+    id: null, _new: true,
+    name: '', phone: '', alt_phone: '', email: '',
+    address: '', city: '', pincode: '',
+    birthday: '', anniversary: '',
+    language_pref: 'ta', source: 'walk-in',
+    tags: [], is_vip: false, do_not_contact: false,
+    notes: '',
+  });
+
+  const startNew = () => setEditing(blankCustomer());
+  const startEdit = (row) => setEditing({ ...row, _new: false });
+  const close = () => setEditing(null);
+
+  const save = async () => {
+    if (!editing || saving) return;
+    if (!editing.name.trim()) { toast('Name is required'); return; }
+    setSaving(true);
+    try {
+      const payload = {
+        name: editing.name.trim(),
+        phone:         (editing.phone || '').trim() || null,
+        alt_phone:     (editing.alt_phone || '').trim() || null,
+        email:         (editing.email || '').trim() || null,
+        address:       (editing.address || '').trim() || null,
+        city:          (editing.city || '').trim() || null,
+        pincode:       (editing.pincode || '').trim() || null,
+        birthday:      editing.birthday || null,
+        anniversary:   editing.anniversary || null,
+        language_pref: editing.language_pref || 'ta',
+        source:        editing.source || 'walk-in',
+        tags:          Array.isArray(editing.tags) ? editing.tags : [],
+        is_vip:        !!editing.is_vip,
+        do_not_contact:!!editing.do_not_contact,
+        notes:         (editing.notes || '').trim() || null,
+      };
+      if (editing._new) {
+        payload.created_by = session?.employee_id || null;
+        const { data, error } = await window.sb.from('customers').insert(payload).select().single();
+        if (error) { toast('Could not add customer: ' + error.message); console.error(error); return; }
+        toast('Customer added');
+        setDetail(data);
+      } else {
+        const { error } = await window.sb.from('customers').update(payload).eq('id', editing.id);
+        if (error) { toast('Could not save: ' + error.message); console.error(error); return; }
+        toast('Customer updated');
+      }
+      close();
+    } finally { setSaving(false); }
+  };
+
+  const del = async (row) => {
+    if (!can('customers', 'delete')) return;
+    if (!window.confirm(`Delete ${row.name}? This removes preferences + family notes too. Cannot be undone.`)) return;
+    await window.sb.from('customers').delete().eq('id', row.id);
+    toast('Customer deleted');
+    if (detail?.id === row.id) setDetail(null);
+  };
+
+  return (
+    <div>
+      <div className="stat-strip">
+        <div className="stat"><div className="k">Total</div><div className="v">{counts.total}</div></div>
+        <div className="stat present"><div className="k">VIP</div><div className="v">{counts.vip}</div></div>
+        <div className="stat late"><div className="k">Muhurtham</div><div className="v">{counts.muhurtham}</div></div>
+        <div className="stat leave"><div className="k">New this month</div><div className="v">{counts.thisMonth}</div></div>
+        <div className="stat absent"><div className="k">Do-not-contact</div><div className="v">{counts.dnc}</div></div>
+      </div>
+
+      <div className="toolbar">
+        <div className="seg">
+          {[
+            { id: 'all',       label: `All · ${counts.total}` },
+            { id: 'vip',       label: `VIP · ${counts.vip}` },
+            { id: 'muhurtham', label: `Muhurtham · ${counts.muhurtham}` },
+            { id: 'dnc',       label: `DNC · ${counts.dnc}` },
+          ].map(s => (
+            <button key={s.id}
+              className={tagFilter === s.id ? 'active' : ''}
+              onClick={() => setTagFilter(s.id)}>
+              {s.label}
+            </button>
+          ))}
+        </div>
+        <input type="search" placeholder="Search name, phone, email, city, tag…"
+          value={search} onChange={e => setSearch(e.target.value)} />
+        {can('customers', 'create') && (
+          <button className="btn primary" onClick={startNew}
+            style={{ marginLeft: 'auto' }}>
+            + New customer
+          </button>
+        )}
+      </div>
+
+      <div className="table-wrap">
+        <table className="data">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th style={{ width: 150 }}>Phone</th>
+              <th style={{ width: 120 }}>City</th>
+              <th style={{ width: 130 }}>Source</th>
+              <th style={{ width: 160 }}>Tags</th>
+              <th style={{ width: 130 }}>Added</th>
+              <th style={{ width: 190 }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 && (
+              <tr>
+                <td colSpan={7} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                  {loading ? 'Loading…' : rows.length === 0 ? 'No customers yet. Click "+ New customer" to add the first.' : 'No customers match these filters.'}
+                </td>
+              </tr>
+            )}
+            {filtered.map(c => (
+              <tr key={c.id} onClick={() => setDetail(c)} style={{ cursor: 'pointer' }}>
+                <td className="name">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span>{c.name}</span>
+                    {c.is_vip && <span className="status-pill late" style={{ fontSize: 10 }}>★ VIP</span>}
+                    {c.do_not_contact && <span className="status-pill absent" style={{ fontSize: 10 }}>DNC</span>}
+                  </div>
+                </td>
+                <td className="muted" style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 12.5 }}>
+                  {c.phone || <span className="muted">—</span>}
+                </td>
+                <td>{c.city || <span className="muted">—</span>}</td>
+                <td className="muted" style={{ fontSize: 12.5 }}>{c.source || '—'}</td>
+                <td>
+                  {(c.tags || []).length === 0
+                    ? <span className="muted">—</span>
+                    : (c.tags || []).slice(0, 2).map(t => (
+                        <span key={t} className="status-pill" style={{ marginRight: 4, fontSize: 10, background: 'var(--surfaceAlt)', color: 'var(--inkSoft)' }}>
+                          {t}
+                        </span>
+                      ))
+                  }
+                  {(c.tags || []).length > 2 && <span className="muted" style={{ fontSize: 11 }}>+{(c.tags || []).length - 2}</span>}
+                </td>
+                <td className="muted" style={{ fontSize: 12 }}>{fmtDateTime(c.created_at)}</td>
+                <td onClick={e => e.stopPropagation()}>
+                  {can('customers', 'edit') && (
+                    <button className="btn" style={{ height: 28, padding: '0 10px', marginRight: 6 }}
+                      onClick={() => startEdit(c)}>Edit</button>
+                  )}
+                  {can('customers', 'delete') && (
+                    <button className="btn danger" style={{ height: 28, padding: '0 10px' }}
+                      onClick={() => del(c)}>Delete</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <CustomerEditModal
+        open={!!editing}
+        draft={editing}
+        onChange={setEditing}
+        onClose={close}
+        onSave={save}
+        saving={saving}
+      />
+
+      <CustomerDetailSheet
+        customer={detail}
+        onClose={() => setDetail(null)}
+        onEdit={() => setEditing({ ...detail, _new: false })}
+        canEdit={can('customers', 'edit')}
+      />
+    </div>
+  );
+};
+
+// ─── Customer edit modal ───────────────────────────────────
+const CustomerEditModal = ({ open, draft, onChange, onClose, onSave, saving }) => {
+  if (!draft) return null;
+  const setField = (k, v) => onChange({ ...draft, [k]: v });
+  const toggleTag = (tag) => {
+    const cur = Array.isArray(draft.tags) ? draft.tags : [];
+    setField('tags', cur.includes(tag) ? cur.filter(t => t !== tag) : [...cur, tag]);
+  };
+  const commonTags = ['muhurtham', 'regular', 'referral', 'wholesale', 'priority'];
+
+  return (
+    <Modal
+      open={open}
+      title={draft._new ? 'New customer' : `Edit · ${draft.name}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="btn primary" onClick={onSave} disabled={saving}>
+            {saving ? 'Saving…' : draft._new ? 'Add customer' : 'Save'}
+          </button>
+        </>
+      }
+    >
+      <div className="field-row">
+        <label>Full name *</label>
+        <input autoFocus value={draft.name}
+          onChange={e => setField('name', e.target.value)}
+          placeholder="e.g. Priya Kannan" />
+      </div>
+
+      <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <div>
+          <label>Phone</label>
+          <input value={draft.phone || ''} inputMode="tel"
+            onChange={e => setField('phone', e.target.value)}
+            placeholder="9876543210" />
+        </div>
+        <div>
+          <label>Alt phone</label>
+          <input value={draft.alt_phone || ''} inputMode="tel"
+            onChange={e => setField('alt_phone', e.target.value)}
+            placeholder="Husband / mother / etc." />
+        </div>
+      </div>
+
+      <div className="field-row">
+        <label>Email (optional)</label>
+        <input value={draft.email || ''} type="email"
+          onChange={e => setField('email', e.target.value)} />
+      </div>
+
+      <div className="field-row">
+        <label>Address</label>
+        <textarea value={draft.address || ''} rows={2}
+          onChange={e => setField('address', e.target.value)}
+          placeholder="House / flat, street, landmark" />
+      </div>
+
+      <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <div>
+          <label>City / town</label>
+          <input value={draft.city || ''}
+            onChange={e => setField('city', e.target.value)} />
+        </div>
+        <div>
+          <label>Pincode</label>
+          <input value={draft.pincode || ''} inputMode="numeric" maxLength={6}
+            onChange={e => setField('pincode', e.target.value)} />
+        </div>
+      </div>
+
+      <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <div>
+          <label>Birthday</label>
+          <input type="date" value={draft.birthday || ''}
+            onChange={e => setField('birthday', e.target.value)} />
+        </div>
+        <div>
+          <label>Anniversary</label>
+          <input type="date" value={draft.anniversary || ''}
+            onChange={e => setField('anniversary', e.target.value)} />
+        </div>
+      </div>
+
+      <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <div>
+          <label>Language preference</label>
+          <select value={draft.language_pref || 'ta'}
+            onChange={e => setField('language_pref', e.target.value)}>
+            <option value="ta">Tamil (தமிழ்)</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+        <div>
+          <label>Source</label>
+          <select value={draft.source || 'walk-in'}
+            onChange={e => setField('source', e.target.value)}>
+            {SOURCES.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <div className="field-row">
+        <label>Tags</label>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {commonTags.map(tag => {
+            const on = (draft.tags || []).includes(tag);
+            return (
+              <button key={tag} type="button"
+                onClick={() => toggleTag(tag)}
+                className={`btn ${on ? 'primary' : ''}`}
+                style={{ height: 26, padding: '0 10px', fontSize: 12 }}>
+                {on ? '✓ ' : ''}{tag}
+              </button>
+            );
+          })}
+        </div>
+        <div className="sub" style={{ marginTop: 4, fontSize: 11.5, color: 'var(--inkMuted)' }}>
+          Pick the ones that apply. 'muhurtham' surfaces the customer on the Muhurtham pipeline (Part C).
+        </div>
+      </div>
+
+      <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <label className="checkbox-row" style={{ cursor: 'pointer' }}>
+          <input type="checkbox" checked={!!draft.is_vip}
+            onChange={e => setField('is_vip', e.target.checked)} />
+          <div>
+            <div className="label-text">VIP customer</div>
+            <div className="sub">Highlighted on every list.</div>
+          </div>
+        </label>
+        <label className="checkbox-row" style={{ cursor: 'pointer' }}>
+          <input type="checkbox" checked={!!draft.do_not_contact}
+            onChange={e => setField('do_not_contact', e.target.checked)} />
+          <div>
+            <div className="label-text">Do not contact</div>
+            <div className="sub">CC team should not call / message.</div>
+          </div>
+        </label>
+      </div>
+
+      <div className="field-row">
+        <label>Notes (free text)</label>
+        <textarea value={draft.notes || ''} rows={3}
+          onChange={e => setField('notes', e.target.value)}
+          placeholder="Anything the CC team should remember — preferred stylist, past complaint, family context, etc." />
+      </div>
+    </Modal>
+  );
+};
+
+// ─── Customer detail sheet with Preferences + Family tabs ──
+const CustomerDetailSheet = ({ customer, onClose, onEdit, canEdit }) => {
+  const [tab, setTab] = useState('summary');
+  const [prefs, setPrefs]     = useState([]);
+  const [family, setFamily]   = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const [prefDraft, setPrefDraft]       = useState(null);
+  const [famDraft, setFamDraft]         = useState(null);
+
+  useEffect(() => {
+    if (!customer || !window.sb) return;
+    let cancelled = false;
+    setLoading(true);
+    const fetchRelated = async () => {
+      const [prefRes, famRes] = await Promise.all([
+        window.sb.from('customer_preferences').select('*')
+          .eq('customer_id', customer.id).order('created_at', { ascending: true }),
+        window.sb.from('customer_family_members').select('*')
+          .eq('customer_id', customer.id).order('created_at', { ascending: true }),
+      ]);
+      if (cancelled) return;
+      setPrefs(prefRes.data || []);
+      setFamily(famRes.data || []);
+      setLoading(false);
+    };
+    fetchRelated();
+    const ch = window.sb.channel(`customer-${customer.id}`)
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'customer_preferences', filter: `customer_id=eq.${customer.id}` },
+        () => fetchRelated())
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'customer_family_members', filter: `customer_id=eq.${customer.id}` },
+        () => fetchRelated())
+      .subscribe();
+    return () => { cancelled = true; window.sb.removeChannel(ch); };
+  }, [customer]);
+
+  const savePref = async () => {
+    if (!prefDraft) return;
+    const payload = {
+      customer_id:  customer.id,
+      category:     (prefDraft.category || '').trim() || null,
+      sub_category: (prefDraft.sub_category || '').trim() || null,
+      color_notes:  (prefDraft.color_notes || '').trim() || null,
+      price_min:    prefDraft.price_min === '' ? null : Number(prefDraft.price_min),
+      price_max:    prefDraft.price_max === '' ? null : Number(prefDraft.price_max),
+      notes:        (prefDraft.notes || '').trim() || null,
+    };
+    if (prefDraft.id) {
+      await window.sb.from('customer_preferences').update(payload).eq('id', prefDraft.id);
+    } else {
+      await window.sb.from('customer_preferences').insert(payload);
+    }
+    setPrefDraft(null);
+  };
+
+  const delPref = async (p) => {
+    if (!window.confirm('Delete this preference?')) return;
+    await window.sb.from('customer_preferences').delete().eq('id', p.id);
+  };
+
+  const saveFam = async () => {
+    if (!famDraft) return;
+    if (!(famDraft.name || '').trim()) return;
+    const payload = {
+      customer_id: customer.id,
+      name: famDraft.name.trim(),
+      relation: famDraft.relation || null,
+      age:      famDraft.age === '' ? null : Number(famDraft.age),
+      notes:    (famDraft.notes || '').trim() || null,
+    };
+    if (famDraft.id) {
+      await window.sb.from('customer_family_members').update(payload).eq('id', famDraft.id);
+    } else {
+      await window.sb.from('customer_family_members').insert(payload);
+    }
+    setFamDraft(null);
+  };
+
+  const delFam = async (m) => {
+    if (!window.confirm(`Remove ${m.name} from family notes?`)) return;
+    await window.sb.from('customer_family_members').delete().eq('id', m.id);
+  };
+
+  if (!customer) return null;
+  return (
+    <Modal
+      open={!!customer}
+      title={customer.name}
+      onClose={onClose}
+      footer={
+        <>
+          {canEdit && <button className="btn" onClick={onEdit}>Edit customer</button>}
+          <button className="btn primary" onClick={onClose}>Close</button>
+        </>
+      }
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>
+        {customer.is_vip && <span className="status-pill late">★ VIP</span>}
+        {customer.do_not_contact && <span className="status-pill absent">Do not contact</span>}
+        {(customer.tags || []).map(t => (
+          <span key={t} className="status-pill" style={{ background: 'var(--surfaceAlt)', color: 'var(--inkSoft)' }}>{t}</span>
+        ))}
+      </div>
+
+      <div className="seg" style={{ width: 'fit-content', marginBottom: 14 }}>
+        {[
+          { id: 'summary', label: 'Summary' },
+          { id: 'prefs',   label: `Preferences (${prefs.length})` },
+          { id: 'family',  label: `Family (${family.length})` },
+        ].map(t => (
+          <button key={t.id} type="button"
+            className={tab === t.id ? 'active' : ''}
+            onClick={() => setTab(t.id)}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'summary' && (
+        <div style={{
+          display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10,
+          background: 'var(--bg)', border: '1px solid var(--border)',
+          borderRadius: 12, padding: 14, marginBottom: 10,
+        }}>
+          <DetailField label="Phone"        value={customer.phone || '—'} mono />
+          <DetailField label="Alt phone"    value={customer.alt_phone || '—'} mono />
+          <DetailField label="Email"        value={customer.email || '—'} />
+          <DetailField label="City / pincode" value={[customer.city, customer.pincode].filter(Boolean).join(' · ') || '—'} />
+          <DetailField label="Address"      value={customer.address || '—'} />
+          <DetailField label="Birthday"     value={customer.birthday ? fmtDate(customer.birthday) : '—'} />
+          <DetailField label="Anniversary"  value={customer.anniversary ? fmtDate(customer.anniversary) : '—'} />
+          <DetailField label="Language"     value={customer.language_pref === 'ta' ? 'Tamil' : 'English'} />
+          <DetailField label="Source"       value={customer.source || '—'} />
+          <DetailField label="Added"        value={fmtDateTime(customer.created_at)} />
+          {customer.notes && (
+            <div style={{ gridColumn: '1 / -1' }}>
+              <DetailField label="Notes" value={customer.notes} />
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'prefs' && (
+        <div>
+          {!prefDraft && (
+            <button className="btn primary" style={{ marginBottom: 10 }}
+              onClick={() => setPrefDraft({ category: 'silk', sub_category: '', color_notes: '', price_min: '', price_max: '', notes: '' })}>
+              + Add preference
+            </button>
+          )}
+          {prefDraft && (
+            <div style={{
+              background: 'var(--surfaceAlt)', padding: 12, borderRadius: 10,
+              marginBottom: 10, border: '1px solid var(--border)',
+            }}>
+              <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div>
+                  <label>Category</label>
+                  <select value={prefDraft.category || ''}
+                    onChange={e => setPrefDraft({ ...prefDraft, category: e.target.value })}>
+                    <option value="">—</option>
+                    {PREF_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label>Sub-category</label>
+                  <input value={prefDraft.sub_category || ''}
+                    onChange={e => setPrefDraft({ ...prefDraft, sub_category: e.target.value })}
+                    placeholder="e.g. Kanjivaram, Banarasi" />
+                </div>
+              </div>
+              <div className="field-row">
+                <label>Colour / pattern notes</label>
+                <input value={prefDraft.color_notes || ''}
+                  onChange={e => setPrefDraft({ ...prefDraft, color_notes: e.target.value })}
+                  placeholder="e.g. prefers maroon + gold, dislikes pastels" />
+              </div>
+              <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div>
+                  <label>Price min (₹)</label>
+                  <input type="number" value={prefDraft.price_min}
+                    onChange={e => setPrefDraft({ ...prefDraft, price_min: e.target.value })} />
+                </div>
+                <div>
+                  <label>Price max (₹)</label>
+                  <input type="number" value={prefDraft.price_max}
+                    onChange={e => setPrefDraft({ ...prefDraft, price_max: e.target.value })} />
+                </div>
+              </div>
+              <div className="field-row">
+                <label>Notes</label>
+                <textarea rows={2} value={prefDraft.notes || ''}
+                  onChange={e => setPrefDraft({ ...prefDraft, notes: e.target.value })} />
+              </div>
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                <button className="btn" onClick={() => setPrefDraft(null)}>Cancel</button>
+                <button className="btn primary" onClick={savePref}>Save</button>
+              </div>
+            </div>
+          )}
+          {loading && <div style={{ color: 'var(--inkMuted)', fontSize: 13 }}>Loading…</div>}
+          {!loading && prefs.length === 0 && !prefDraft && (
+            <div style={{ color: 'var(--inkMuted)', fontSize: 13, padding: 20, textAlign: 'center' }}>
+              No preferences captured yet.
+            </div>
+          )}
+          {prefs.map(p => (
+            <div key={p.id} style={{
+              padding: 12, borderBottom: '1px solid var(--border)',
+              display: 'flex', gap: 10, alignItems: 'flex-start',
+            }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600, marginBottom: 2 }}>
+                  {[p.category, p.sub_category].filter(Boolean).join(' · ') || 'Preference'}
+                </div>
+                {p.color_notes && <div style={{ fontSize: 13, color: 'var(--inkSoft)' }}>{p.color_notes}</div>}
+                {(p.price_min != null || p.price_max != null) && (
+                  <div style={{ fontSize: 12, color: 'var(--inkMuted)', marginTop: 2 }}>
+                    ₹{p.price_min ?? '?'} – ₹{p.price_max ?? '?'}
+                  </div>
+                )}
+                {p.notes && <div style={{ fontSize: 12, color: 'var(--inkMuted)', marginTop: 3 }}>{p.notes}</div>}
+              </div>
+              <div>
+                <button className="btn" style={{ height: 26, padding: '0 8px', marginRight: 4, fontSize: 11 }}
+                  onClick={() => setPrefDraft({ ...p, price_min: p.price_min ?? '', price_max: p.price_max ?? '' })}>Edit</button>
+                <button className="btn danger" style={{ height: 26, padding: '0 8px', fontSize: 11 }}
+                  onClick={() => delPref(p)}>Delete</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === 'family' && (
+        <div>
+          {!famDraft && (
+            <button className="btn primary" style={{ marginBottom: 10 }}
+              onClick={() => setFamDraft({ name: '', relation: 'husband', age: '', notes: '' })}>
+              + Add family member
+            </button>
+          )}
+          {famDraft && (
+            <div style={{
+              background: 'var(--surfaceAlt)', padding: 12, borderRadius: 10,
+              marginBottom: 10, border: '1px solid var(--border)',
+            }}>
+              <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 80px', gap: 10 }}>
+                <div>
+                  <label>Name *</label>
+                  <input value={famDraft.name}
+                    onChange={e => setFamDraft({ ...famDraft, name: e.target.value })} />
+                </div>
+                <div>
+                  <label>Relation</label>
+                  <select value={famDraft.relation || ''}
+                    onChange={e => setFamDraft({ ...famDraft, relation: e.target.value })}>
+                    {RELATIONS.map(r => <option key={r} value={r}>{r}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label>Age</label>
+                  <input type="number" min="0" max="120" value={famDraft.age}
+                    onChange={e => setFamDraft({ ...famDraft, age: e.target.value })} />
+                </div>
+              </div>
+              <div className="field-row">
+                <label>Notes</label>
+                <input value={famDraft.notes || ''}
+                  onChange={e => setFamDraft({ ...famDraft, notes: e.target.value })}
+                  placeholder="e.g. prefers kurtas, size L" />
+              </div>
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                <button className="btn" onClick={() => setFamDraft(null)}>Cancel</button>
+                <button className="btn primary" onClick={saveFam}>Save</button>
+              </div>
+            </div>
+          )}
+          {loading && <div style={{ color: 'var(--inkMuted)', fontSize: 13 }}>Loading…</div>}
+          {!loading && family.length === 0 && !famDraft && (
+            <div style={{ color: 'var(--inkMuted)', fontSize: 13, padding: 20, textAlign: 'center' }}>
+              No family members captured yet.
+            </div>
+          )}
+          {family.map(m => (
+            <div key={m.id} style={{
+              padding: 12, borderBottom: '1px solid var(--border)',
+              display: 'flex', gap: 10, alignItems: 'center',
+            }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600 }}>
+                  {m.name}{' '}
+                  {m.relation && <span style={{ fontWeight: 400, color: 'var(--inkMuted)' }}>· {m.relation}</span>}
+                  {m.age != null && <span style={{ fontWeight: 400, color: 'var(--inkMuted)' }}>, {m.age} yrs</span>}
+                </div>
+                {m.notes && <div style={{ fontSize: 12.5, color: 'var(--inkSoft)', marginTop: 2 }}>{m.notes}</div>}
+              </div>
+              <div>
+                <button className="btn" style={{ height: 26, padding: '0 8px', marginRight: 4, fontSize: 11 }}
+                  onClick={() => setFamDraft({ ...m, age: m.age ?? '' })}>Edit</button>
+                <button className="btn danger" style={{ height: 26, padding: '0 8px', fontSize: 11 }}
+                  onClick={() => delFam(m)}>Delete</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Modal>
+  );
+};
+
 const Page = ({ name }) => {
   if (name === 'attendance')    return <AttendancePage />;
   if (name === 'employees')     return <EmployeesPage />;
@@ -8403,6 +9133,10 @@ const Page = ({ name }) => {
   if (name === 'team_access')   return <TeamAccessPage />;
   if (name === 'profile')       return <ProfilePage />;
   if (name === 'settings')      return <SettingsPage />;
+  if (name === 'customers')     return <CustomersPage />;
+  if (name === 'interactions')  return <CRMComingSoon module="Interactions" note="Part C — call log + follow-up timeline." />;
+  if (name === 'muhurtham')     return <CRMComingSoon module="Muhurtham" note="Part C — home-visit pipeline with pre/post checklists." />;
+  if (name === 'occasions')     return <CRMComingSoon module="Occasions" note="Part D — birthday / anniversary / festival reminders." />;
   return (
     <div className="empty">
       <h3>Coming soon</h3>
@@ -8410,6 +9144,18 @@ const Page = ({ name }) => {
     </div>
   );
 };
+
+const CRMComingSoon = ({ module, note }) => (
+  <div style={{
+    padding: 40, background: 'var(--surface)', border: '1px solid var(--border)',
+    borderRadius: 16, textAlign: 'center', color: 'var(--inkSoft)',
+  }}>
+    <div style={{ fontFamily: 'Fraunces, Georgia, serif', fontSize: 22, marginBottom: 6, color: 'var(--ink)' }}>
+      {module}
+    </div>
+    <div style={{ fontSize: 13.5 }}>{note}</div>
+  </div>
+);
 
 // ──────────────────────────────────────────────────────────
 // Root
