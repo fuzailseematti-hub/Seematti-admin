@@ -860,7 +860,7 @@ const App = () => {
               <h1>{visiblePage.label}</h1>
             </div>
             <div style={{ fontSize: 10, color: 'var(--inkFaint)', letterSpacing: 0.3, marginLeft: 'auto', alignSelf: 'flex-end' }}>
-              v2026-04-24-crm-C1
+              v2026-04-24-crm-C2
             </div>
           </div>
           <div className="content">
@@ -9530,6 +9530,508 @@ const InteractionLogModal = ({ open, draft, customers, onChange, onClose, onSave
   );
 };
 
+// ──────────────────────────────────────────────────────────
+// CRM — Muhurtham home-visit pipeline.
+// Cards rather than table because each visit carries a lot of
+// context and CC staff glance-scan by visit-date + status.
+// ──────────────────────────────────────────────────────────
+const MUHURTHAM_OUTCOMES = [
+  { id: 'ordered',           label: 'Ordered' },
+  { id: 'deciding',          label: 'Deciding / thinking' },
+  { id: 'wants-store-visit', label: 'Wants to visit store' },
+  { id: 'not-interested',    label: 'Not interested' },
+  { id: 'rescheduled',       label: 'Rescheduled' },
+  { id: 'other',             label: 'Other' },
+];
+
+const MuhurthamPage = () => {
+  const toast = useToast();
+  const { can, session } = useContext(AppCtx);
+
+  const [rows, setRows]           = useState([]);
+  const [customers, setCustomers] = useState([]);
+  const [loading, setLoading]     = useState(true);
+  const [bucket, setBucket]       = useState('upcoming'); // upcoming | today | week | followup | completed | cancelled | all
+  const [search, setSearch]       = useState('');
+  const [editing, setEditing]     = useState(null);
+  const [saving, setSaving]       = useState(false);
+
+  const fetchAll = useCallback(async () => {
+    if (!window.sb) return;
+    const [mvRes, custRes] = await Promise.all([
+      window.sb.from('muhurtham_visits')
+        .select('*, customers(id, name, phone, city, is_vip)')
+        .order('visit_date', { ascending: true, nullsFirst: false })
+        .limit(500),
+      window.sb.from('customers').select('id, name, phone').order('name'),
+    ]);
+    setRows((mvRes.data || []).filter(r => r.customers));
+    setCustomers(custRes.data || []);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (!window.sb) return;
+    fetchAll();
+    const ch = window.sb.channel('dash-muhurtham')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'muhurtham_visits' },
+        () => fetchAll())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' },
+        () => fetchAll())
+      .subscribe();
+    return () => { window.sb.removeChannel(ch); };
+  }, [fetchAll]);
+
+  const today = todayISO();
+  const weekEnd = (() => {
+    const d = new Date(today + 'T00:00:00');
+    d.setDate(d.getDate() + 7);
+    return dateISO(d);
+  })();
+
+  const counts = useMemo(() => ({
+    total:     rows.length,
+    today:     rows.filter(r => r.visit_date === today && r.status !== 'cancelled').length,
+    week:      rows.filter(r => r.visit_date >= today && r.visit_date <= weekEnd && r.status !== 'cancelled').length,
+    upcoming:  rows.filter(r => r.visit_date >= today && r.status !== 'cancelled' && r.status !== 'completed').length,
+    followup:  rows.filter(r => r.reminder_due_on && r.reminder_due_on <= today && !r.reminder_resolved && r.status !== 'cancelled').length,
+    completed: rows.filter(r => r.status === 'completed').length,
+    cancelled: rows.filter(r => r.status === 'cancelled').length,
+  }), [rows, today, weekEnd]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return rows.filter(r => {
+      if (bucket === 'today'     && !(r.visit_date === today && r.status !== 'cancelled')) return false;
+      if (bucket === 'week'      && !(r.visit_date >= today && r.visit_date <= weekEnd && r.status !== 'cancelled')) return false;
+      if (bucket === 'upcoming'  && !(r.visit_date >= today && r.status !== 'cancelled' && r.status !== 'completed')) return false;
+      if (bucket === 'followup'  && !(r.reminder_due_on && r.reminder_due_on <= today && !r.reminder_resolved && r.status !== 'cancelled')) return false;
+      if (bucket === 'completed' && r.status !== 'completed') return false;
+      if (bucket === 'cancelled' && r.status !== 'cancelled') return false;
+      if (!matchesQuery(q, r.customers?.name, r.customers?.phone, r.address, r.color_theme, r.post_visit_notes, r.special_requests)) return false;
+      return true;
+    });
+  }, [rows, bucket, search, today, weekEnd]);
+
+  const blank = (customer_id = '') => ({
+    id: null, _new: true,
+    customer_id,
+    wedding_date: '', visit_date: '', visit_time: '',
+    address: '', budget_min: '', budget_max: '',
+    color_theme: '', family_joining: '', special_requests: '',
+    pre_visit_done: false, post_visit_done: false,
+    post_visit_outcome: '', post_visit_notes: '',
+    reminder_resolved: false,
+    status: 'scheduled',
+  });
+
+  const startNew = () => setEditing(blank());
+  const startEdit = (row) => setEditing({
+    ...row, _new: false,
+    budget_min:      row.budget_min ?? '',
+    budget_max:      row.budget_max ?? '',
+    family_joining:  row.family_joining ?? '',
+    visit_time:      row.visit_time || '',
+    color_theme:     row.color_theme || '',
+    special_requests: row.special_requests || '',
+    post_visit_outcome: row.post_visit_outcome || '',
+    post_visit_notes:   row.post_visit_notes || '',
+  });
+  const close = () => setEditing(null);
+
+  const buildPayload = () => {
+    const now = new Date().toISOString();
+    const prev = rows.find(r => r.id === editing.id) || {};
+    const payload = {
+      customer_id:     editing.customer_id,
+      wedding_date:    editing.wedding_date || null,
+      visit_date:      editing.visit_date || null,
+      visit_time:      (editing.visit_time || '').trim() || null,
+      address:         (editing.address || '').trim() || null,
+      budget_min:      editing.budget_min === '' ? null : Number(editing.budget_min),
+      budget_max:      editing.budget_max === '' ? null : Number(editing.budget_max),
+      color_theme:     (editing.color_theme || '').trim() || null,
+      family_joining:  editing.family_joining === '' ? null : Number(editing.family_joining),
+      special_requests:(editing.special_requests || '').trim() || null,
+      pre_visit_done:  !!editing.pre_visit_done,
+      post_visit_outcome: editing.post_visit_outcome || null,
+      post_visit_notes:(editing.post_visit_notes || '').trim() || null,
+      post_visit_done: !!editing.post_visit_done,
+      reminder_resolved: !!editing.reminder_resolved,
+      status:          editing.status || 'scheduled',
+    };
+    // Stamp the done-at fields only on transition, so completing a row
+    // twice doesn't overwrite the original timestamp.
+    if (payload.pre_visit_done && !prev.pre_visit_done) payload.pre_visit_done_at = now;
+    if (!payload.pre_visit_done) payload.pre_visit_done_at = null;
+    if (payload.post_visit_done && !prev.post_visit_done) payload.post_visit_done_at = now;
+    if (!payload.post_visit_done) payload.post_visit_done_at = null;
+    return payload;
+  };
+
+  const save = async () => {
+    if (!editing || saving) return;
+    if (!editing.customer_id) { toast('Pick a customer'); return; }
+    setSaving(true);
+    try {
+      const payload = buildPayload();
+      if (editing._new) {
+        payload.created_by = session?.employee_id || null;
+        const { error } = await window.sb.from('muhurtham_visits').insert(payload);
+        if (error) { toast('Could not save: ' + error.message); console.error(error); return; }
+        toast('Muhurtham visit scheduled');
+      } else {
+        const { error } = await window.sb.from('muhurtham_visits').update(payload).eq('id', editing.id);
+        if (error) { toast('Could not save: ' + error.message); console.error(error); return; }
+        toast('Muhurtham visit updated');
+      }
+      close();
+    } finally { setSaving(false); }
+  };
+
+  const resolveReminder = async (row) => {
+    await window.sb.from('muhurtham_visits').update({ reminder_resolved: true }).eq('id', row.id);
+    toast('Reminder cleared');
+  };
+
+  const del = async (row) => {
+    if (!can('muhurtham', 'delete')) return;
+    if (!window.confirm(`Delete muhurtham visit for ${row.customers?.name}?`)) return;
+    await window.sb.from('muhurtham_visits').delete().eq('id', row.id);
+    toast('Deleted');
+  };
+
+  return (
+    <div>
+      <div className="stat-strip">
+        <div className="stat late"><div className="k">Today</div><div className="v">{counts.today}</div></div>
+        <div className="stat present"><div className="k">This week</div><div className="v">{counts.week}</div></div>
+        <div className="stat absent"><div className="k">Follow-up due</div><div className="v">{counts.followup}</div></div>
+        <div className="stat"><div className="k">Completed</div><div className="v">{counts.completed}</div></div>
+        <div className="stat"><div className="k">Total</div><div className="v">{counts.total}</div></div>
+      </div>
+
+      <div className="toolbar">
+        <div className="seg">
+          {[
+            { id: 'upcoming',  label: `Upcoming · ${counts.upcoming}` },
+            { id: 'today',     label: `Today · ${counts.today}` },
+            { id: 'week',      label: `This week · ${counts.week}` },
+            { id: 'followup',  label: `Follow-up · ${counts.followup}` },
+            { id: 'completed', label: `Completed · ${counts.completed}` },
+            { id: 'cancelled', label: `Cancelled · ${counts.cancelled}` },
+            { id: 'all',       label: 'All' },
+          ].map(s => (
+            <button key={s.id} className={bucket === s.id ? 'active' : ''}
+              onClick={() => setBucket(s.id)}>{s.label}</button>
+          ))}
+        </div>
+        <input type="search" placeholder="Search customer, address, theme, notes…"
+          value={search} onChange={e => setSearch(e.target.value)} />
+        {can('muhurtham', 'create') && (
+          <button className="btn primary" onClick={startNew} style={{ marginLeft: 'auto' }}>
+            + Schedule Muhurtham
+          </button>
+        )}
+      </div>
+
+      {loading && (
+        <div style={{ padding: 40, textAlign: 'center', color: 'var(--inkMuted)' }}>Loading…</div>
+      )}
+
+      {!loading && filtered.length === 0 && (
+        <div style={{ padding: 40, textAlign: 'center', color: 'var(--inkMuted)' }}>
+          {rows.length === 0
+            ? 'No muhurtham visits yet. Click "+ Schedule Muhurtham" to add the first.'
+            : 'No visits match this filter.'}
+        </div>
+      )}
+
+      <div style={{
+        display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))',
+        gap: 14, marginTop: 6,
+      }}>
+        {filtered.map(r => {
+          const overdue  = r.reminder_due_on && r.reminder_due_on < today && !r.reminder_resolved && r.status !== 'cancelled';
+          const dueToday = r.reminder_due_on === today && !r.reminder_resolved && r.status !== 'cancelled';
+          return (
+            <div key={r.id} style={{
+              background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 14,
+              padding: 14, display: 'flex', flexDirection: 'column', gap: 10,
+              opacity: r.status === 'cancelled' ? 0.55 : 1,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontFamily: 'Fraunces, Georgia, serif', fontSize: 18, fontWeight: 500, letterSpacing: -0.3 }}>
+                    {r.customers?.name || r.customer_id}
+                  </div>
+                  <div style={{ fontSize: 12, color: 'var(--inkMuted)', marginTop: 2 }}>
+                    {r.customers?.phone ? <span style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{r.customers.phone}</span> : ''}
+                    {r.customers?.phone && r.customers?.city ? ' · ' : ''}
+                    {r.customers?.city || ''}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-end' }}>
+                  <span className={`status-pill ${
+                    r.status === 'completed' ? 'present'
+                    : r.status === 'cancelled' ? 'absent'
+                    : r.status === 'visited' ? 'late'
+                    : r.status === 'pre-captured' ? 'leave'
+                    : 'unmarked'
+                  }`} style={{ fontSize: 10 }}>
+                    {r.status}
+                  </span>
+                  {r.customers?.is_vip && <span className="status-pill late" style={{ fontSize: 10 }}>★ VIP</span>}
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 12 }}>
+                <div>
+                  <div style={{ fontSize: 10, letterSpacing: 0.4, textTransform: 'uppercase', color: 'var(--inkMuted)', fontWeight: 600 }}>Wedding</div>
+                  <div style={{ fontWeight: 600 }}>{r.wedding_date ? fmtDate(r.wedding_date) : '—'}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, letterSpacing: 0.4, textTransform: 'uppercase', color: 'var(--inkMuted)', fontWeight: 600 }}>Visit</div>
+                  <div style={{ fontWeight: 600 }}>
+                    {r.visit_date ? fmtDate(r.visit_date) : '—'}
+                    {r.visit_time && <span style={{ fontWeight: 400, color: 'var(--inkMuted)' }}> · {r.visit_time}</span>}
+                  </div>
+                </div>
+              </div>
+
+              {(r.budget_min != null || r.budget_max != null) && (
+                <div style={{ fontSize: 12, color: 'var(--inkSoft)' }}>
+                  <strong>Budget:</strong> ₹{r.budget_min ?? '?'} – ₹{r.budget_max ?? '?'}
+                </div>
+              )}
+              {r.color_theme && (
+                <div style={{ fontSize: 12, color: 'var(--inkSoft)' }}>
+                  <strong>Theme:</strong> {r.color_theme}
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <span className={`status-pill ${r.pre_visit_done ? 'present' : 'unmarked'}`} style={{ fontSize: 10 }}>
+                  {r.pre_visit_done ? '✓ Pre-visit' : '○ Pre-visit'}
+                </span>
+                <span className={`status-pill ${r.post_visit_done ? 'present' : 'unmarked'}`} style={{ fontSize: 10 }}>
+                  {r.post_visit_done ? '✓ Post-visit' : '○ Post-visit'}
+                </span>
+                {(overdue || dueToday) && (
+                  <span className={`status-pill ${overdue ? 'absent' : 'late'}`} style={{ fontSize: 10 }}>
+                    {overdue ? 'Follow-up overdue' : 'Follow-up today'}
+                  </span>
+                )}
+              </div>
+
+              {r.post_visit_outcome && (
+                <div style={{ fontSize: 12.5, color: 'var(--inkSoft)',
+                  padding: 8, borderRadius: 8, background: 'var(--surfaceAlt)',
+                }}>
+                  <strong>{MUHURTHAM_OUTCOMES.find(o => o.id === r.post_visit_outcome)?.label || r.post_visit_outcome}</strong>
+                  {r.post_visit_notes && <div style={{ marginTop: 3 }}>{r.post_visit_notes}</div>}
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {can('muhurtham', 'edit') && (
+                  <button className="btn" style={{ height: 28, padding: '0 10px', fontSize: 12 }}
+                    onClick={() => startEdit(r)}>Open</button>
+                )}
+                {(overdue || dueToday) && can('muhurtham', 'edit') && (
+                  <button className="btn" style={{ height: 28, padding: '0 10px', fontSize: 12 }}
+                    onClick={() => resolveReminder(r)}>Clear reminder</button>
+                )}
+                {can('muhurtham', 'delete') && (
+                  <button className="btn danger" style={{ height: 28, padding: '0 10px', fontSize: 12, marginLeft: 'auto' }}
+                    onClick={() => del(r)}>Delete</button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <MuhurthamEditModal
+        open={!!editing}
+        draft={editing}
+        customers={customers}
+        onChange={setEditing}
+        onClose={close}
+        onSave={save}
+        saving={saving}
+      />
+    </div>
+  );
+};
+
+// Reusable schedule / pre-visit / post-visit form. Customer picker
+// hidden when caller sets lockCustomer (used later on the Customer
+// Detail sheet's Muhurtham tab).
+const MuhurthamEditModal = ({ open, draft, customers, onChange, onClose, onSave, saving, lockCustomer = false }) => {
+  if (!draft) return null;
+  const set = (k, v) => onChange({ ...draft, [k]: v });
+  return (
+    <Modal
+      open={open}
+      title={draft._new ? 'Schedule Muhurtham visit' : 'Edit Muhurtham visit'}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="btn primary" onClick={onSave} disabled={saving}>
+            {saving ? 'Saving…' : draft._new ? 'Schedule' : 'Save'}
+          </button>
+        </>
+      }
+    >
+      {!lockCustomer && (
+        <div className="field-row">
+          <label>Customer *</label>
+          <select value={draft.customer_id || ''}
+            onChange={e => set('customer_id', e.target.value)}>
+            <option value="">— Pick a customer —</option>
+            {customers.map(c => (
+              <option key={c.id} value={c.id}>
+                {c.name}{c.phone ? ` · ${c.phone}` : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      <div style={{
+        fontSize: 11, letterSpacing: 0.5, textTransform: 'uppercase',
+        color: 'var(--inkMuted)', fontWeight: 700, marginTop: 6, marginBottom: 6,
+      }}>Schedule</div>
+
+      <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
+        <div>
+          <label>Wedding date</label>
+          <input type="date" value={draft.wedding_date || ''}
+            onChange={e => set('wedding_date', e.target.value)} />
+        </div>
+        <div>
+          <label>Visit date</label>
+          <input type="date" value={draft.visit_date || ''}
+            onChange={e => set('visit_date', e.target.value)} />
+        </div>
+        <div>
+          <label>Visit time</label>
+          <input value={draft.visit_time || ''}
+            onChange={e => set('visit_time', e.target.value)}
+            placeholder="10:30 AM" />
+        </div>
+      </div>
+
+      <div className="field-row">
+        <label>Address (home)</label>
+        <textarea rows={2} value={draft.address || ''}
+          onChange={e => set('address', e.target.value)}
+          placeholder="House / street / landmark" />
+      </div>
+
+      <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        <div>
+          <label>Status</label>
+          <select value={draft.status || 'scheduled'}
+            onChange={e => set('status', e.target.value)}>
+            <option value="scheduled">scheduled</option>
+            <option value="pre-captured">pre-captured</option>
+            <option value="visited">visited</option>
+            <option value="completed">completed</option>
+            <option value="cancelled">cancelled</option>
+          </select>
+        </div>
+        <label className="checkbox-row" style={{ cursor: 'pointer', alignSelf: 'end' }}>
+          <input type="checkbox" checked={!!draft.reminder_resolved}
+            onChange={e => set('reminder_resolved', e.target.checked)} />
+          <div>
+            <div className="label-text">Reminder cleared</div>
+            <div className="sub">Removes this row from "Follow-up due".</div>
+          </div>
+        </label>
+      </div>
+
+      <div style={{
+        fontSize: 11, letterSpacing: 0.5, textTransform: 'uppercase',
+        color: 'var(--inkMuted)', fontWeight: 700, marginTop: 14, marginBottom: 6,
+      }}>Pre-visit preferences</div>
+
+      <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
+        <div>
+          <label>Budget min (₹)</label>
+          <input type="number" value={draft.budget_min}
+            onChange={e => set('budget_min', e.target.value)} />
+        </div>
+        <div>
+          <label>Budget max (₹)</label>
+          <input type="number" value={draft.budget_max}
+            onChange={e => set('budget_max', e.target.value)} />
+        </div>
+        <div>
+          <label>Family joining</label>
+          <input type="number" min="0" max="99" value={draft.family_joining}
+            onChange={e => set('family_joining', e.target.value)} />
+        </div>
+      </div>
+
+      <div className="field-row">
+        <label>Colour theme</label>
+        <input value={draft.color_theme || ''}
+          onChange={e => set('color_theme', e.target.value)}
+          placeholder="e.g. maroon + gold, peacock green" />
+      </div>
+
+      <div className="field-row">
+        <label>Special requests</label>
+        <textarea rows={2} value={draft.special_requests || ''}
+          onChange={e => set('special_requests', e.target.value)}
+          placeholder="Tailoring, blouse stitching, groom dhotis, kid dresses etc." />
+      </div>
+
+      <label className="checkbox-row" style={{ cursor: 'pointer', marginBottom: 10 }}>
+        <input type="checkbox" checked={!!draft.pre_visit_done}
+          onChange={e => set('pre_visit_done', e.target.checked)} />
+        <div>
+          <div className="label-text">Pre-visit preferences captured</div>
+          <div className="sub">Stamps the time so the stylist knows it's ready before leaving.</div>
+        </div>
+      </label>
+
+      <div style={{
+        fontSize: 11, letterSpacing: 0.5, textTransform: 'uppercase',
+        color: 'var(--inkMuted)', fontWeight: 700, marginTop: 14, marginBottom: 6,
+      }}>Post-visit outcome</div>
+
+      <div className="field-row">
+        <label>Outcome</label>
+        <select value={draft.post_visit_outcome || ''}
+          onChange={e => set('post_visit_outcome', e.target.value)}>
+          <option value="">—</option>
+          {MUHURTHAM_OUTCOMES.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
+        </select>
+      </div>
+
+      <div className="field-row">
+        <label>Post-visit notes</label>
+        <textarea rows={3} value={draft.post_visit_notes || ''}
+          onChange={e => set('post_visit_notes', e.target.value)}
+          placeholder="What they liked, what they asked for, next action…" />
+      </div>
+
+      <label className="checkbox-row" style={{ cursor: 'pointer' }}>
+        <input type="checkbox" checked={!!draft.post_visit_done}
+          onChange={e => set('post_visit_done', e.target.checked)} />
+        <div>
+          <div className="label-text">Post-visit captured</div>
+          <div className="sub">Once ticked, the 2-day reminder is the next action.</div>
+        </div>
+      </label>
+    </Modal>
+  );
+};
+
 const Page = ({ name }) => {
   if (name === 'attendance')    return <AttendancePage />;
   if (name === 'employees')     return <EmployeesPage />;
@@ -9548,7 +10050,7 @@ const Page = ({ name }) => {
   if (name === 'settings')      return <SettingsPage />;
   if (name === 'customers')     return <CustomersPage />;
   if (name === 'interactions')  return <InteractionsPage />;
-  if (name === 'muhurtham')     return <CRMComingSoon module="Muhurtham" note="Part C · next commit — home-visit pipeline with pre/post checklists." />;
+  if (name === 'muhurtham')     return <MuhurthamPage />;
   if (name === 'occasions')     return <CRMComingSoon module="Occasions" note="Part D — birthday / anniversary / festival reminders." />;
   return (
     <div className="empty">
