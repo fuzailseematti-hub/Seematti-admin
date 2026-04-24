@@ -845,7 +845,7 @@ const App = () => {
               <h1>{visiblePage.label}</h1>
             </div>
             <div style={{ fontSize: 10, color: 'var(--inkFaint)', letterSpacing: 0.3, marginLeft: 'auto', alignSelf: 'flex-end' }}>
-              v2026-04-22-emp-sec
+              v2026-04-23-face
             </div>
           </div>
           <div className="content">
@@ -6831,8 +6831,7 @@ const KioskSettingsPage = () => {
             letterSpacing: -0.3, marginBottom: 4,
           }}>Face match threshold</div>
           <div style={{ fontSize: 13, color: 'var(--inkMuted)', marginBottom: 16 }}>
-            Cosine similarity cutoff. Lower = more matches (risk of wrong person).
-            Higher = stricter (more "try again" fails). Recommended: 0.55.
+            Minimum similarity required to accept a match. <strong>Higher = stricter</strong> (fewer wrong-person mistakes, more "try again" prompts). Lower = more lenient. The kiosk also requires 2 consecutive agreeing frames and an ambiguity gap on every match, so this is one of several safety layers. Recommended: 0.55.
           </div>
           <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
             <input type="range" min="0.35" max="0.75" step="0.01"
@@ -6852,7 +6851,7 @@ const KioskSettingsPage = () => {
             )}
           </div>
           <div style={{ marginTop: 10, fontSize: 11.5, color: 'var(--inkFaint)' }}>
-            0.40 lenient · 0.55 balanced (default) · 0.65 strict
+            0.45 lenient · 0.55 balanced (default) · 0.65 strict · 0.70 very strict
           </div>
         </div>
       </div>

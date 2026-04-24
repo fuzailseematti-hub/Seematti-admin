@@ -269,19 +269,37 @@
     };
   })();
 
-  // Detect the single largest face in a media element (video/image) and
-  // return its 128-d descriptor (Float32Array), or null if no face.
+  // Detect the single largest face in a media element and return its
+  // 128-d descriptor. Kept for backward compatibility with enrollment.
   window.computeFaceDescriptor = async (mediaEl) => {
     const det = await window.faceapi
       .detectSingleFace(mediaEl, new window.faceapi.TinyFaceDetectorOptions({
-        inputSize: 320, scoreThreshold: 0.5,
+        inputSize: 320, scoreThreshold: 0.6,
       }))
       .withFaceLandmarks(true)
       .withFaceDescriptor();
     return det ? Array.from(det.descriptor) : null;
   };
 
-  // Cosine similarity between two 128-d arrays (both must be same length).
+  // Full detection result (descriptor + bounding box + detection score)
+  // so the kiosk can enforce a minimum face size and skip blurry /
+  // far-away frames before running the match loop.
+  window.computeFaceDetection = async (mediaEl) => {
+    const det = await window.faceapi
+      .detectSingleFace(mediaEl, new window.faceapi.TinyFaceDetectorOptions({
+        inputSize: 320, scoreThreshold: 0.6,
+      }))
+      .withFaceLandmarks(true)
+      .withFaceDescriptor();
+    if (!det) return null;
+    return {
+      descriptor: Array.from(det.descriptor),
+      box: det.detection.box,
+      score: det.detection.score,
+    };
+  };
+
+  // Cosine similarity between two 128-d arrays. Kept for backwards compat.
   window.cosineSim = (a, b) => {
     let dot = 0, na = 0, nb = 0;
     for (let i = 0; i < a.length; i++) {
@@ -291,6 +309,23 @@
     }
     return dot / (Math.sqrt(na) * Math.sqrt(nb));
   };
+
+  // Euclidean distance between two 128-d face descriptors. This is the
+  // canonical metric face-api.js descriptors were trained against —
+  // cosine on un-normalized vectors is approximate and causes more
+  // misidentifications. Smaller distance = closer match.
+  window.euclideanDistance = (a, b) => {
+    let s = 0;
+    for (let i = 0; i < a.length; i++) {
+      const d = a[i] - b[i];
+      s += d * d;
+    }
+    return Math.sqrt(s);
+  };
+
+  // Map Euclidean distance to a 0..1 similarity score for UI display /
+  // settings UI back-compat. distance 0 -> sim 1, distance >= 1 -> 0.
+  window.distToSim = (d) => Math.max(0, Math.min(1, 1 - d));
 </script>
 </head>
 <body>
@@ -6229,6 +6264,13 @@ const KioskScannerScreen = () => {
   const MATCH_COOLDOWN_MS = 30000;
   const lastMatchMap = React.useRef({}); // { employeeId: timestamp }
 
+  // Reliability-first matching knobs. The comment block above the
+  // match loop below explains each one; defaults chosen to bias
+  // STRONGLY towards "try again" when there's any doubt.
+  const MIN_FACE_PX    = 90;   // reject blurry / far-away faces
+  const MIN_MARGIN     = 0.08; // best must be this far ahead of 2nd-best (similarity units)
+  const CONFIRM_FRAMES = 2;    // same top candidate must agree on N frames in a row
+
   // Idle dim: if no face has been seen for a while we dim the preview
   // to save the tablet's power. The detection loop keeps ticking so a
   // face walking in front of the camera still wakes us instantly.
@@ -6431,60 +6473,130 @@ const KioskScannerScreen = () => {
     // Drop the per-employee cooldown so the same face can match again
     // right away — useful when the wrong person was recognised.
     delete lastMatchMap.current[current.id];
+    pendingMatchRef.current = null;
     setCurrent(null);
     setPhase('idle');
   };
 
+  // Group enrolled face rows by employee so each person's best pose
+  // competes on equal footing. Without this a noisy single pose from
+  // Priya can beat Anita's three-pose average on Anita's own face.
+  const facesByEmployee = React.useMemo(() => {
+    const m = new Map();
+    for (const f of faces) {
+      if (!m.has(f.employee_id)) {
+        m.set(f.employee_id, {
+          id: f.employee_id,
+          name: f.employees?.name || f.employee_id,
+          role: f.employees?.role || '',
+          section_id: f.employees?.section_id || null,
+          embeddings: [],
+        });
+      }
+      m.get(f.employee_id).embeddings.push(f.embedding);
+    }
+    return Array.from(m.values());
+  }, [faces]);
+
+  // Pending-match streak: the SAME top candidate must clear the
+  // threshold + margin gate on CONFIRM_FRAMES consecutive frames
+  // before the match UI fires. Single-frame flukes (a stray frame
+  // that accidentally looks like the wrong person) are rejected.
+  const pendingMatchRef = React.useRef(null); // { id, count }
+
   // Real-face matching loop — active only while phase is idle.
+  //
+  // Reliability rules (in order):
+  //   1. Face must be at least MIN_FACE_PX wide (no tiny/blurry faces).
+  //   2. Score each employee as their CLOSEST pose (min Euclidean
+  //      distance over their enrolled embeddings) — ensures every
+  //      person gets their best shot, not their worst.
+  //   3. Convert distance to similarity (higher = closer).
+  //   4. Best candidate must clear `threshold` (from settings).
+  //   5. Best must be at least MIN_MARGIN ahead of the second-best,
+  //      otherwise the match is "ambiguous" and we wait.
+  //   6. The same top candidate must pass rules 1-5 on CONFIRM_FRAMES
+  //      consecutive frames before we fire showMatchUI.
+  // Any miss in rules 1-5 resets the streak.
   React.useEffect(() => {
     if (!modelsReady || !cameraReady || phase !== 'idle') return;
-    if (faces.length === 0) return; // nobody enrolled — nothing to match
+    if (facesByEmployee.length === 0) return;
     let cancelled = false;
     const tick = async () => {
       if (cancelled) return;
       try {
         const v = videoRef.current;
         if (v && v.readyState >= 2) {
-          // Throttle: re-match the same person at most once every 6 seconds.
-          const desc = await window.computeFaceDescriptor(v);
-          if (desc) {
+          const det = await window.computeFaceDetection(v);
+          if (det) {
             lastFaceSeenAtRef.current = Date.now();
-            let best = { id: null, name: null, sim: -1, emp: null };
-            for (const f of faces) {
-              const sim = window.cosineSim(desc, f.embedding);
-              if (sim > best.sim) {
-                best = {
-                  id: f.employee_id,
-                  sim,
-                  emp: {
-                    id: f.employee_id,
-                    name: f.employees?.name || f.employee_id,
-                    role: f.employees?.role || '',
-                    section: SECTION_LABEL[f.employees?.section_id] || '',
-                    confidence: sim,
-                  },
-                };
+            const faceW = det.box?.width || 0;
+            if (faceW >= MIN_FACE_PX) {
+              // Per-employee best-of-poses distance.
+              const scored = facesByEmployee.map(emp => {
+                let minDist = Infinity;
+                for (const e of emp.embeddings) {
+                  const d = window.euclideanDistance(det.descriptor, e);
+                  if (d < minDist) minDist = d;
+                }
+                return { ...emp, distance: minDist, similarity: window.distToSim(minDist) };
+              }).sort((a, b) => a.distance - b.distance);
+
+              const best       = scored[0];
+              const secondBest = scored[1];
+              const topSim     = best.similarity;
+              const secondSim  = secondBest ? secondBest.similarity : 0;
+
+              const goodEnough  = topSim >= threshold;
+              const unambiguous = !secondBest || (topSim - secondSim) >= MIN_MARGIN;
+
+              if (goodEnough && unambiguous) {
+                const p = pendingMatchRef.current;
+                if (p && p.id === best.id) p.count += 1;
+                else pendingMatchRef.current = { id: best.id, count: 1 };
+
+                if (pendingMatchRef.current.count >= CONFIRM_FRAMES) {
+                  const nowT   = Date.now();
+                  const lastAt = lastMatchMap.current[best.id] || 0;
+                  if (nowT - lastAt > MATCH_COOLDOWN_MS) {
+                    lastMatchMap.current[best.id] = nowT;
+                    pendingMatchRef.current = null;
+                    setPhase('detecting');
+                    showMatchUI({
+                      id: best.id,
+                      name: best.name,
+                      role: best.role,
+                      section: SECTION_LABEL[best.section_id] || '',
+                      confidence: topSim,
+                    });
+                    return;
+                  }
+                  // Confirmed but still in cooldown for this person.
+                  pendingMatchRef.current = null;
+                }
+              } else {
+                // Below threshold or ambiguous — drop the streak.
+                pendingMatchRef.current = null;
               }
+            } else {
+              // Face too small — ignore the frame and drop any streak.
+              pendingMatchRef.current = null;
             }
-            if (best.sim >= threshold) {
-              const nowT = Date.now();
-              const lastAt = lastMatchMap.current[best.id] || 0;
-              if (nowT - lastAt > MATCH_COOLDOWN_MS) {
-                lastMatchMap.current[best.id] = nowT;
-                setPhase('detecting');
-                showMatchUI(best.emp);
-                return;
-              }
-              // Same person still in frame within the cooldown — ignore.
-            }
+          } else {
+            // No face this tick — drop the streak.
+            pendingMatchRef.current = null;
           }
         }
       } catch (_) { /* swallow per-tick errors */ }
-      setTimeout(tick, 500);
+      setTimeout(tick, 400);
     };
     const handle = setTimeout(tick, 300);
-    return () => { cancelled = true; clearTimeout(handle); };
-  }, [modelsReady, cameraReady, phase, faces, threshold, showMatchUI]);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+      pendingMatchRef.current = null;
+    };
+  }, [modelsReady, cameraReady, phase, facesByEmployee, threshold, showMatchUI]);
 
   const direction = current && clockedIn.has(current.id) ? 'out' : 'in';
   const hh = now.getHours() % 12 || 12;
