@@ -860,7 +860,7 @@ const App = () => {
               <h1>{visiblePage.label}</h1>
             </div>
             <div style={{ fontSize: 10, color: 'var(--inkFaint)', letterSpacing: 0.3, marginLeft: 'auto', alignSelf: 'flex-end' }}>
-              v2026-04-24-crm-C2
+              v2026-04-24-crm-C3
             </div>
           </div>
           <div className="content">
@@ -8806,28 +8806,41 @@ const CustomerEditModal = ({ open, draft, onChange, onClose, onSave, saving }) =
 
 // ─── Customer detail sheet with Preferences + Family tabs ──
 const CustomerDetailSheet = ({ customer, onClose, onEdit, canEdit }) => {
+  const { session } = useContext(AppCtx);
   const [tab, setTab] = useState('summary');
-  const [prefs, setPrefs]     = useState([]);
-  const [family, setFamily]   = useState([]);
+  const [prefs, setPrefs]         = useState([]);
+  const [family, setFamily]       = useState([]);
+  const [interactions, setInteractions] = useState([]);
+  const [muhurthams,  setMuhurthams]    = useState([]);
   const [loading, setLoading] = useState(false);
 
   const [prefDraft, setPrefDraft]       = useState(null);
   const [famDraft, setFamDraft]         = useState(null);
+  const [interDraft, setInterDraft]     = useState(null);   // null | draft for InteractionLogModal
+  const [muhDraft, setMuhDraft]         = useState(null);   // null | draft for MuhurthamEditModal
+  const [interSaving, setInterSaving]   = useState(false);
+  const [muhSaving, setMuhSaving]       = useState(false);
 
   useEffect(() => {
     if (!customer || !window.sb) return;
     let cancelled = false;
     setLoading(true);
     const fetchRelated = async () => {
-      const [prefRes, famRes] = await Promise.all([
+      const [prefRes, famRes, interRes, muhRes] = await Promise.all([
         window.sb.from('customer_preferences').select('*')
           .eq('customer_id', customer.id).order('created_at', { ascending: true }),
         window.sb.from('customer_family_members').select('*')
           .eq('customer_id', customer.id).order('created_at', { ascending: true }),
+        window.sb.from('customer_interactions').select('*')
+          .eq('customer_id', customer.id).order('occurred_at', { ascending: false }),
+        window.sb.from('muhurtham_visits').select('*')
+          .eq('customer_id', customer.id).order('visit_date', { ascending: false, nullsFirst: false }),
       ]);
       if (cancelled) return;
       setPrefs(prefRes.data || []);
       setFamily(famRes.data || []);
+      setInteractions(interRes.data || []);
+      setMuhurthams(muhRes.data || []);
       setLoading(false);
     };
     fetchRelated();
@@ -8837,6 +8850,12 @@ const CustomerDetailSheet = ({ customer, onClose, onEdit, canEdit }) => {
         () => fetchRelated())
       .on('postgres_changes',
         { event: '*', schema: 'public', table: 'customer_family_members', filter: `customer_id=eq.${customer.id}` },
+        () => fetchRelated())
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'customer_interactions', filter: `customer_id=eq.${customer.id}` },
+        () => fetchRelated())
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'muhurtham_visits', filter: `customer_id=eq.${customer.id}` },
         () => fetchRelated())
       .subscribe();
     return () => { cancelled = true; window.sb.removeChannel(ch); };
@@ -8912,9 +8931,11 @@ const CustomerDetailSheet = ({ customer, onClose, onEdit, canEdit }) => {
 
       <div className="seg" style={{ width: 'fit-content', marginBottom: 14 }}>
         {[
-          { id: 'summary', label: 'Summary' },
-          { id: 'prefs',   label: `Preferences (${prefs.length})` },
-          { id: 'family',  label: `Family (${family.length})` },
+          { id: 'summary',     label: 'Summary' },
+          { id: 'prefs',       label: `Preferences (${prefs.length})` },
+          { id: 'family',      label: `Family (${family.length})` },
+          { id: 'interactions',label: `Interactions (${interactions.length})` },
+          { id: 'muhurtham',   label: `Muhurtham (${muhurthams.length})` },
         ].map(t => (
           <button key={t.id} type="button"
             className={tab === t.id ? 'active' : ''}
@@ -9113,6 +9134,248 @@ const CustomerDetailSheet = ({ customer, onClose, onEdit, canEdit }) => {
           ))}
         </div>
       )}
+
+      {tab === 'interactions' && (
+        <div>
+          {canEdit && (
+            <button className="btn primary" style={{ marginBottom: 10 }}
+              onClick={() => setInterDraft({
+                _new: true, customer_id: customer.id,
+                type: 'call-out',
+                occurred_at: new Date().toISOString().slice(0, 16),
+                duration_min: '', topic: 'follow-up',
+                outcome: '', follow_up_date: '', follow_up_note: '', follow_up_done: false,
+                notes: '',
+              })}>
+              + Log interaction
+            </button>
+          )}
+          {loading && <div style={{ color: 'var(--inkMuted)', fontSize: 13 }}>Loading…</div>}
+          {!loading && interactions.length === 0 && (
+            <div style={{ color: 'var(--inkMuted)', fontSize: 13, padding: 20, textAlign: 'center' }}>
+              No interactions yet.
+            </div>
+          )}
+          {interactions.map(i => {
+            const followDue = i.follow_up_date && !i.follow_up_done;
+            const today = todayISO();
+            const overdue = followDue && i.follow_up_date < today;
+            return (
+              <div key={i.id} style={{
+                padding: 12, borderBottom: '1px solid var(--border)',
+                display: 'flex', gap: 10, alignItems: 'flex-start',
+              }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 3 }}>
+                    <span className="status-pill" style={{ background: 'var(--surfaceAlt)', color: 'var(--inkSoft)', fontSize: 10 }}>
+                      {INTERACTION_TYPES.find(t => t.id === i.type)?.label || i.type}
+                    </span>
+                    {i.topic && <span style={{ fontSize: 11.5, color: 'var(--inkMuted)' }}>· {i.topic}</span>}
+                    {i.duration_min != null && i.duration_min > 0 && (
+                      <span style={{ fontSize: 11.5, color: 'var(--inkMuted)' }}>· {i.duration_min} min</span>
+                    )}
+                    {followDue && (
+                      <span className={`status-pill ${overdue ? 'absent' : 'late'}`} style={{ fontSize: 10 }}>
+                        Follow-up {fmtDate(i.follow_up_date)}
+                      </span>
+                    )}
+                    {i.follow_up_done && (
+                      <span className="status-pill present" style={{ fontSize: 10 }}>✓ done</span>
+                    )}
+                  </div>
+                  {i.outcome && <div style={{ fontSize: 13, fontWeight: 600 }}>{i.outcome}</div>}
+                  {i.notes && <div style={{ fontSize: 12.5, color: 'var(--inkSoft)', marginTop: 2, whiteSpace: 'pre-wrap' }}>{i.notes}</div>}
+                  <div style={{ fontSize: 11, color: 'var(--inkMuted)', marginTop: 4 }}>
+                    {fmtDateTime(i.occurred_at)}{i.logged_by_name ? ` · ${i.logged_by_name}` : ''}
+                  </div>
+                </div>
+                {canEdit && (
+                  <button className="btn" style={{ height: 26, padding: '0 8px', fontSize: 11 }}
+                    onClick={() => setInterDraft({
+                      ...i, _new: false,
+                      occurred_at: i.occurred_at ? i.occurred_at.slice(0, 16) : '',
+                      duration_min: i.duration_min ?? '',
+                      follow_up_date: i.follow_up_date || '',
+                      follow_up_note: i.follow_up_note || '',
+                    })}>Edit</button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {tab === 'muhurtham' && (
+        <div>
+          {canEdit && (
+            <button className="btn primary" style={{ marginBottom: 10 }}
+              onClick={() => setMuhDraft({
+                _new: true, customer_id: customer.id,
+                wedding_date: '', visit_date: '', visit_time: '',
+                address: customer.address || '',
+                budget_min: '', budget_max: '',
+                color_theme: '', family_joining: '', special_requests: '',
+                pre_visit_done: false, post_visit_done: false,
+                post_visit_outcome: '', post_visit_notes: '',
+                reminder_resolved: false, status: 'scheduled',
+              })}>
+              + Schedule Muhurtham
+            </button>
+          )}
+          {loading && <div style={{ color: 'var(--inkMuted)', fontSize: 13 }}>Loading…</div>}
+          {!loading && muhurthams.length === 0 && (
+            <div style={{ color: 'var(--inkMuted)', fontSize: 13, padding: 20, textAlign: 'center' }}>
+              No muhurtham visits yet.
+            </div>
+          )}
+          {muhurthams.map(m => (
+            <div key={m.id} style={{
+              padding: 12, borderBottom: '1px solid var(--border)',
+              display: 'flex', gap: 10, alignItems: 'flex-start',
+            }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 3 }}>
+                  <span className={`status-pill ${
+                    m.status === 'completed' ? 'present'
+                    : m.status === 'cancelled' ? 'absent'
+                    : m.status === 'visited' ? 'late'
+                    : m.status === 'pre-captured' ? 'leave'
+                    : 'unmarked'
+                  }`} style={{ fontSize: 10 }}>{m.status}</span>
+                  <span className={`status-pill ${m.pre_visit_done ? 'present' : 'unmarked'}`} style={{ fontSize: 10 }}>
+                    {m.pre_visit_done ? '✓ pre' : '○ pre'}
+                  </span>
+                  <span className={`status-pill ${m.post_visit_done ? 'present' : 'unmarked'}`} style={{ fontSize: 10 }}>
+                    {m.post_visit_done ? '✓ post' : '○ post'}
+                  </span>
+                </div>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>
+                  Visit {m.visit_date ? fmtDate(m.visit_date) : '—'}
+                  {m.visit_time && <span style={{ fontWeight: 400, color: 'var(--inkMuted)' }}> · {m.visit_time}</span>}
+                  {m.wedding_date && (
+                    <span style={{ fontWeight: 400, color: 'var(--inkMuted)' }}>
+                      {' '}· wedding {fmtDate(m.wedding_date)}
+                    </span>
+                  )}
+                </div>
+                {(m.budget_min != null || m.budget_max != null || m.color_theme) && (
+                  <div style={{ fontSize: 12, color: 'var(--inkSoft)', marginTop: 3 }}>
+                    {(m.budget_min != null || m.budget_max != null) &&
+                      <>₹{m.budget_min ?? '?'}–{m.budget_max ?? '?'}</>}
+                    {(m.budget_min != null || m.budget_max != null) && m.color_theme && ' · '}
+                    {m.color_theme}
+                  </div>
+                )}
+                {m.post_visit_outcome && (
+                  <div style={{ fontSize: 12.5, color: 'var(--inkSoft)', marginTop: 4,
+                    padding: 6, borderRadius: 6, background: 'var(--surfaceAlt)',
+                  }}>
+                    <strong>{MUHURTHAM_OUTCOMES.find(o => o.id === m.post_visit_outcome)?.label || m.post_visit_outcome}</strong>
+                    {m.post_visit_notes && <> — {m.post_visit_notes}</>}
+                  </div>
+                )}
+              </div>
+              {canEdit && (
+                <button className="btn" style={{ height: 26, padding: '0 8px', fontSize: 11 }}
+                  onClick={() => setMuhDraft({
+                    ...m, _new: false,
+                    budget_min: m.budget_min ?? '',
+                    budget_max: m.budget_max ?? '',
+                    family_joining: m.family_joining ?? '',
+                    visit_time: m.visit_time || '',
+                    color_theme: m.color_theme || '',
+                    special_requests: m.special_requests || '',
+                    post_visit_outcome: m.post_visit_outcome || '',
+                    post_visit_notes: m.post_visit_notes || '',
+                  })}>Open</button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <InteractionLogModal
+        open={!!interDraft}
+        draft={interDraft}
+        customers={[]}
+        onChange={setInterDraft}
+        onClose={() => setInterDraft(null)}
+        saving={interSaving}
+        lockCustomer={true}
+        onSave={async () => {
+          if (!interDraft || interSaving) return;
+          setInterSaving(true);
+          try {
+            const payload = {
+              customer_id:    customer.id,
+              type:           interDraft.type,
+              occurred_at:    interDraft.occurred_at ? new Date(interDraft.occurred_at).toISOString() : new Date().toISOString(),
+              duration_min:   interDraft.duration_min === '' ? null : Number(interDraft.duration_min),
+              topic:          interDraft.topic || null,
+              outcome:        (interDraft.outcome || '').trim() || null,
+              follow_up_date: interDraft.follow_up_date || null,
+              follow_up_note: (interDraft.follow_up_note || '').trim() || null,
+              follow_up_done: !!interDraft.follow_up_done,
+              notes:          (interDraft.notes || '').trim() || null,
+            };
+            if (interDraft._new) {
+              payload.logged_by      = session?.employee_id || null;
+              payload.logged_by_name = session?.display_name || 'CC';
+              await window.sb.from('customer_interactions').insert(payload);
+            } else {
+              await window.sb.from('customer_interactions').update(payload).eq('id', interDraft.id);
+            }
+            setInterDraft(null);
+          } finally { setInterSaving(false); }
+        }}
+      />
+
+      <MuhurthamEditModal
+        open={!!muhDraft}
+        draft={muhDraft}
+        customers={[]}
+        onChange={setMuhDraft}
+        onClose={() => setMuhDraft(null)}
+        saving={muhSaving}
+        lockCustomer={true}
+        onSave={async () => {
+          if (!muhDraft || muhSaving) return;
+          setMuhSaving(true);
+          try {
+            const now = new Date().toISOString();
+            const prev = muhurthams.find(x => x.id === muhDraft.id) || {};
+            const payload = {
+              customer_id:     customer.id,
+              wedding_date:    muhDraft.wedding_date || null,
+              visit_date:      muhDraft.visit_date || null,
+              visit_time:      (muhDraft.visit_time || '').trim() || null,
+              address:         (muhDraft.address || '').trim() || null,
+              budget_min:      muhDraft.budget_min === '' ? null : Number(muhDraft.budget_min),
+              budget_max:      muhDraft.budget_max === '' ? null : Number(muhDraft.budget_max),
+              color_theme:     (muhDraft.color_theme || '').trim() || null,
+              family_joining:  muhDraft.family_joining === '' ? null : Number(muhDraft.family_joining),
+              special_requests:(muhDraft.special_requests || '').trim() || null,
+              pre_visit_done:  !!muhDraft.pre_visit_done,
+              post_visit_outcome: muhDraft.post_visit_outcome || null,
+              post_visit_notes:(muhDraft.post_visit_notes || '').trim() || null,
+              post_visit_done: !!muhDraft.post_visit_done,
+              reminder_resolved: !!muhDraft.reminder_resolved,
+              status:          muhDraft.status || 'scheduled',
+            };
+            if (payload.pre_visit_done && !prev.pre_visit_done) payload.pre_visit_done_at = now;
+            if (!payload.pre_visit_done) payload.pre_visit_done_at = null;
+            if (payload.post_visit_done && !prev.post_visit_done) payload.post_visit_done_at = now;
+            if (!payload.post_visit_done) payload.post_visit_done_at = null;
+            if (muhDraft._new) {
+              payload.created_by = session?.employee_id || null;
+              await window.sb.from('muhurtham_visits').insert(payload);
+            } else {
+              await window.sb.from('muhurtham_visits').update(payload).eq('id', muhDraft.id);
+            }
+            setMuhDraft(null);
+          } finally { setMuhSaving(false); }
+        }}
+      />
     </Modal>
   );
 };
