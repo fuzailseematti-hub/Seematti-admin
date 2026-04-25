@@ -860,7 +860,7 @@ const App = () => {
               <h1>{visiblePage.label}</h1>
             </div>
             <div style={{ fontSize: 10, color: 'var(--inkFaint)', letterSpacing: 0.3, marginLeft: 'auto', alignSelf: 'flex-end' }}>
-              v2026-04-24-crm-C3
+              v2026-04-25-hotfix
             </div>
           </div>
           <div className="content">
@@ -3539,25 +3539,43 @@ const TasksPage = () => {
 
   const fetchAll = useCallback(async () => {
     if (!window.sb) return;
-    const { data } = await window.sb
+    // Try the new schema first (parent_task_id column from the
+    // sub-tasks migration). If the column doesn't exist on prod
+    // yet, fall back to the original SELECT and treat parent_task_id
+    // as null. This keeps the page functional pre-migration.
+    let res = await window.sb
       .from('tasks')
       .select('id, scope, assignee_id, label, owner_label, done, priority, sort_order, due_date, parent_task_id')
       .eq('due_date', date)
       .order('sort_order');
-    const list = data || [];
+    if (res.error) {
+      console.warn('Tasks SELECT (with parent_task_id) failed, retrying without:', res.error.message);
+      res = await window.sb
+        .from('tasks')
+        .select('id, scope, assignee_id, label, owner_label, done, priority, sort_order, due_date')
+        .eq('due_date', date)
+        .order('sort_order');
+    }
+    const list = (res.data || []).map(t => ({ parent_task_id: null, ...t }));
     setTasks(list);
     // Counts of comments per task — lightweight follow-up select so the
-    // UI can show a "💬 3" badge without joining on a view.
+    // UI can show a "💬 3" badge without joining on a view. Tolerates
+    // the task_comments table not existing yet.
     if (list.length) {
       const ids = list.map(t => t.id);
-      const { data: cData } = await window.sb
-        .from('task_comments').select('task_id')
-        .in('task_id', ids);
-      const counts = {};
-      (cData || []).forEach(c => {
-        counts[c.task_id] = (counts[c.task_id] || 0) + 1;
-      });
-      setCommentCounts(counts);
+      try {
+        const { data: cData, error: cErr } = await window.sb
+          .from('task_comments').select('task_id')
+          .in('task_id', ids);
+        if (cErr) { setCommentCounts({}); }
+        else {
+          const counts = {};
+          (cData || []).forEach(c => {
+            counts[c.task_id] = (counts[c.task_id] || 0) + 1;
+          });
+          setCommentCounts(counts);
+        }
+      } catch (_) { setCommentCounts({}); }
     } else {
       setCommentCounts({});
     }
@@ -10338,6 +10356,59 @@ const CRMComingSoon = ({ module, note }) => (
 // ──────────────────────────────────────────────────────────
 // Root
 // ──────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────
+// Error boundary — keeps the app shell rendered even when one
+// page throws (e.g. a SELECT against a missing table without
+// optional chaining). The fallback shows the error message and
+// a Reload button so the user is never stuck on a blank screen.
+// ──────────────────────────────────────────────────────────
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    console.error('Dashboard render error:', error, info);
+  }
+  render() {
+    if (this.state.error) {
+      const msg = (this.state.error && (this.state.error.message || String(this.state.error))) || 'Unknown error';
+      return (
+        <div style={{
+          padding: 28, maxWidth: 640, margin: '40px auto',
+          background: '#fff', border: '1px solid #f3d6c1', borderRadius: 16,
+          fontFamily: 'system-ui, -apple-system, sans-serif',
+        }}>
+          <div style={{
+            fontFamily: 'Fraunces, Georgia, serif', fontSize: 22,
+            color: '#8B2323', marginBottom: 8,
+          }}>Something went wrong</div>
+          <div style={{ fontSize: 13.5, color: '#4a3232', marginBottom: 14 }}>
+            The dashboard hit an error and stopped rendering this view.
+            You can reload to try again. If it keeps happening, the most
+            likely cause is a pending database migration that hasn't run
+            yet — let your developer know.
+          </div>
+          <pre style={{
+            background: '#fbf1ea', border: '1px solid #f3d6c1', borderRadius: 8,
+            padding: 10, fontSize: 11.5, color: '#4a3232',
+            whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+            marginBottom: 14, maxHeight: 200, overflow: 'auto',
+          }}>{msg}</pre>
+          <button onClick={() => window.location.reload()} style={{
+            padding: '10px 18px', background: '#8B2323', color: '#fff',
+            border: 'none', borderRadius: 10, fontWeight: 600, cursor: 'pointer',
+          }}>Reload dashboard</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 const Root = () => {
   const [unlocked, setUnlocked] = useState(() => !!loadSession());
   if (!unlocked) return <Gate onPass={() => setUnlocked(true)} />;
@@ -10349,7 +10420,7 @@ const mount = async (attempts = 0) => {
     // Preload sections so the first render already knows every section's
     // name, not just the four hardcoded ones.
     try { await refreshSectionMeta(); } catch (_) {}
-    ReactDOM.createRoot(document.getElementById('root')).render(<Root />);
+    ReactDOM.createRoot(document.getElementById('root')).render(<ErrorBoundary><Root /></ErrorBoundary>);
     // Keep the map fresh when the Owner adds / renames / reorders a section.
     if (window.sb) {
       window.sb.channel('global-sections')

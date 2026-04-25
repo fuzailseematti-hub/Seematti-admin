@@ -2095,6 +2095,10 @@ const ROLE_HOME = {
   hr:         'hrHome',
   manager:    'managerHome',
   supervisor: 'managerHome',
+  // CC team is dashboard-only; route them to the staff home on the
+  // PWA so a misclick or accidental login doesn't hit an undefined
+  // route / blank screen.
+  cc:         'staffHome',
 };
 
 const ROLE_UI = {
@@ -2103,6 +2107,7 @@ const ROLE_UI = {
   hr:         { icon: 'people',  tone: 'info',  title: 'HR',         titleTa: 'மனிதவள துறை' },
   manager:    { icon: 'store',   tone: 'gold',  title: 'Manager',    titleTa: 'மேலாளர்' },
   supervisor: { icon: 'user',    tone: 'gold',  title: 'Supervisor', titleTa: 'கண்காணிப்பாளர்' },
+  cc:         { icon: 'people',  tone: 'info',  title: 'Customer Care', titleTa: 'வாடிக்கையாளர் சேவை' },
 };
 
 const useLoginUsers = () => {
@@ -2522,22 +2527,25 @@ const OwnerHomeScreen = () => {
     if (!window.sb) return;
     let cancelled = false;
     const fetchWeek = async () => {
-      const end = new Date();
-      const start = new Date(); start.setDate(start.getDate() - 7);
-      const { data } = await window.sb
-        .from('attendance')
-        .select('status, date')
-        .gte('date', dateISO(start))
-        .lte('date', dateISO(end));
-      if (cancelled) return;
-      const rows = data || [];
-      const days = new Set(rows.map(r => r.date)).size;
-      setWeekStats({
-        late:   rows.filter(r => r.status === 'late').length,
-        absent: rows.filter(r => r.status === 'absent').length,
-        leave:  rows.filter(r => r.status === 'on_leave').length,
-        days,
-      });
+      try {
+        const end = new Date();
+        const start = new Date(); start.setDate(start.getDate() - 7);
+        const { data, error } = await window.sb
+          .from('attendance')
+          .select('status, date')
+          .gte('date', dateISO(start))
+          .lte('date', dateISO(end));
+        if (cancelled) return;
+        if (error) { console.warn('weekStats fetch failed', error); return; }
+        const rows = data || [];
+        const days = new Set(rows.map(r => r.date)).size;
+        setWeekStats({
+          late:   rows.filter(r => r.status === 'late').length,
+          absent: rows.filter(r => r.status === 'absent').length,
+          leave:  rows.filter(r => r.status === 'on_leave').length,
+          days,
+        });
+      } catch (e) { console.warn('weekStats threw', e); }
     };
     fetchWeek();
     const ch = window.sb.channel('owner-week-summary')
@@ -9477,6 +9485,52 @@ document.querySelectorAll('.tweakPanel .seg').forEach(seg => {
   });
 });
 
+// React error boundary so a single screen's crash doesn't blank the
+// entire PWA. Common causes after a partial migration: a SELECT against
+// a missing table whose response shape is destructured assuming non-null.
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { console.error('PWA render error:', error, info); }
+  render() {
+    if (this.state.error) {
+      const msg = (this.state.error && (this.state.error.message || String(this.state.error))) || 'Unknown error';
+      return (
+        <div style={{
+          padding: 28, maxWidth: 480, margin: '40px auto',
+          background: '#fff', border: '1px solid #f3d6c1', borderRadius: 16,
+          fontFamily: 'system-ui, -apple-system, sans-serif',
+        }}>
+          <div style={{
+            fontFamily: 'Fraunces, Georgia, serif', fontSize: 20,
+            color: '#8B2323', marginBottom: 8,
+          }}>Something went wrong</div>
+          <div style={{ fontSize: 13, color: '#4a3232', marginBottom: 14, lineHeight: 1.5 }}>
+            The app hit an error. Tap Reload to try again. If it keeps happening,
+            the most likely cause is a pending database migration that hasn't run
+            yet — let your developer know.
+          </div>
+          <pre style={{
+            background: '#fbf1ea', border: '1px solid #f3d6c1', borderRadius: 8,
+            padding: 10, fontSize: 11, color: '#4a3232',
+            whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+            marginBottom: 14, maxHeight: 180, overflow: 'auto',
+          }}>{msg}</pre>
+          <button onClick={() => window.location.reload()} style={{
+            padding: '12px 18px', background: '#8B2323', color: '#fff',
+            border: 'none', borderRadius: 12, fontWeight: 600, cursor: 'pointer',
+            width: '100%',
+          }}>Reload</button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function RootApp() {
   const [tick, setTick] = useState(0);
   useEffect(() => {
@@ -9778,7 +9832,7 @@ const mountWhenReady = async (attempts = 0) => {
     // them fresh via the realtime channel.
     try { await refreshSectionLabels(); } catch (_) {}
     const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(<RootApp />);
+    root.render(<ErrorBoundary><RootApp /></ErrorBoundary>);
     if (window.sb) {
       window.sb.channel('pwa-sections')
         .on('postgres_changes', { event: '*', schema: 'public', table: 'sections' },
