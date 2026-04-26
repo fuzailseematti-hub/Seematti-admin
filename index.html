@@ -355,22 +355,11 @@
 <body>
 
 <div id="root">
-  <!-- Visible loading state — replaced when React mounts (or by the
-       failsafe recovery card if mount fails). Lets the user see *something*
-       within the first 200ms instead of a pure-white flash. -->
-  <div id="boot-loading" style="
-    padding: 60px 20px; text-align: center;
-    font-family: system-ui, -apple-system, sans-serif;
-    color: #998;
-  ">
-    <div style="font-family: Georgia, serif; font-size: 22px; color: #8B2323; margin-bottom: 6px;">
-      Seemaatti
-    </div>
-    <div style="font-size: 13px; color: #998;">Loading…</div>
-    <div style="margin-top: 14px; font-size: 10.5px; color: #bbb; font-family: monospace;">
-      Build: v2026-04-26-weekstat · waiting for scripts
-    </div>
-  </div>
+  <!-- Invisible failsafe sentinel. Only purpose is to let the
+       pre-React failsafe detect "React never mounted". React
+       replaces all #root children on mount, so this vanishes
+       automatically when things work. -->
+  <div id="boot-loading" aria-hidden="true" style="display:none"></div>
 </div>
 
 <!-- ──────────────────────────────────────────────────────────────────
@@ -381,7 +370,7 @@
      ────────────────────────────────────────────────────────────── -->
 <script>
   (function () {
-    var FAILSAFE_VERSION = 'v2026-04-26-weekstat';
+    var FAILSAFE_VERSION = 'v2026-04-26-fast';
     function showRecoveryUI(reason) {
       var root = document.getElementById('root');
       if (!root) return;
