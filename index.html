@@ -331,6 +331,46 @@
 <body>
 
 <div id="root"></div>
+
+<!-- ──────────────────────────────────────────────────────────────────
+     Pre-React failsafe. Plain JS, runs before babel/React even start.
+     If anything in the boot chain throws or hangs, after 6 seconds
+     the empty root gets replaced with a recovery card so the user
+     is never stuck staring at a blank white page.
+     ────────────────────────────────────────────────────────────── -->
+<script>
+  (function () {
+    var FAILSAFE_VERSION = 'v2026-04-25-failsafe';
+    function showRecoveryUI(reason) {
+      var root = document.getElementById('root');
+      if (!root || root.childNodes.length > 0) return;
+      root.innerHTML =
+        '<div style="padding:28px;max-width:420px;margin:48px auto;font-family:system-ui,-apple-system,sans-serif;background:#fff;border:1px solid #f3d6c1;border-radius:14px">' +
+          '<div style="font-family:Georgia,serif;font-size:20px;color:#8B2323;margin-bottom:8px">App could not start</div>' +
+          '<div style="font-size:13.5px;color:#4a3232;line-height:1.55;margin-bottom:14px">' +
+            'The app scripts didn’t finish loading. This is usually a stale cache after a deploy. Try one:' +
+          '</div>' +
+          '<ol style="font-size:13px;color:#4a3232;line-height:1.7;padding-left:22px;margin:0 0 14px">' +
+            '<li><strong>Hard refresh</strong> the page (pull down hard, then release on iPhone; Cmd+Shift+R or Ctrl+Shift+R on a computer).</li>' +
+            '<li>Open the same URL in a private window.</li>' +
+            '<li>On iPhone Safari: Settings → Safari → Clear History and Website Data, then reopen the app.</li>' +
+            '<li>If the app is installed to your home screen: delete it and reopen from the browser URL.</li>' +
+          '</ol>' +
+          '<button onclick="location.reload(true)" style="padding:14px 18px;background:#8B2323;color:#fff;border:none;border-radius:12px;font-weight:600;cursor:pointer;font-size:14px;width:100%;font-family:inherit">Reload</button>' +
+          '<div style="margin-top:14px;font-size:11px;color:#998;font-family:JetBrains Mono,Menlo,monospace">' +
+            'Build: ' + FAILSAFE_VERSION + (reason ? ' · ' + reason : '') +
+          '</div>' +
+        '</div>';
+    }
+    window.addEventListener('error', function (e) {
+      setTimeout(function () { showRecoveryUI('error: ' + (e && e.message ? e.message.slice(0, 120) : 'script error')); }, 100);
+    });
+    window.addEventListener('unhandledrejection', function (e) {
+      setTimeout(function () { showRecoveryUI('promise: ' + (e && e.reason && (e.reason.message || String(e.reason)).slice(0, 120))); }, 100);
+    });
+    setTimeout(function () { showRecoveryUI('timeout'); }, 6000);
+  })();
+</script>
 <div class="tweakPanel" id="tweakPanel">
   <h3>Tweaks</h3>
   <div class="row">
