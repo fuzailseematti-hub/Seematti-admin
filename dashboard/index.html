@@ -527,10 +527,12 @@
 <script defer src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"
         crossorigin="anonymous"
         onerror="this.onerror=null;var s=document.createElement('script');s.src='https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js';s.crossOrigin='anonymous';s.defer=true;document.head.appendChild(s);"></script>
-<!-- SheetJS for the Payslips .xlsx export (two sheets matching the Silks + EPF/ESI templates). -->
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"
+<!-- SheetJS (XLSX) is ~600 KB and only used on the Payslips export +
+     Employees-page Excel upload. Defer it so it loads in parallel
+     with the rest of the page instead of blocking first paint. -->
+<script defer src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"
         crossorigin="anonymous"
-        onerror="this.onerror=null;var s=document.createElement('script');s.src='https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js';s.crossOrigin='anonymous';s.async=false;document.head.appendChild(s);"></script>
+        onerror="this.onerror=null;var s=document.createElement('script');s.src='https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js';s.crossOrigin='anonymous';s.defer=true;document.head.appendChild(s);"></script>
 <script>
   // ──────────────────────────────────────────────────────────
   // Supabase client (same project as the mobile app).
@@ -609,22 +611,11 @@
 <body>
 <div id="root">
   <!-- Visible loading state — replaced when React mounts (or by the
-       failsafe recovery card if mount fails). If the user sees this
-       text persist, the JS bundle started loading; if they see only
-       white, even the HTML didn't reach them. -->
-  <div id="boot-loading" style="
-    padding: 60px 20px; text-align: center;
-    font-family: system-ui, -apple-system, sans-serif;
-    color: #998;
-  ">
-    <div style="font-family: Georgia, serif; font-size: 22px; color: #8B2323; margin-bottom: 6px;">
-      Seemaatti Admin
-    </div>
-    <div style="font-size: 13px; color: #998;">Loading dashboard…</div>
-    <div style="margin-top: 14px; font-size: 10.5px; color: #bbb; font-family: monospace;">
-      Build: v2026-04-26-weekstat · waiting for scripts
-    </div>
-  </div>
+       failsafe recovery card if mount fails). Now invisible — it
+       only exists so the failsafe can detect "React never mounted".
+       React replaces all #root children on mount, so this vanishes
+       automatically when things work. -->
+  <div id="boot-loading" aria-hidden="true" style="display:none"></div>
 </div>
 
 <!-- ──────────────────────────────────────────────────────────────────
@@ -636,7 +627,7 @@
      ────────────────────────────────────────────────────────────── -->
 <script>
   (function () {
-    var FAILSAFE_VERSION = 'v2026-04-26-weekstat';
+    var FAILSAFE_VERSION = 'v2026-04-26-fast';
     function showRecoveryUI(reason) {
       var root = document.getElementById('root');
       if (!root) return;
@@ -681,7 +672,9 @@
       if (typeof window.ReactDOM === 'undefined')   missing.push('ReactDOM');
       if (typeof window.Babel === 'undefined')      missing.push('Babel');
       if (typeof window.supabase === 'undefined')   missing.push('Supabase');
-      if (typeof window.XLSX === 'undefined')       missing.push('XLSX');
+      // XLSX is deferred + only used for Payslips export — not
+      // required for first paint. The Excel features check for it
+      // at click time and surface a helpful toast instead.
       showRecoveryUI(missing.length ? 'missing: ' + missing.join(', ') : 'render-stalled');
     }, 8000);
   })();
@@ -965,7 +958,7 @@ const App = () => {
               <h1>{visiblePage.label}</h1>
             </div>
             <div style={{ fontSize: 10, color: 'var(--inkFaint)', letterSpacing: 0.3, marginLeft: 'auto', alignSelf: 'flex-end' }}>
-              v2026-04-26-weekstat
+              v2026-04-26-fast
             </div>
           </div>
           <div className="content">
