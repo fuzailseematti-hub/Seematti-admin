@@ -3,6 +3,11 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<!-- Aggressively prevent stale HTML caching on iOS Safari etc.
+     The HTML is small; freshness > bandwidth here. -->
+<meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="pragma" content="no-cache" />
+<meta http-equiv="expires" content="0" />
 <title>Seemaatti · Admin Dashboard</title>
 <link rel="icon" type="image/png" href="assets/seemaatti-logo.png" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -602,7 +607,25 @@
 </script>
 </head>
 <body>
-<div id="root"></div>
+<div id="root">
+  <!-- Visible loading state — replaced when React mounts (or by the
+       failsafe recovery card if mount fails). If the user sees this
+       text persist, the JS bundle started loading; if they see only
+       white, even the HTML didn't reach them. -->
+  <div id="boot-loading" style="
+    padding: 60px 20px; text-align: center;
+    font-family: system-ui, -apple-system, sans-serif;
+    color: #998;
+  ">
+    <div style="font-family: Georgia, serif; font-size: 22px; color: #8B2323; margin-bottom: 6px;">
+      Seemaatti Admin
+    </div>
+    <div style="font-size: 13px; color: #998;">Loading dashboard…</div>
+    <div style="margin-top: 14px; font-size: 10.5px; color: #bbb; font-family: monospace;">
+      Build: v2026-04-26-noload · waiting for scripts
+    </div>
+  </div>
+</div>
 
 <!-- ──────────────────────────────────────────────────────────────────
      Pre-React failsafe. If anything in the babel/React boot chain
@@ -613,10 +636,13 @@
      ────────────────────────────────────────────────────────────── -->
 <script>
   (function () {
-    var FAILSAFE_VERSION = 'v2026-04-26-cdn-fb';
+    var FAILSAFE_VERSION = 'v2026-04-26-noload';
     function showRecoveryUI(reason) {
       var root = document.getElementById('root');
-      if (!root || root.childNodes.length > 0) return;
+      if (!root) return;
+      // Bail if React has already taken over (the sentinel boot-loading
+      // div is gone). If sentinel is still there, mount never happened.
+      if (!document.getElementById('boot-loading')) return;
       root.innerHTML =
         '<div style="padding:32px;max-width:520px;margin:60px auto;font-family:system-ui,-apple-system,sans-serif;background:#fff;border:1px solid #f3d6c1;border-radius:14px;box-shadow:0 8px 24px -8px rgba(0,0,0,0.08)">' +
           '<div style="font-family:Georgia,serif;font-size:22px;color:#8B2323;margin-bottom:8px">App could not start</div>' +
@@ -939,7 +965,7 @@ const App = () => {
               <h1>{visiblePage.label}</h1>
             </div>
             <div style={{ fontSize: 10, color: 'var(--inkFaint)', letterSpacing: 0.3, marginLeft: 'auto', alignSelf: 'flex-end' }}>
-              v2026-04-26-cdn-fb
+              v2026-04-26-noload
             </div>
           </div>
           <div className="content">
