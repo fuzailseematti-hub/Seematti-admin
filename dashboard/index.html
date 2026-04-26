@@ -513,20 +513,42 @@
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<!-- Supabase / face-api / xlsx: jsDelivr first, unpkg fallback on
+     network failure. crossorigin="anonymous" so iOS Safari surfaces
+     real error messages instead of "Script error.". -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"
+        crossorigin="anonymous"
+        onerror="this.onerror=null;var s=document.createElement('script');s.src='https://unpkg.com/@supabase/supabase-js@2';s.crossOrigin='anonymous';s.async=false;document.head.appendChild(s);"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"
+        crossorigin="anonymous"
+        onerror="this.onerror=null;var s=document.createElement('script');s.src='https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js';s.crossOrigin='anonymous';s.defer=true;document.head.appendChild(s);"></script>
 <!-- SheetJS for the Payslips .xlsx export (two sheets matching the Silks + EPF/ESI templates). -->
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"
+        crossorigin="anonymous"
+        onerror="this.onerror=null;var s=document.createElement('script');s.src='https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js';s.crossOrigin='anonymous';s.async=false;document.head.appendChild(s);"></script>
 <script>
   // ──────────────────────────────────────────────────────────
   // Supabase client (same project as the mobile app).
   // ──────────────────────────────────────────────────────────
   window.SB_URL = 'https://hixhbznbejqfnasvgyid.supabase.co';
   window.SB_KEY = 'sb_publishable__Pit2dNHnYZ5oGLsJsn6lg_ojxAPfT8';
-  if (window.supabase && window.supabase.createClient) {
-    window.sb = window.supabase.createClient(window.SB_URL, window.SB_KEY, {
-      realtime: { params: { eventsPerSecond: 5 } },
-    });
+  // Resilient init — works even if the supabase script loaded via the
+  // jsdelivr→unpkg fallback above and arrived AFTER this inline block.
+  function initSupabaseClient() {
+    if (window.sb) return true;
+    if (window.supabase && window.supabase.createClient) {
+      window.sb = window.supabase.createClient(window.SB_URL, window.SB_KEY, {
+        realtime: { params: { eventsPerSecond: 5 } },
+      });
+      return true;
+    }
+    return false;
+  }
+  if (!initSupabaseClient()) {
+    var sbAttempts = 0;
+    var sbPoll = setInterval(function () {
+      if (initSupabaseClient() || ++sbAttempts > 200) clearInterval(sbPoll);
+    }, 50);
   }
 
   // ──────────────────────────────────────────────────────────
@@ -591,7 +613,7 @@
      ────────────────────────────────────────────────────────────── -->
 <script>
   (function () {
-    var FAILSAFE_VERSION = 'v2026-04-25-failsafe';
+    var FAILSAFE_VERSION = 'v2026-04-26-cdn-fb';
     function showRecoveryUI(reason) {
       var root = document.getElementById('root');
       if (!root || root.childNodes.length > 0) return;
@@ -623,10 +645,19 @@
     window.addEventListener('unhandledrejection', function (e) {
       setTimeout(function () { showRecoveryUI('promise: ' + (e && e.reason && (e.reason.message || String(e.reason)).slice(0, 120))); }, 100);
     });
-    // Final safety net: 6 seconds after page load, if root is still
-    // empty, show the recovery card so the user is never stuck on a
-    // pure-white screen.
-    setTimeout(function () { showRecoveryUI('timeout'); }, 6000);
+    // Final safety net: 8 seconds after page load (gives the unpkg
+    // fallback a chance to finish), if root is still empty show the
+    // recovery card. Diagnoses which CDN globals failed to load so
+    // a screenshot of the card is enough to identify the cause.
+    setTimeout(function () {
+      var missing = [];
+      if (typeof window.React === 'undefined')      missing.push('React');
+      if (typeof window.ReactDOM === 'undefined')   missing.push('ReactDOM');
+      if (typeof window.Babel === 'undefined')      missing.push('Babel');
+      if (typeof window.supabase === 'undefined')   missing.push('Supabase');
+      if (typeof window.XLSX === 'undefined')       missing.push('XLSX');
+      showRecoveryUI(missing.length ? 'missing: ' + missing.join(', ') : 'render-stalled');
+    }, 8000);
   })();
 </script>
 
@@ -908,7 +939,7 @@ const App = () => {
               <h1>{visiblePage.label}</h1>
             </div>
             <div style={{ fontSize: 10, color: 'var(--inkFaint)', letterSpacing: 0.3, marginLeft: 'auto', alignSelf: 'flex-end' }}>
-              v2026-04-25-failsafe
+              v2026-04-26-cdn-fb
             </div>
           </div>
           <div className="content">
