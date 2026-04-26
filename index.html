@@ -368,7 +368,7 @@
     </div>
     <div style="font-size: 13px; color: #998;">Loading…</div>
     <div style="margin-top: 14px; font-size: 10.5px; color: #bbb; font-family: monospace;">
-      Build: v2026-04-26-noload · waiting for scripts
+      Build: v2026-04-26-weekstat · waiting for scripts
     </div>
   </div>
 </div>
@@ -381,7 +381,7 @@
      ────────────────────────────────────────────────────────────── -->
 <script>
   (function () {
-    var FAILSAFE_VERSION = 'v2026-04-26-noload';
+    var FAILSAFE_VERSION = 'v2026-04-26-weekstat';
     function showRecoveryUI(reason) {
       var root = document.getElementById('root');
       if (!root) return;
@@ -5661,9 +5661,9 @@ const HRHomeScreen = () => {
         <div style={{
           marginTop: 10, display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10,
         }}>
-          <WeekStat label="Avg. attendance" value={`${hrAvgAttendance}%`} tone="success" />
-          <WeekStat label="Leave granted"   value={hrApprovedThisWeek}    tone="info" />
-          <WeekStat label="New joiners"     value={hrStats.newJoinersWeek} tone="brand" />
+          <HRWeekStat label="Avg. attendance" value={`${hrAvgAttendance}%`} tone="success" />
+          <HRWeekStat label="Leave granted"   value={hrApprovedThisWeek}    tone="info" />
+          <HRWeekStat label="New joiners"     value={hrStats.newJoinersWeek} tone="brand" />
         </div>
       </div>
     </div>
@@ -5738,7 +5738,7 @@ const HRAttentionRow = ({ icon, tone, title, sub, action, onClick, last }) => {
   );
 };
 
-const WeekStat = ({ label, value, tone }) => {
+const HRWeekStat = ({ label, value, tone }) => {
   const T_ = window.TOKENS;
   const colorMap = {
     success: T_.success, info: T_.info, brand: T_.maroon, warning: T_.warning,
