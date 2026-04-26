@@ -370,7 +370,7 @@
      ────────────────────────────────────────────────────────────── -->
 <script>
   (function () {
-    var FAILSAFE_VERSION = 'v2026-04-26-fast';
+    var FAILSAFE_VERSION = 'v2026-04-27-cc-pwa';
     function showRecoveryUI(reason) {
       var root = document.getElementById('root');
       if (!root) return;
@@ -2179,7 +2179,7 @@ const ROLE_HOME = {
   // CC team is dashboard-only; route them to the staff home on the
   // PWA so a misclick or accidental login doesn't hit an undefined
   // route / blank screen.
-  cc:         'staffHome',
+  cc:         'ccHome',
 };
 
 const ROLE_UI = {
@@ -5751,6 +5751,556 @@ const HRWeekStat = ({ label, value, tone }) => {
 };
 
 window.HRHomeScreen = HRHomeScreen;
+
+// ──────────────────────────────────────────────────────────
+// Customer Care home — mobile-optimised CRM cockpit.
+// Three sections, zero noise:
+//   1. Follow-ups due today   (customer_interactions.follow_up_date)
+//   2. Muhurtham visits today (muhurtham_visits.visit_date)
+//   3. Search any customer    (tap → quick-call + log card)
+// CC users don't get the dashboard's full table view on mobile;
+// this screen is the on-the-go layer.
+// ──────────────────────────────────────────────────────────
+const CCHomeScreen = () => {
+  const { nav, lang, toast, userId, setLang } = useApp();
+  const T_ = window.TOKENS;
+  const [followUps, setFollowUps] = React.useState([]);
+  const [muhurtham, setMuhurtham] = React.useState([]);
+  const [customers, setCustomers] = React.useState([]);
+  const [search, setSearch] = React.useState('');
+  const [loading, setLoading] = React.useState(true);
+  const [selectedCustomer, setSelectedCustomer] = React.useState(null);
+
+  const today = todayISO();
+
+  React.useEffect(() => {
+    if (!window.sb) return;
+    let cancelled = false;
+    const fetchAll = async () => {
+      try {
+        const [fuRes, mhRes, custRes] = await Promise.all([
+          window.sb.from('customer_interactions')
+            .select('*, customers(id, name, phone, alt_phone, is_vip, do_not_contact)')
+            .eq('follow_up_done', false)
+            .lte('follow_up_date', today)
+            .not('follow_up_date', 'is', null)
+            .order('follow_up_date', { ascending: true })
+            .limit(50),
+          window.sb.from('muhurtham_visits')
+            .select('*, customers(id, name, phone, is_vip)')
+            .eq('visit_date', today)
+            .neq('status', 'cancelled')
+            .order('visit_time', { ascending: true })
+            .limit(20),
+          window.sb.from('customers')
+            .select('id, name, phone, alt_phone, city, tags, is_vip, do_not_contact, language_pref')
+            .order('name', { ascending: true })
+            .limit(500),
+        ]);
+        if (cancelled) return;
+        setFollowUps((fuRes.data || []).filter(r => r.customers));
+        setMuhurtham((mhRes.data || []).filter(r => r.customers));
+        setCustomers(custRes.data || []);
+        setLoading(false);
+      } catch (e) {
+        if (!cancelled) { console.warn('CC home fetch failed', e); setLoading(false); }
+      }
+    };
+    fetchAll();
+    const ch = window.sb.channel('cc-home')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'customer_interactions' }, () => fetchAll())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'muhurtham_visits' },      () => fetchAll())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' },             () => fetchAll())
+      .subscribe();
+    return () => { cancelled = true; window.sb.removeChannel(ch); };
+  }, [today]);
+
+  const filteredCustomers = React.useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return [];   // hide list until the user types — the page is
+                         // crowded otherwise
+    return customers
+      .filter(c => window.matchesQuery(q, c.name, c.phone, c.alt_phone, c.city, (c.tags || []).join(' ')))
+      .slice(0, 30);
+  }, [customers, search]);
+
+  const markFollowUpDone = async (id) => {
+    if (!window.sb) return;
+    await window.sb.from('customer_interactions').update({ follow_up_done: true }).eq('id', id);
+    toast(lang === 'ta' ? 'முடிந்தது · நன்றி' : 'Marked done');
+  };
+
+  const hour = new Date().getHours();
+  const greet = hour < 12 ? (lang === 'ta' ? 'காலை வணக்கம்' : 'Good morning')
+              : hour < 17 ? (lang === 'ta' ? 'மதிய வணக்கம்' : 'Good afternoon')
+              :             (lang === 'ta' ? 'மாலை வணக்கம்'  : 'Good evening');
+
+  return (
+    <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 100 }}>
+      {/* Header */}
+      <div style={{ padding: 'var(--screen-top) 20px 0' }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          marginBottom: 14,
+        }}>
+          <div>
+            <div style={{
+              fontSize: 11, letterSpacing: 1, textTransform: 'uppercase',
+              color: T_.inkMuted, fontWeight: 600,
+            }}>
+              {lang === 'ta' ? 'வாடிக்கையாளர் சேவை' : 'Customer Care'}
+            </div>
+            <div style={{
+              fontFamily: 'Fraunces, Georgia, serif',
+              fontSize: 26, fontWeight: 500, letterSpacing: -0.5,
+              color: T_.ink, marginTop: 2,
+            }}>{greet}</div>
+          </div>
+          <button onClick={() => nav.go('profile')} style={{
+            background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 10,
+            padding: '8px 12px', fontSize: 12, fontWeight: 600,
+            color: T_.ink, cursor: 'pointer', fontFamily: 'inherit',
+          }}>{lang === 'ta' ? 'சுயவிவரம்' : 'Profile'}</button>
+        </div>
+
+        {/* Stat strip */}
+        <div style={{
+          display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 18,
+        }}>
+          <CCStatTile label={lang === 'ta' ? 'பின்தொடர்வு' : 'Follow-ups'} value={followUps.length} tone="warning" />
+          <CCStatTile label={lang === 'ta' ? 'வீட்டு வருகை' : 'Muhurtham today'} value={muhurtham.length} tone="brand" />
+          <CCStatTile label={lang === 'ta' ? 'வாடிக்கையாளர்கள்' : 'Customers'} value={customers.length} tone="info" />
+        </div>
+      </div>
+
+      {/* Follow-ups due today */}
+      <div style={{ padding: '0 16px' }}>
+        <SectionTitle title={lang === 'ta' ? 'இன்றைய பின்தொடர்வுகள்' : 'Follow-ups today'} />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8, marginBottom: 18 }}>
+          {loading && <div style={{ color: T_.inkMuted, fontSize: 13, padding: 8 }}>Loading…</div>}
+          {!loading && followUps.length === 0 && (
+            <div style={{
+              background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 12,
+              padding: 16, color: T_.inkMuted, fontSize: 13, textAlign: 'center',
+            }}>
+              {lang === 'ta' ? 'இன்று எதுவும் இல்லை. ' : 'Nothing due today. '}
+              <span style={{ color: T_.success, fontWeight: 600 }}>✓</span>
+            </div>
+          )}
+          {followUps.map(f => (
+            <CCFollowUpRow key={f.id} row={f} lang={lang}
+              onCustomer={() => setSelectedCustomer(f.customers)}
+              onDone={() => markFollowUpDone(f.id)} />
+          ))}
+        </div>
+      </div>
+
+      {/* Muhurtham today */}
+      {muhurtham.length > 0 && (
+        <div style={{ padding: '0 16px' }}>
+          <SectionTitle title={lang === 'ta' ? 'இன்றைய வீட்டு வருகை' : 'Muhurtham visits today'} />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8, marginBottom: 18 }}>
+            {muhurtham.map(m => (
+              <CCMuhurthamRow key={m.id} row={m} lang={lang}
+                onCustomer={() => setSelectedCustomer(m.customers)} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Customer search */}
+      <div style={{ padding: '0 16px' }}>
+        <SectionTitle title={lang === 'ta' ? 'வாடிக்கையாளரைக் கண்டுபிடி' : 'Find a customer'} />
+        <div style={{ position: 'relative', marginTop: 8, marginBottom: 8 }}>
+          <input
+            type="search"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder={lang === 'ta' ? 'பெயர், ஃபோன், ஊர்…' : 'Name, phone, city, tag…'}
+            style={{
+              width: '100%', padding: '12px 14px', borderRadius: 12,
+              background: T_.surface, border: `1px solid ${T_.border}`,
+              fontSize: 14, color: T_.ink, fontFamily: 'inherit',
+              boxSizing: 'border-box', outline: 'none',
+            }}
+          />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {search.trim() === '' && (
+            <div style={{ color: T_.inkMuted, fontSize: 12.5, padding: 8, textAlign: 'center' }}>
+              {lang === 'ta' ? 'தேடத் தொடங்கவும்' : 'Type to search…'}
+            </div>
+          )}
+          {search.trim() !== '' && filteredCustomers.length === 0 && (
+            <div style={{ color: T_.inkMuted, fontSize: 12.5, padding: 8, textAlign: 'center' }}>
+              {lang === 'ta' ? 'எந்த வாடிக்கையாளரும் இல்லை' : 'No customers match'}
+            </div>
+          )}
+          {filteredCustomers.map(c => (
+            <CCCustomerRow key={c.id} customer={c}
+              onClick={() => setSelectedCustomer(c)} />
+          ))}
+        </div>
+      </div>
+
+      <CCCustomerSheet
+        customer={selectedCustomer}
+        userId={userId}
+        lang={lang}
+        toast={toast}
+        onClose={() => setSelectedCustomer(null)}
+      />
+    </div>
+  );
+};
+window.CCHomeScreen = CCHomeScreen;
+
+// ─── Helper components for the CC home ──────────────────────
+const CCStatTile = ({ label, value, tone }) => {
+  const T_ = window.TOKENS;
+  const tones = {
+    warning: T_.warning, danger: T_.danger, info: T_.info, brand: T_.maroon, success: T_.success,
+  };
+  return (
+    <div style={{
+      background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 12,
+      padding: '10px 8px', textAlign: 'center',
+    }}>
+      <div style={{
+        fontFamily: 'Fraunces, Georgia, serif',
+        fontSize: 22, fontWeight: 600, color: tones[tone] || T_.ink,
+      }}>{value}</div>
+      <div style={{
+        fontSize: 9.5, letterSpacing: 0.4, textTransform: 'uppercase',
+        color: T_.inkMuted, fontWeight: 600, marginTop: 3,
+      }}>{label}</div>
+    </div>
+  );
+};
+
+const CCFollowUpRow = ({ row, lang, onCustomer, onDone }) => {
+  const T_ = window.TOKENS;
+  const today = todayISO();
+  const overdue = row.follow_up_date < today;
+  const c = row.customers || {};
+  return (
+    <div style={{
+      background: T_.surface, border: `1px solid ${overdue ? T_.danger : T_.border}`,
+      borderRadius: 12, padding: 12,
+      display: 'flex', flexDirection: 'column', gap: 8,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+        <div style={{ flex: 1, minWidth: 0 }} onClick={onCustomer}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 2 }}>
+            <span style={{ fontSize: 14, fontWeight: 600, color: T_.ink }}>{c.name}</span>
+            {c.is_vip && <Pill tone="gold" size="sm">★ VIP</Pill>}
+            {c.do_not_contact && <Pill tone="danger" size="sm">DNC</Pill>}
+            {overdue && <Pill tone="danger" size="sm">{lang === 'ta' ? 'தாமதம்' : 'Overdue'}</Pill>}
+          </div>
+          {row.outcome && (
+            <div style={{ fontSize: 12.5, color: T_.inkSoft, marginTop: 2 }}>{row.outcome}</div>
+          )}
+          {row.follow_up_note && (
+            <div style={{ fontSize: 12, color: T_.inkMuted, marginTop: 3, fontStyle: 'italic' }}>
+              {row.follow_up_note}
+            </div>
+          )}
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 6 }}>
+        {c.phone && (
+          <a href={`tel:${c.phone}`} style={{
+            flex: 1, background: T_.success || '#0E7C3A', color: '#fff',
+            padding: '10px', borderRadius: 10, textAlign: 'center',
+            fontSize: 13, fontWeight: 700, textDecoration: 'none',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+          }}>
+            <Icon name="phone" size={14} color="#fff" /> {lang === 'ta' ? 'அழை' : 'Call'}
+          </a>
+        )}
+        <button onClick={onDone} style={{
+          flex: 1, background: T_.surface, border: `1px solid ${T_.border}`,
+          color: T_.ink, padding: '10px', borderRadius: 10,
+          fontSize: 13, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer',
+        }}>
+          ✓ {lang === 'ta' ? 'முடிந்தது' : 'Done'}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+const CCMuhurthamRow = ({ row, lang, onCustomer }) => {
+  const T_ = window.TOKENS;
+  const c = row.customers || {};
+  return (
+    <button onClick={onCustomer} style={{
+      background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 12,
+      padding: 12, fontFamily: 'inherit', textAlign: 'left', cursor: 'pointer',
+      display: 'flex', alignItems: 'center', gap: 12, width: '100%',
+    }}>
+      <div style={{
+        width: 40, height: 40, borderRadius: 11,
+        background: T_.maroonSoft, color: T_.maroon,
+        display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+        fontFamily: 'Fraunces, Georgia, serif', fontWeight: 600, fontSize: 13,
+      }}>
+        {(row.visit_time || '').slice(0, 5) || '—'}
+      </div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: T_.ink }}>{c.name}</span>
+          {c.is_vip && <Pill tone="gold" size="sm">★ VIP</Pill>}
+          <span className="status-pill" style={{
+            background: row.pre_visit_done ? T_.successSoft : T_.surfaceAlt,
+            color: row.pre_visit_done ? T_.success : T_.inkMuted, fontSize: 10,
+          }}>{row.pre_visit_done ? '✓' : '○'} pre</span>
+        </div>
+        {row.address && (
+          <div style={{ fontSize: 12, color: T_.inkMuted, marginTop: 3,
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {row.address}
+          </div>
+        )}
+      </div>
+      <Icon name="chevron" size={16} color={T_.inkFaint} />
+    </button>
+  );
+};
+
+const CCCustomerRow = ({ customer, onClick }) => {
+  const T_ = window.TOKENS;
+  return (
+    <button onClick={onClick} style={{
+      background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 12,
+      padding: 12, fontFamily: 'inherit', textAlign: 'left', cursor: 'pointer',
+      display: 'flex', alignItems: 'center', gap: 12, width: '100%',
+    }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: T_.ink }}>{customer.name}</span>
+          {customer.is_vip && <Pill tone="gold" size="sm">★</Pill>}
+          {customer.do_not_contact && <Pill tone="danger" size="sm">DNC</Pill>}
+        </div>
+        <div style={{ fontSize: 12, color: T_.inkMuted, marginTop: 3, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
+          {customer.phone || '—'}{customer.city ? ` · ${customer.city}` : ''}
+        </div>
+      </div>
+      <Icon name="chevron" size={16} color={T_.inkFaint} />
+    </button>
+  );
+};
+
+// ─── Bottom-sheet that opens when a CC user taps any customer.
+//     Click-to-call + an inline "log a call" form so a CC away from
+//     the dashboard can capture interactions on the spot.
+const CCCustomerSheet = ({ customer, userId, lang, toast, onClose }) => {
+  const T_ = window.TOKENS;
+  const [open, setOpen] = React.useState(false);
+  const [draft, setDraft] = React.useState(null);
+  const [saving, setSaving] = React.useState(false);
+
+  React.useEffect(() => { setOpen(!!customer); if (!customer) setDraft(null); }, [customer]);
+
+  const startLog = () => setDraft({
+    type: 'call-out', topic: 'follow-up', outcome: '',
+    follow_up_date: '', follow_up_note: '', notes: '',
+  });
+
+  const save = async () => {
+    if (!draft || saving) return;
+    setSaving(true);
+    try {
+      const { error } = await window.sb.from('customer_interactions').insert({
+        customer_id: customer.id,
+        type: draft.type,
+        occurred_at: new Date().toISOString(),
+        topic: draft.topic || null,
+        outcome: (draft.outcome || '').trim() || null,
+        follow_up_date: draft.follow_up_date || null,
+        follow_up_note: (draft.follow_up_note || '').trim() || null,
+        follow_up_done: false,
+        logged_by: userId || null,
+        logged_by_name: 'CC',
+        notes: (draft.notes || '').trim() || null,
+      });
+      if (error) { toast('Failed: ' + error.message); return; }
+      toast(lang === 'ta' ? 'பதிவு சேமிக்கப்பட்டது' : 'Interaction logged');
+      setDraft(null);
+      onClose();
+    } finally { setSaving(false); }
+  };
+
+  if (!open || !customer) return null;
+
+  return (
+    <div onClick={onClose} style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+      zIndex: 80, display: 'flex', alignItems: 'flex-end',
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: T_.bg, width: '100%',
+        borderTopLeftRadius: 20, borderTopRightRadius: 20,
+        padding: '18px 16px 28px', maxHeight: '85vh', overflowY: 'auto',
+      }}>
+        <div style={{
+          width: 40, height: 4, background: T_.border, borderRadius: 2,
+          margin: '0 auto 14px',
+        }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+          <span style={{ fontFamily: 'Fraunces, Georgia, serif', fontSize: 22, fontWeight: 500, color: T_.ink }}>
+            {customer.name}
+          </span>
+          {customer.is_vip && <Pill tone="gold" size="sm">★ VIP</Pill>}
+          {customer.do_not_contact && <Pill tone="danger" size="sm">Do not contact</Pill>}
+        </div>
+        {customer.phone && (
+          <div style={{ fontSize: 13, color: T_.inkMuted, marginBottom: 14, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
+            {customer.phone}{customer.alt_phone ? ` · alt ${customer.alt_phone}` : ''}
+          </div>
+        )}
+
+        {/* Quick actions */}
+        {!draft && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+            {customer.phone && (
+              <a href={`tel:${customer.phone}`} style={{
+                background: T_.success || '#0E7C3A', color: '#fff',
+                padding: '14px', borderRadius: 12, textAlign: 'center',
+                fontSize: 15, fontWeight: 700, textDecoration: 'none',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+              }}>
+                <Icon name="phone" size={18} color="#fff" />
+                {lang === 'ta' ? 'அழை' : 'Call'} {customer.phone}
+              </a>
+            )}
+            {customer.alt_phone && (
+              <a href={`tel:${customer.alt_phone}`} style={{
+                background: T_.surface, border: `1px solid ${T_.border}`,
+                color: T_.ink, padding: '14px', borderRadius: 12, textAlign: 'center',
+                fontSize: 13.5, fontWeight: 600, textDecoration: 'none',
+              }}>
+                {lang === 'ta' ? 'மாற்று எண்' : 'Call alt'} {customer.alt_phone}
+              </a>
+            )}
+            <button onClick={startLog} style={{
+              background: T_.maroon, color: '#fff', border: 'none',
+              padding: '14px', borderRadius: 12, fontSize: 14, fontWeight: 700,
+              cursor: 'pointer', fontFamily: 'inherit',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            }}>
+              <Icon name="plus" size={16} color="#fff" />
+              {lang === 'ta' ? 'அழைப்பை பதிவு செய்' : 'Log interaction'}
+            </button>
+            <button onClick={onClose} style={{
+              background: 'transparent', border: 'none',
+              padding: '12px', color: T_.inkMuted, fontSize: 13, fontWeight: 600,
+              cursor: 'pointer', fontFamily: 'inherit',
+            }}>
+              {lang === 'ta' ? 'மூடு' : 'Close'}
+            </button>
+          </div>
+        )}
+
+        {/* Inline log-interaction form */}
+        {draft && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <select value={draft.type}
+                onChange={e => setDraft({ ...draft, type: e.target.value })}
+                style={{
+                  padding: '10px', borderRadius: 10, fontSize: 14,
+                  background: T_.surface, border: `1px solid ${T_.border}`, color: T_.ink,
+                  fontFamily: 'inherit',
+                }}>
+                <option value="call-out">Call out</option>
+                <option value="call-in">Call in</option>
+                <option value="whatsapp">WhatsApp</option>
+                <option value="store-visit">Store visit</option>
+                <option value="home-visit">Home visit</option>
+                <option value="other">Other</option>
+              </select>
+              <select value={draft.topic}
+                onChange={e => setDraft({ ...draft, topic: e.target.value })}
+                style={{
+                  padding: '10px', borderRadius: 10, fontSize: 14,
+                  background: T_.surface, border: `1px solid ${T_.border}`, color: T_.ink,
+                  fontFamily: 'inherit',
+                }}>
+                <option value="follow-up">follow-up</option>
+                <option value="greeting">greeting</option>
+                <option value="new-collection">new-collection</option>
+                <option value="offer">offer</option>
+                <option value="appointment">appointment</option>
+                <option value="muhurtham">muhurtham</option>
+                <option value="complaint">complaint</option>
+                <option value="feedback">feedback</option>
+                <option value="other">other</option>
+              </select>
+            </div>
+            <input
+              value={draft.outcome}
+              onChange={e => setDraft({ ...draft, outcome: e.target.value })}
+              placeholder={lang === 'ta' ? 'விளைவு (சுருக்கமாக)' : 'Outcome (short)'}
+              style={{
+                padding: '12px', borderRadius: 10, fontSize: 14,
+                background: T_.surface, border: `1px solid ${T_.border}`, color: T_.ink,
+                fontFamily: 'inherit',
+              }}
+            />
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 8 }}>
+              <input type="date"
+                value={draft.follow_up_date}
+                onChange={e => setDraft({ ...draft, follow_up_date: e.target.value })}
+                style={{
+                  padding: '10px', borderRadius: 10, fontSize: 13,
+                  background: T_.surface, border: `1px solid ${T_.border}`, color: T_.ink,
+                  fontFamily: 'inherit',
+                }}
+              />
+              <input
+                value={draft.follow_up_note}
+                onChange={e => setDraft({ ...draft, follow_up_note: e.target.value })}
+                placeholder={lang === 'ta' ? 'பின்தொடர்வு குறிப்பு' : 'Follow-up note'}
+                style={{
+                  padding: '12px', borderRadius: 10, fontSize: 14,
+                  background: T_.surface, border: `1px solid ${T_.border}`, color: T_.ink,
+                  fontFamily: 'inherit',
+                }}
+              />
+            </div>
+            <textarea
+              rows={3}
+              value={draft.notes}
+              onChange={e => setDraft({ ...draft, notes: e.target.value })}
+              placeholder={lang === 'ta' ? 'விரிவான குறிப்புகள்' : 'Detailed notes'}
+              style={{
+                padding: '12px', borderRadius: 10, fontSize: 14,
+                background: T_.surface, border: `1px solid ${T_.border}`, color: T_.ink,
+                fontFamily: 'inherit', resize: 'vertical',
+              }}
+            />
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={() => setDraft(null)} style={{
+                flex: 1, background: T_.surface, border: `1px solid ${T_.border}`,
+                color: T_.ink, padding: '14px', borderRadius: 12,
+                fontSize: 14, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer',
+              }}>{lang === 'ta' ? 'ரத்துசெய்' : 'Cancel'}</button>
+              <button onClick={save} disabled={saving} style={{
+                flex: 1, background: T_.success || '#0E7C3A', color: '#fff', border: 'none',
+                padding: '14px', borderRadius: 12, fontSize: 14, fontWeight: 700,
+                fontFamily: 'inherit', cursor: 'pointer',
+                opacity: saving ? 0.6 : 1,
+              }}>
+                {saving ? '…' : (lang === 'ta' ? 'சேமி' : 'Save')}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
 
 
 // ─────────────────────────────────────────────────────────────
@@ -9750,6 +10300,7 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     managerHome:     makeScreen('ManagerHomeScreen'),
     advances:        makeScreen('AdvancesScreen'),
     sectionStatus:   makeScreen('SectionsStatusScreen'),
+    ccHome:          makeScreen('CCHomeScreen'),
   };
 
   const screenTitles = {
@@ -9774,16 +10325,26 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     managerHome:    '17 Manager Home',
     advances:       '18 Advances',
     sectionStatus:  '19 All Sections',
+    ccHome:         '20 Customer Care',
   };
 
   const isHrLike = user === 'owner' || user === 'admin' || user === 'hr';
-  const tabs = [
-    { id: 'home',      icon: 'home',     label: lang === 'ta' ? 'முகப்பு' : 'Home' },
-    ...(isHrLike ? [{ id: 'tools', icon: 'grid', label: lang === 'ta' ? 'கருவிகள்' : 'Tools' }] : []),
-    { id: 'checklist', icon: 'check',    label: lang === 'ta' ? 'பட்டியல்' : 'Checklist' },
-    { id: 'tasks',     icon: 'tasks',    label: lang === 'ta' ? 'பணிகள்' : 'Tasks' },
-    { id: 'settings',  icon: 'settings', label: lang === 'ta' ? 'அமைப்பு' : 'Settings' },
-  ];
+  const isCC     = user === 'cc';
+  // CC team gets a stripped bottom nav: just Home + Settings. The PWA
+  // is their on-the-go layer for follow-ups + Muhurtham + click-to-call;
+  // payroll / attendance / checklist tabs are dashboard-only for them.
+  const tabs = isCC
+    ? [
+        { id: 'home',     icon: 'home',     label: lang === 'ta' ? 'முகப்பு' : 'Home' },
+        { id: 'settings', icon: 'settings', label: lang === 'ta' ? 'அமைப்பு' : 'Settings' },
+      ]
+    : [
+        { id: 'home',      icon: 'home',     label: lang === 'ta' ? 'முகப்பு' : 'Home' },
+        ...(isHrLike ? [{ id: 'tools', icon: 'grid', label: lang === 'ta' ? 'கருவிகள்' : 'Tools' }] : []),
+        { id: 'checklist', icon: 'check',    label: lang === 'ta' ? 'பட்டியல்' : 'Checklist' },
+        { id: 'tasks',     icon: 'tasks',    label: lang === 'ta' ? 'பணிகள்' : 'Tasks' },
+        { id: 'settings',  icon: 'settings', label: lang === 'ta' ? 'அமைப்பு' : 'Settings' },
+      ];
 
   const handleTab = (id) => {
     setTab(id);
@@ -9794,6 +10355,7 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
         manager: 'managerHome',
         supervisor: 'managerHome',
         staff: 'staffHome',
+        cc: 'ccHome',
       };
       nav.reset(homeMap[user] || 'ownerHome');
     }
@@ -9817,7 +10379,8 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     if (next && next !== tab) setTab(next);
     if (!next && tab !== 'home'
       && (current === 'ownerHome' || current === 'hrHome'
-          || current === 'staffHome' || current === 'managerHome')) {
+          || current === 'staffHome' || current === 'managerHome'
+          || current === 'ccHome')) {
       setTab('home');
     }
   }, [current]);
@@ -9903,7 +10466,7 @@ const REQUIRED = [
   'LoginScreen','OwnerHomeScreen','StaffHomeScreen','AttendanceScreen',
   'LeavesScreen','ApplyLeaveScreen','TasksScreen','PayslipScreen',
   'AnnouncementsScreen','VisitorsScreen','HRHomeScreen','HRToolsScreen','MarkAttendanceScreen',
-  'KioskScannerScreen','EnrollJoinerScreen','SettingsScreen','ProfileScreen','ChecklistScreen','ManagerHomeScreen','AdvancesScreen','SectionsStatusScreen',
+  'KioskScannerScreen','EnrollJoinerScreen','SettingsScreen','ProfileScreen','ChecklistScreen','ManagerHomeScreen','AdvancesScreen','SectionsStatusScreen','CCHomeScreen',
   'AppCtx','IOSDevice','TabBar','Toast','TOKENS','MOCK',
 ];
 const mountWhenReady = async (attempts = 0) => {
