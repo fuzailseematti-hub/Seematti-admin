@@ -3,6 +3,10 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<!-- Aggressively prevent stale HTML caching on iOS Safari etc. -->
+<meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="pragma" content="no-cache" />
+<meta http-equiv="expires" content="0" />
 <title>Seemaatti · Admin App Concept</title>
 <meta name="theme-color" content="#0E7C3A" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -350,7 +354,24 @@
 </head>
 <body>
 
-<div id="root"></div>
+<div id="root">
+  <!-- Visible loading state — replaced when React mounts (or by the
+       failsafe recovery card if mount fails). Lets the user see *something*
+       within the first 200ms instead of a pure-white flash. -->
+  <div id="boot-loading" style="
+    padding: 60px 20px; text-align: center;
+    font-family: system-ui, -apple-system, sans-serif;
+    color: #998;
+  ">
+    <div style="font-family: Georgia, serif; font-size: 22px; color: #8B2323; margin-bottom: 6px;">
+      Seemaatti
+    </div>
+    <div style="font-size: 13px; color: #998;">Loading…</div>
+    <div style="margin-top: 14px; font-size: 10.5px; color: #bbb; font-family: monospace;">
+      Build: v2026-04-26-noload · waiting for scripts
+    </div>
+  </div>
+</div>
 
 <!-- ──────────────────────────────────────────────────────────────────
      Pre-React failsafe. Plain JS, runs before babel/React even start.
@@ -360,10 +381,13 @@
      ────────────────────────────────────────────────────────────── -->
 <script>
   (function () {
-    var FAILSAFE_VERSION = 'v2026-04-26-cdn-fb';
+    var FAILSAFE_VERSION = 'v2026-04-26-noload';
     function showRecoveryUI(reason) {
       var root = document.getElementById('root');
-      if (!root || root.childNodes.length > 0) return;
+      if (!root) return;
+      // Bail if React already took over (sentinel is gone). If the
+      // sentinel still exists, mount never happened.
+      if (!document.getElementById('boot-loading')) return;
       root.innerHTML =
         '<div style="padding:28px;max-width:420px;margin:48px auto;font-family:system-ui,-apple-system,sans-serif;background:#fff;border:1px solid #f3d6c1;border-radius:14px">' +
           '<div style="font-family:Georgia,serif;font-size:20px;color:#8B2323;margin-bottom:8px">App could not start</div>' +
