@@ -3047,15 +3047,28 @@ window.MobileFilterDropdown = MobileFilterDropdown;
 const FloorCard = ({ floor }) => {
   const T_ = window.TOKENS;
   const t = useT();
-  const { density } = useApp();
+  const { density, nav } = useApp();
   const pct = Math.round((floor.present / floor.staff) * 100);
   const tone = pct >= 90 ? 'success' : pct >= 85 ? 'warning' : 'danger';
 
+  // Only navigate when we have a real string section_id (live data).
+  // The MOCK.floors fallback uses numeric ids that don't match the DB,
+  // so we don't try to filter on those.
+  const canOpen = typeof floor.id === 'string';
+  const open = () => {
+    if (!canOpen || !nav) return;
+    window.__sectionFilter = floor.id;
+    nav.go('attendance');
+  };
+
+  const Tag = canOpen ? 'button' : 'div';
   return (
-    <div style={{
+    <Tag onClick={canOpen ? open : undefined} style={{
       background: T_.surface, border: `1px solid ${T_.border}`,
       borderRadius: 16, padding: density === 'compact' ? 12 : 14,
       display: 'flex', alignItems: 'center', gap: 12,
+      width: '100%', textAlign: 'left',
+      fontFamily: 'inherit', cursor: canOpen ? 'pointer' : 'default',
     }}>
       <div style={{
         width: 42, height: 42, borderRadius: 12,
@@ -3072,10 +3085,15 @@ const FloorCard = ({ floor }) => {
         </div>
         <div style={{ fontSize: 11.5, color: T_.inkMuted }}>
           {floor.present}/{floor.staff} present
+          {floor.late ? ` · ${floor.late} late` : ''}
+          {floor.absent ? ` · ${floor.absent} absent` : ''}
         </div>
       </div>
       <Pill tone={tone} size="sm">{pct}%</Pill>
-    </div>
+      {canOpen && (
+        <Icon name="chevron" size={14} color={T_.inkFaint} />
+      )}
+    </Tag>
   );
 };
 
@@ -3522,7 +3540,9 @@ const AttendanceScreen = () => {
   const T_ = window.TOKENS;
   const M = window.MOCK;
   const { user, userAccess } = useApp();
-  const [section, setSection] = React.useState('all');
+  const [section, setSection] = React.useState(
+    () => window.__sectionFilter || 'all'
+  );
   const [statusFilter, setStatusFilter] = React.useState(
     () => window.__attendanceFilter || 'all'
   );
@@ -3531,6 +3551,10 @@ const AttendanceScreen = () => {
     if (window.__attendanceFilter) {
       setStatusFilter(window.__attendanceFilter);
       delete window.__attendanceFilter;
+    }
+    if (window.__sectionFilter) {
+      setSection(window.__sectionFilter);
+      delete window.__sectionFilter;
     }
   }, []);
   const [detail, setDetail] = React.useState(null);  // selected employee_id
