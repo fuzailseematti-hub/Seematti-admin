@@ -10356,9 +10356,53 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
 
   const nav = {
     go: (name) => setStack(s => [...s, name]),
-    back: () => setStack(s => s.length > 1 ? s.slice(0, -1) : s),
+    back: () => {
+      // Route in-app back through the browser so popstate is the single
+      // source that pops both the React stack AND a history entry —
+      // keeps them in lockstep regardless of how the user gets back.
+      if (historyDepth.current > 0) window.history.back();
+      else setStack(s => s.length > 1 ? s.slice(0, -1) : s);
+    },
     reset: (name) => setStack([name]),
   };
+
+  // ── Browser-back / swipe-back integration ─────────────────────
+  // The screen stack lives in React state. Without this, OS-back /
+  // swipe-back fires the browser's native action — which in a standalone
+  // PWA is "exit the app." Mirror the stack onto pushState sentinel
+  // entries so each in-app screen has a matching history entry, and
+  // intercept popstate to pop the React stack instead of exiting.
+  const historyDepth = useRef(0);
+
+  useEffect(() => {
+    const onPop = () => {
+      historyDepth.current = Math.max(0, historyDepth.current - 1);
+      setStack(s => {
+        if (s.length <= 1) {
+          // At the home screen — don't let OS-back exit the PWA.
+          // Push a fresh sentinel so the next press is also absorbed.
+          window.history.pushState({ seemattiBackGuard: 1 }, '');
+          historyDepth.current += 1;
+          return s;
+        }
+        return s.slice(0, -1);
+      });
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+
+  useEffect(() => {
+    // Pad browser history so it has at least one sentinel per in-app
+    // screen above home. Runs after every stack mutation, including the
+    // initial localStorage restore — so a user who refreshes 5 deep
+    // gets 5 sentinels and 5 back presses to walk out.
+    while (historyDepth.current < stack.length) {
+      window.history.pushState(
+        { seemattiBackGuard: historyDepth.current + 1 }, '');
+      historyDepth.current += 1;
+    }
+  }, [stack]);
 
   const toast = (msg) => {
     setToastMsg(msg);
