@@ -1168,8 +1168,14 @@ const todayISO = () =>
   new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 const dateISO = (d) =>
   new Date(d).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+const todayHumanIST = () =>
+  new Date().toLocaleDateString('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    weekday: 'short', day: 'numeric', month: 'short', year: 'numeric',
+  });
 window.todayISO = todayISO;
 window.dateISO = dateISO;
+window.todayHumanIST = todayHumanIST;
 
 const DB_TO_UI = { present: 'present', late: 'late', absent: 'absent', on_leave: 'leave' };
 const UI_TO_DB = { present: 'present', late: 'late', absent: 'absent', leave:  'on_leave' };
@@ -2575,7 +2581,7 @@ window.LoginScreen = LoginScreen;
 // Owner Admin Dashboard — hero screen
 
 const OwnerHomeScreen = () => {
-  const { nav, setLang, lang, density } = useApp();
+  const { nav, setLang, lang, density, userId } = useApp();
   const t = useT();
   const T_ = window.TOKENS;
   const M = window.MOCK;
@@ -2641,9 +2647,11 @@ const OwnerHomeScreen = () => {
     return (s.present / s.staff) < 0.9;
   }).sort((a, b) => (a.present / a.staff) - (b.present / b.staff));
 
-  // Owner name for greeting (first employee with user_type='owner')
+  // Owner name for greeting — use the signed-in user's employee row,
+  // falling back to E000 only when their account isn't in the employees
+  // table yet (legacy seeded data).
   const { employee: ownerEmp } = window.useLiveStaffEmployee
-    ? window.useLiveStaffEmployee('E000')
+    ? window.useLiveStaffEmployee(userId || 'E000')
     : { employee: null };
   const ownerName = ownerEmp?.name || M.owner.name;
 
@@ -2657,10 +2665,10 @@ const OwnerHomeScreen = () => {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <img src={LOGO_SRC} alt="Seemaatti" style={{ height: 34, width: 'auto', display: 'block' }} />
-            <div style={{ fontSize: 11, color: T_.inkFaint, marginTop: 1 }}>Sat, 18 Apr 2026</div>
+            <div style={{ fontSize: 11, color: T_.inkFaint, marginTop: 1 }}>{todayHumanIST()}</div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <IconBtn name="search" onClick={() => {}} />
+            <IconBtn name="search" onClick={() => nav.go('attendance')} />
             <IconBtn name="bell" onClick={() => nav.go('announcements')} badge={pendingLeaves || null} />
           </div>
         </div>
@@ -2695,10 +2703,14 @@ const OwnerHomeScreen = () => {
                 {a.present}<span style={{ fontSize: 16, color: T_.inkMuted }}> / {a.total}</span>
               </div>
               <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-                <DotStat dot={T_.success} label={t('present')} value={a.present} />
-                <DotStat dot={T_.warning} label={t('late')}    value={a.late} />
-                <DotStat dot={T_.danger}  label={t('absent')}  value={a.absent} />
-                <DotStat dot={T_.info}    label={t('onLeave')} value={a.onLeave} />
+                <DotStat dot={T_.success} label={t('present')} value={a.present}
+                  onClick={() => { window.__attendanceFilter = 'present'; nav.go('attendance'); }} />
+                <DotStat dot={T_.warning} label={t('late')}    value={a.late}
+                  onClick={() => { window.__attendanceFilter = 'late'; nav.go('attendance'); }} />
+                <DotStat dot={T_.danger}  label={t('absent')}  value={a.absent}
+                  onClick={() => { window.__attendanceFilter = 'absent'; nav.go('attendance'); }} />
+                <DotStat dot={T_.info}    label={t('onLeave')} value={a.onLeave}
+                  onClick={() => { window.__attendanceFilter = 'leave'; nav.go('attendance'); }} />
               </div>
             </div>
           </div>
@@ -2754,11 +2766,15 @@ const OwnerHomeScreen = () => {
           <div style={{
             display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10,
           }}>
-            <WeekStat icon="clock"    tone="warning" label={lang === 'ta' ? 'தாமதம்'    : 'Late arrivals'} value={weekStats.late} />
-            <WeekStat icon="close"    tone="danger"  label={lang === 'ta' ? 'வரவில்லை' : 'Absent'}        value={weekStats.absent} />
-            <WeekStat icon="suitcase" tone="info"    label={lang === 'ta' ? 'விடுப்பு' : 'On leave'}      value={weekStats.leave} />
+            <WeekStat icon="clock"    tone="warning" label={lang === 'ta' ? 'தாமதம்'    : 'Late arrivals'} value={weekStats.late}
+              onClick={() => { window.__attendanceFilter = 'late'; nav.go('attendance'); }} />
+            <WeekStat icon="close"    tone="danger"  label={lang === 'ta' ? 'வரவில்லை' : 'Absent'}        value={weekStats.absent}
+              onClick={() => { window.__attendanceFilter = 'absent'; nav.go('attendance'); }} />
+            <WeekStat icon="suitcase" tone="info"    label={lang === 'ta' ? 'விடுப்பு' : 'On leave'}      value={weekStats.leave}
+              onClick={() => nav.go('leaves')} />
             <WeekStat icon="wallet"   tone="brand"   label={lang === 'ta' ? 'முன்பணம் ₹'  : 'Pending adv ₹'}
-              value={pendingAdvanceAmt ? '₹' + pendingAdvanceAmt.toLocaleString('en-IN') : '—'} />
+              value={pendingAdvanceAmt ? '₹' + pendingAdvanceAmt.toLocaleString('en-IN') : '—'}
+              onClick={() => { window.__advancesFilter = 'pending'; nav.go('advances'); }} />
           </div>
           {weakSections.length > 0 && (
             <div style={{
@@ -2904,15 +2920,27 @@ const AttendanceRing = ({ pct, size = 78 }) => {
   );
 };
 
-const DotStat = ({ dot, label, value }) => {
+const DotStat = ({ dot, label, value, onClick }) => {
   const T_ = window.TOKENS;
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+  const inner = (
+    <>
       <div style={{ width: 6, height: 6, borderRadius: 3, background: dot }} />
       <span style={{ fontSize: 11.5, color: T_.inkSoft, fontWeight: 500 }}>
         {label} <span style={{ color: T_.ink, fontWeight: 600 }}>{value}</span>
       </span>
-    </div>
+    </>
+  );
+  if (onClick) {
+    return (
+      <button onClick={onClick} style={{
+        display: 'flex', alignItems: 'center', gap: 5,
+        background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+        fontFamily: 'inherit',
+      }}>{inner}</button>
+    );
+  }
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>{inner}</div>
   );
 };
 
@@ -3053,7 +3081,7 @@ const FloorCard = ({ floor }) => {
 
 // Compact tile used inside the Owner 'This week' summary card. Quiet,
 // tonal — this is a reporting surface, not a CTA.
-const WeekStat = ({ icon, tone, label, value }) => {
+const WeekStat = ({ icon, tone, label, value, onClick }) => {
   const T_ = window.TOKENS;
   const tones = {
     warning: { bg: T_.warningSoft, fg: T_.warning },
@@ -3063,11 +3091,14 @@ const WeekStat = ({ icon, tone, label, value }) => {
     success: { bg: T_.successSoft, fg: T_.success },
   };
   const s = tones[tone] || tones.info;
+  const Tag = onClick ? 'button' : 'div';
   return (
-    <div style={{
+    <Tag onClick={onClick || undefined} style={{
       display: 'flex', alignItems: 'center', gap: 10,
       padding: '8px 10px', borderRadius: 12,
       background: T_.surfaceAlt,
+      border: 'none', textAlign: 'left', width: '100%',
+      fontFamily: 'inherit', cursor: onClick ? 'pointer' : 'default',
     }}>
       <div style={{
         width: 32, height: 32, borderRadius: 9,
@@ -3088,7 +3119,7 @@ const WeekStat = ({ icon, tone, label, value }) => {
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
         }}>{value}</div>
       </div>
-    </div>
+    </Tag>
   );
 };
 
@@ -3198,13 +3229,14 @@ window.SectionsStatusScreen = SectionsStatusScreen;
 // Staff Home screen — what an employee sees
 
 const StaffHomeScreen = () => {
-  const { nav, setLang, lang, toast } = useApp();
+  const { nav, setLang, lang, toast, userId } = useApp();
   const t = useT();
   const T_ = window.TOKENS;
   const M = window.MOCK;
 
-  // Demo staff account — single seeded employee for now.
-  const STAFF_ID = 'E003';
+  // Use the signed-in employee's id; fall back to E001 only when the
+  // session has no userId (e.g. preview-mode jump from the side picker).
+  const STAFF_ID = userId || 'E001';
 
   const { employee, today, punchIn, punchOut } = window.useLiveStaffEmployee
     ? window.useLiveStaffEmployee(STAFF_ID)
@@ -3312,7 +3344,7 @@ const StaffHomeScreen = () => {
                 fontSize: 11, fontWeight: 600, letterSpacing: 0.4, textTransform: 'uppercase',
                 color: punchedIn ? 'rgba(255,255,255,0.7)' : T_.inkMuted,
               }}>
-                {t('shift')} · 9:30 AM – 7:00 PM
+                {punchedIn ? (lang === 'ta' ? 'பணியில்' : 'Punched in') : t('shift')}
               </div>
               <div style={{
                 fontFamily: 'Fraunces, Georgia, serif',
@@ -3329,13 +3361,6 @@ const StaffHomeScreen = () => {
               <Icon name="clock" size={22} color={punchedIn ? '#fff' : T_.maroon} />
             </div>
           </div>
-          {punchedIn && (
-            <div style={{ display: 'flex', gap: 12, marginBottom: 14, fontSize: 12 }}>
-              <div style={{ color: 'rgba(255,255,255,0.75)' }}>Counter 3 · Floor 2</div>
-              <div style={{ color: 'rgba(255,255,255,0.5)' }}>·</div>
-              <div style={{ color: 'rgba(255,255,255,0.75)' }}>2h 18m worked</div>
-            </div>
-          )}
           <button onClick={handlePunch} style={{
             width: '100%', height: 44, borderRadius: 12,
             background: punchedIn ? 'rgba(255,255,255,0.18)' : T_.maroon,
@@ -3353,17 +3378,19 @@ const StaffHomeScreen = () => {
         <div style={{ padding: '20px 16px 0' }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {notices.map(n => (
-              <div key={n.id} style={{
+              <button key={n.id} onClick={() => nav.go('announcements')} style={{
                 background: n.pinned ? T_.maroonSoft : T_.goldSoft,
                 borderRadius: 14, padding: '12px 14px',
                 display: 'flex', alignItems: 'center', gap: 10,
+                border: 'none', textAlign: 'left', width: '100%',
+                cursor: 'pointer', fontFamily: 'inherit',
               }}>
                 <Icon name="megaphone" size={18} color={n.pinned ? T_.maroon : T_.gold} />
                 <div style={{ flex: 1, fontSize: 12.5, fontWeight: 500, color: T_.ink }}>
                   {n.title}
                 </div>
                 <div style={{ fontSize: 10.5, color: T_.inkMuted }}>{n.at}</div>
-              </div>
+              </button>
             ))}
           </div>
         </div>
@@ -3374,7 +3401,7 @@ const StaffHomeScreen = () => {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
           <QuickAction icon="leaf"     label={t('applyLeave')} onClick={() => nav.go('applyLeave')} />
           <QuickAction icon="wallet"   label={t('mySalary')}   onClick={() => nav.go('payslip')} />
-          <QuickAction icon="calendar" label="Roster"          onClick={() => {}} />
+          <QuickAction icon="calendar" label="Roster"          onClick={() => nav.go('attendance')} />
           <QuickAction icon="user"     label="Profile"         onClick={() => nav.go('profile')} />
         </div>
       </div>
@@ -3499,6 +3526,7 @@ const AttendanceScreen = () => {
   const [statusFilter, setStatusFilter] = React.useState(
     () => window.__attendanceFilter || 'all'
   );
+  const [search, setSearch] = React.useState('');
   React.useEffect(() => {
     if (window.__attendanceFilter) {
       setStatusFilter(window.__attendanceFilter);
@@ -3506,6 +3534,17 @@ const AttendanceScreen = () => {
     }
   }, []);
   const [detail, setDetail] = React.useState(null);  // selected employee_id
+
+  // Lenient match: strips punctuation + lowercases both sides so "saha"
+  // matches "P. Sahabudeen" and dots-vs-spaces variance doesn't hide rows.
+  const slug = (s) => String(s == null ? '' : s).replace(/[^a-z0-9]/gi, '').toLowerCase();
+  const matchesSearch = (row) => {
+    const q = slug(search);
+    if (!q) return true;
+    return slug(row.name).includes(q)
+        || slug(row.id).includes(q)
+        || slug(row.role).includes(q);
+  };
 
   const { roster: liveRoster, loading } = window.useLiveRoster
     ? window.useLiveRoster()
@@ -3542,7 +3581,8 @@ const AttendanceScreen = () => {
     ? Object.keys(SECTION_LABEL)
     : (allowed || []);
 
-  const filteredBySection = section === 'all' ? roster : roster.filter(r => r.section === section);
+  const bySection = section === 'all' ? roster : roster.filter(r => r.section === section);
+  const filteredBySection = bySection.filter(matchesSearch);
   const filtered = statusFilter === 'all'
     ? filteredBySection
     : filteredBySection.filter(r => r.status === statusFilter);
@@ -3560,7 +3600,7 @@ const AttendanceScreen = () => {
 
   return (
     <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 30 }}>
-      <ScreenHeader back title="Attendance" subtitle="Live · Today 18 Apr 2026" />
+      <ScreenHeader back title="Attendance" subtitle={`Live · ${todayHumanIST()}`} />
 
       <div style={{ padding: '0 16px' }}>
         {/* Stats strip */}
@@ -3571,6 +3611,45 @@ const AttendanceScreen = () => {
           <AttStat label="Late"    value={scopedStats.late}    color={T_.warning} />
           <AttStat label="Leave"   value={scopedStats.onLeave} color={T_.info} />
           <AttStat label="Absent"  value={scopedStats.absent}  color={T_.danger} />
+        </div>
+
+        {/* Search */}
+        <div style={{ position: 'relative', marginBottom: 10 }}>
+          <input
+            type="search"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search name, ID or role…"
+            aria-label="Search staff"
+            style={{
+              width: '100%', height: 40, padding: '0 12px 0 36px',
+              borderRadius: 12, border: `1px solid ${T_.border}`,
+              background: T_.surface, color: T_.ink,
+              fontFamily: 'inherit', fontSize: 13.5, boxSizing: 'border-box',
+              outline: 'none',
+            }}
+          />
+          <div style={{
+            position: 'absolute', left: 12, top: 0, bottom: 0,
+            display: 'flex', alignItems: 'center', color: T_.inkFaint,
+            pointerEvents: 'none',
+          }}>
+            <Icon name="search" size={16} />
+          </div>
+          {search && (
+            <button
+              onClick={() => setSearch('')}
+              aria-label="Clear search"
+              style={{
+                position: 'absolute', right: 6, top: 0, bottom: 0,
+                margin: 'auto 0', height: 28, width: 28,
+                background: 'none', border: 'none', cursor: 'pointer',
+                color: T_.inkMuted, fontFamily: 'inherit',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+              <Icon name="close" size={14} />
+            </button>
+          )}
         </div>
 
         {/* Section filter — dropdown so 13+ sections don't overflow */}
@@ -5454,11 +5533,11 @@ const HRHomeScreen = () => {
             <img src={LOGO_SRC} alt="Seemaatti" style={{ height: 34, width: 'auto', display: 'block' }} />
             <div>
               <div style={{ fontSize: 11, color: T_.inkFaint, lineHeight: 1 }}>HR Console</div>
-              <div style={{ fontSize: 11, color: T_.inkMuted, marginTop: 2 }}>Sat, 18 Apr 2026</div>
+              <div style={{ fontSize: 11, color: T_.inkMuted, marginTop: 2 }}>{todayHumanIST()}</div>
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
-            <IconBtn name="search" onClick={() => {}} />
+            <IconBtn name="search" onClick={() => nav.go('attendance')} />
             <IconBtn name="bell" onClick={() => nav.go('announcements')} badge={(unmarked || 0) + (hrPendingLeaves || 0) || null} />
           </div>
         </div>
@@ -5555,10 +5634,14 @@ const HRHomeScreen = () => {
                 {a.present}<span style={{ fontSize: 16, color: T_.inkMuted }}> / {a.total}</span>
               </div>
               <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-                <DotStat dot={T_.success} label="Present" value={a.present} />
-                <DotStat dot={T_.warning} label="Late"    value={a.late} />
-                <DotStat dot={T_.danger}  label="Absent"  value={a.absent} />
-                <DotStat dot={T_.info}    label="Leave"   value={a.onLeave} />
+                <DotStat dot={T_.success} label="Present" value={a.present}
+                  onClick={() => { window.__attendanceFilter = 'present'; nav.go('attendance'); }} />
+                <DotStat dot={T_.warning} label="Late"    value={a.late}
+                  onClick={() => { window.__attendanceFilter = 'late'; nav.go('attendance'); }} />
+                <DotStat dot={T_.danger}  label="Absent"  value={a.absent}
+                  onClick={() => { window.__attendanceFilter = 'absent'; nav.go('attendance'); }} />
+                <DotStat dot={T_.info}    label="Leave"   value={a.onLeave}
+                  onClick={() => { window.__attendanceFilter = 'leave'; nav.go('attendance'); }} />
               </div>
             </div>
           </div>
@@ -5650,9 +5733,12 @@ const HRHomeScreen = () => {
         <div style={{
           marginTop: 10, display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10,
         }}>
-          <HRWeekStat label="Avg. attendance" value={`${hrAvgAttendance}%`} tone="success" />
-          <HRWeekStat label="Leave granted"   value={hrApprovedThisWeek}    tone="info" />
-          <HRWeekStat label="New joiners"     value={hrStats.newJoinersWeek} tone="brand" />
+          <HRWeekStat label="Avg. attendance" value={`${hrAvgAttendance}%`} tone="success"
+            onClick={() => nav.go('attendance')} />
+          <HRWeekStat label="Leave granted"   value={hrApprovedThisWeek}    tone="info"
+            onClick={() => nav.go('leaves')} />
+          <HRWeekStat label="New joiners"     value={hrStats.newJoinersWeek} tone="brand"
+            onClick={() => nav.go('enroll')} />
         </div>
       </div>
     </div>
@@ -5727,15 +5813,18 @@ const HRAttentionRow = ({ icon, tone, title, sub, action, onClick, last }) => {
   );
 };
 
-const HRWeekStat = ({ label, value, tone }) => {
+const HRWeekStat = ({ label, value, tone, onClick }) => {
   const T_ = window.TOKENS;
   const colorMap = {
     success: T_.success, info: T_.info, brand: T_.maroon, warning: T_.warning,
   };
+  const Tag = onClick ? 'button' : 'div';
   return (
-    <div style={{
+    <Tag onClick={onClick || undefined} style={{
       background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 12,
       padding: '12px 10px', textAlign: 'center',
+      fontFamily: 'inherit', cursor: onClick ? 'pointer' : 'default',
+      width: '100%',
     }}>
       <div style={{
         fontFamily: 'Fraunces, Georgia, serif',
@@ -5746,7 +5835,7 @@ const HRWeekStat = ({ label, value, tone }) => {
         fontSize: 10.5, color: T_.inkMuted, marginTop: 6,
         letterSpacing: 0.3, textTransform: 'uppercase', fontWeight: 600,
       }}>{label}</div>
-    </div>
+    </Tag>
   );
 };
 
@@ -6880,7 +6969,7 @@ const MarkAttendanceScreen = () => {
       <ScreenHeader
         back
         title="Mark attendance"
-        subtitle={`${markedCount} marked · ${unmarkedCount} pending · Sat 18 Apr`}
+        subtitle={`${markedCount} marked · ${unmarkedCount} pending · ${todayHumanIST()}`}
         trailing={
           <button onClick={() => toast('Biometric sync — coming soon')} style={{
             background: T_.surfaceAlt, border: `1px solid ${T_.border}`,
