@@ -128,7 +128,7 @@ its face-match/punch/tally moved into PIN-gated `SECURITY DEFINER` RPCs
 (`kiosk_match`/`kiosk_punch`/`kiosk_meta`, `2026-06-auth-phase3a-kiosk.sql`) and
 the kiosk client was cut over to them (no more anon table reads).
 
-### Phase 3b — Lock down RLS (the payoff) — 🚧 VALIDATED, PENDING PROD APPLY
+### Phase 3b — Lock down RLS (the payoff) — ✅ APPLIED 2026-06-02
 `dashboard/schema/2026-06-auth-phase3b-rls.sql`. Drops every permissive policy
 and replaces with:
 - **anon → zero table access** (login + kiosk go through SECURITY DEFINER RPCs).
@@ -148,11 +148,27 @@ Deferred to Phase 4: column-level employee-PII hiding (salary/bank from non-HR,
 needs a restricted view + client query changes) and dropping `password_sha256`
 (a dead login-picker fetch still selects it).
 
-### Phase 4 — Cleanup & verify
-- Surface write errors in the UI (many writes currently ignore `error`).
-- Re-run `get_advisors` (security) — expect the always-true and definer findings
-  gone.
-- Remove now-dead mock/bootstrap code paths.
+### Phase 4 — Cleanup & verify — ✅ MOSTLY DONE 2026-06-02
+Done (`dashboard/schema/2026-06-auth-phase4-cleanup.sql`):
+- Dropped `user_access.password_sha256` (Auth owns passwords; the dead PWA
+  login-picker fetch that still selected it was stripped).
+- Dropped the legacy `admin_change_role(username, hash, …)` RPC (no callers;
+  `admin_change_role_v2` via `auth.uid()` replaced it).
+- Bootstrap hash (`ADMIN_PASSWORD_SHA256`) was removed in Phase 2.
+- Write-error surfacing was largely handled in the audit batches.
+- Verified the RLS lockdown via in-transaction role impersonation: anon = 0
+  everywhere; operational writes open to authenticated; payroll/credentials/
+  employees/CRM/biometrics correctly scoped per role.
+- `get_advisors` (security): the original world-readable/writable findings are
+  gone; remaining warnings are intentional (operational tables open to
+  authenticated; PIN/`auth.uid()`-gated `SECURITY DEFINER` RPCs).
+
+Still open (follow-ups):
+- **Employee-PII split** — hide salary/bank/statutory columns from non-HR
+  (needs a restricted view + client query changes). `employees` is currently
+  readable by any authenticated user.
+- **Leaked-password protection** — enable in Supabase dashboard (Auth →
+  Settings); it's a project toggle, not SQL.
 
 ## Testing & rollback
 - Every DDL/policy change is applied on a Supabase **branch** first, both apps
