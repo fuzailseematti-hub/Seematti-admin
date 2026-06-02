@@ -130,6 +130,17 @@ Rewrite policies table-by-table (authenticated-only, scoped). Sketch:
 3. **PII in `employees`**: should non-HR roles see salary/bank/statutory columns
    at all? This decides whether we split a restricted view.
 
+## Decisions (locked 2026-06-02)
+1. **Identity** → **synthesized emails**: Auth email = `<employee_id>@staff.seematti.local`.
+   Users still type their existing username/ID + password; the email is internal.
+2. **Password reset** → **owner sets temp passwords** in-app; user changes on
+   first login. No email/SMS provider required.
+3. **PII** → **hide salary/bank/statutory columns from non-HR**. Only
+   owner/admin/hr read those; split a restricted view for everyone else.
+4. **Bootstrap Owner password** → **not rotated separately**; the migration
+   (Phase 1 provisions a real Owner account, Phase 2 removes the hardcoded hash)
+   supersedes it.
+
 ## Immediate stopgap (independent of this migration)
 Rotate the bootstrap Owner password now: replace `window.ADMIN_PASSWORD_SHA256`
 in `dashboard/index.html` (L600 — the only place it exists; the PWA logs in via
