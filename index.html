@@ -2246,10 +2246,11 @@ const KioskPinPrompt = ({ onClose, onSuccess }) => {
     if (busy || !window.sb) return;
     setBusy(true); setErr(false);
     try {
-      const { data } = await window.sb.from('settings')
-        .select('value').eq('key', 'kiosk_pin').maybeSingle();
-      const expected = (data?.value || '0000').trim();
-      if (pin === expected) onSuccess();
+      // Verify the PIN server-side via the kiosk RPC. This works even after
+      // the RLS lockdown (settings is no longer anon-readable). A non-error
+      // result means the PIN is correct; pass it back for the kiosk's RPCs.
+      const { error } = await window.sb.rpc('kiosk_meta', { p_pin: pin });
+      if (!error) onSuccess(pin);
       else setErr(true);
     } finally { setBusy(false); }
   };
@@ -2531,8 +2532,9 @@ const LoginScreen = () => {
       {kioskPromptOpen && (
         <KioskPinPrompt
           onClose={() => setKioskPromptOpen(false)}
-          onSuccess={() => {
+          onSuccess={(pin) => {
             setKioskPromptOpen(false);
+            window.__kioskPin = pin;
             setUser('kiosk');
             setUserId(null);
             nav.reset('kiosk');
@@ -7274,9 +7276,10 @@ const KioskScannerScreen = () => {
   const [cameraErr, setCameraErr]       = React.useState(null);
   const [facingMode, setFacingMode]     = React.useState('user'); // 'user' | 'environment'
   const [totalStaff, setTotalStaff]     = React.useState(0);
-  const [faces, setFaces] = React.useState([]);   // [{employee_id, pose, embedding, employees: {name, role, section_id}}]
-  const [threshold, setThreshold]       = React.useState(0.55);
-  const [lateCutoff, setLateCutoff]     = React.useState('10:00');
+  const [enrolled, setEnrolled]         = React.useState(0);
+  // Kiosk PIN captured at entry — gates the kiosk_* RPCs. Matching and punching
+  // happen server-side now, so the client never downloads face embeddings.
+  const pin = window.__kioskPin || '';
 
   // Cooldown so the same face doesn't re-trigger instantly.
   // Per-employee cooldown so the same face staying in frame doesn't
@@ -7394,73 +7397,30 @@ const KioskScannerScreen = () => {
     return () => { window.sb.removeChannel(channel); };
   }, []);
 
-  // Load enrolled face embeddings and settings (+ staff count for the tally).
+  // Tally + who's clocked in today, from the PIN-gated kiosk_meta RPC. Polled
+  // (no realtime channel) since the kiosk no longer has direct table access.
   React.useEffect(() => {
-    if (!window.sb) return;
-    const fetchFaces = async () => {
-      const { data } = await window.sb
-        .from('face_embeddings')
-        .select('employee_id, pose, embedding, employees(name, role, section_id, is_active)');
-      // Only keep active staff with a usable embedding. Partial enrollments
-      // (embedding IS NULL) would throw inside cosineSim and break matching
-      // for everyone.
-      const usable = (data || []).filter(r =>
-        r.employees?.is_active !== false && Array.isArray(r.embedding) && r.embedding.length > 0
-      );
-      setFaces(usable);
-    };
+    if (!window.sb || !pin) return;
+    let cancelled = false;
     const fetchMeta = async () => {
-      const [{ count }, { data: set }] = await Promise.all([
-        window.sb.from('employees').select('*', { count: 'exact', head: true })
-          .eq('user_type', 'staff').eq('is_active', true),
-        window.sb.from('settings').select('key, value')
-          .in('key', ['late_cutoff', 'match_threshold']),
-      ]);
-      setTotalStaff(count || 0);
-      (set || []).forEach(s => {
-        if (s.key === 'late_cutoff')     setLateCutoff(s.value);
-        if (s.key === 'match_threshold') setThreshold(parseFloat(s.value) || 0.55);
-      });
+      const { data, error } = await window.sb.rpc('kiosk_meta', { p_pin: pin });
+      if (cancelled || error || !data) return;
+      setTotalStaff(data.total_staff || 0);
+      setEnrolled(data.enrolled || 0);
+      setClockedIn(new Set(data.clocked_in || []));
     };
-    fetchFaces();
     fetchMeta();
-    const ch = window.sb.channel('kiosk-faces')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'face_embeddings' }, () => fetchFaces())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'employees' },       () => { fetchFaces(); fetchMeta(); })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'settings' },        () => fetchMeta())
-      .subscribe();
-    return () => { window.sb.removeChannel(ch); };
-  }, []);
-
-  const isLate = React.useCallback(() => {
-    const n = new Date();
-    const [h, m] = (lateCutoff || '10:00').split(':').map(x => parseInt(x, 10));
-    const cutoff = h * 60 + (m || 0);
-    const nowMins = n.getHours() * 60 + n.getMinutes();
-    return nowMins >= cutoff;
-  }, [lateCutoff]);
+    const id = setInterval(fetchMeta, 60000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [pin]);
 
   const persistScan = async (emp, dir) => {
-    if (!window.sb) return;
-    const n = new Date();
-    const today = dateISO(n);
-    const hh = String(n.getHours()).padStart(2, '0');
-    const mm = String(n.getMinutes()).padStart(2, '0');
-    const stamp = `${hh}:${mm}:00`;
-    if (dir === 'in') {
-      await window.sb.from('attendance').upsert({
-        employee_id:   emp.id,
-        date:          today,
-        status:        isLate() ? 'late' : 'present',
-        punch_in_time: stamp,
-        source:        'kiosk',
-      }, { onConflict: 'employee_id,date' });
-    } else {
-      await window.sb.from('attendance')
-        .update({ punch_out_time: stamp })
-        .eq('employee_id', emp.id)
-        .eq('date', today);
-    }
+    if (!window.sb || !pin) return;
+    // Time + late/present status are computed server-side (Asia/Kolkata).
+    const { error } = await window.sb.rpc('kiosk_punch', {
+      p_pin: pin, p_employee_id: emp.id, p_dir: dir,
+    });
+    if (error) console.error('kiosk_punch failed', error);
   };
 
   // Show the big name card and wait for the user to Confirm or Try again.
@@ -7498,117 +7458,67 @@ const KioskScannerScreen = () => {
     setPhase('idle');
   };
 
-  // Group enrolled face rows by employee so each person's best pose
-  // competes on equal footing. Without this a noisy single pose from
-  // Priya can beat Anita's three-pose average on Anita's own face.
-  const facesByEmployee = React.useMemo(() => {
-    const m = new Map();
-    for (const f of faces) {
-      if (!m.has(f.employee_id)) {
-        m.set(f.employee_id, {
-          id: f.employee_id,
-          name: f.employees?.name || f.employee_id,
-          role: f.employees?.role || '',
-          section_id: f.employees?.section_id || null,
-          embeddings: [],
-        });
-      }
-      m.get(f.employee_id).embeddings.push(f.embedding);
-    }
-    return Array.from(m.values());
-  }, [faces]);
-
-  // Pending-match streak: the SAME top candidate must clear the
-  // threshold + margin gate on CONFIRM_FRAMES consecutive frames
-  // before the match UI fires. Single-frame flukes (a stray frame
-  // that accidentally looks like the wrong person) are rejected.
+  // Streak guard: the SAME employee must come back matched on CONFIRM_FRAMES
+  // consecutive server matches before we fire, so a single bad frame can't
+  // punch the wrong person.
   const pendingMatchRef = React.useRef(null); // { id, count }
 
-  // Real-face matching loop — active only while phase is idle.
-  //
-  // Reliability rules (in order):
-  //   1. Face must be at least MIN_FACE_PX wide (no tiny/blurry faces).
-  //   2. Score each employee as their CLOSEST pose (min Euclidean
-  //      distance over their enrolled embeddings) — ensures every
-  //      person gets their best shot, not their worst.
-  //   3. Convert distance to similarity (higher = closer).
-  //   4. Best candidate must clear `threshold` (from settings).
-  //   5. Best must be at least MIN_MARGIN ahead of the second-best,
-  //      otherwise the match is "ambiguous" and we wait.
-  //   6. The same top candidate must pass rules 1-5 on CONFIRM_FRAMES
-  //      consecutive frames before we fire showMatchUI.
-  // Any miss in rules 1-5 resets the streak.
+  // Matching loop — active only while idle. Detect the face locally
+  // (face-api.js gives a 128-d descriptor), and when a large-enough face is in
+  // frame send that descriptor to the PIN-gated kiosk_match RPC, which does the
+  // nearest-embedding match server-side (threshold + margin enforced there).
+  // Enrolled embeddings never reach the client.
   React.useEffect(() => {
-    if (!modelsReady || !cameraReady || phase !== 'idle') return;
-    if (facesByEmployee.length === 0) return;
+    if (!modelsReady || !cameraReady || phase !== 'idle' || !pin) return;
     let cancelled = false;
+    let inFlight = false;
     const tick = async () => {
       if (cancelled) return;
       try {
         const v = videoRef.current;
-        if (v && v.readyState >= 2) {
+        if (v && v.readyState >= 2 && !inFlight) {
           const det = await window.computeFaceDetection(v);
-          if (det) {
+          if (det && (det.box?.width || 0) >= MIN_FACE_PX) {
             lastFaceSeenAtRef.current = Date.now();
-            const faceW = det.box?.width || 0;
-            if (faceW >= MIN_FACE_PX) {
-              // Per-employee best-of-poses distance.
-              const scored = facesByEmployee.map(emp => {
-                let minDist = Infinity;
-                for (const e of emp.embeddings) {
-                  const d = window.euclideanDistance(det.descriptor, e);
-                  if (d < minDist) minDist = d;
-                }
-                return { ...emp, distance: minDist, similarity: window.distToSim(minDist) };
-              }).sort((a, b) => a.distance - b.distance);
+            inFlight = true;
+            const { data, error } = await window.sb.rpc('kiosk_match', {
+              p_pin: pin, p_descriptor: det.descriptor,
+            });
+            inFlight = false;
+            if (cancelled) return;
+            const m = (!error && data && data.length) ? data[0] : null;
+            if (m && m.matched) {
+              const p = pendingMatchRef.current;
+              if (p && p.id === m.employee_id) p.count += 1;
+              else pendingMatchRef.current = { id: m.employee_id, count: 1 };
 
-              const best       = scored[0];
-              const secondBest = scored[1];
-              const topSim     = best.similarity;
-              const secondSim  = secondBest ? secondBest.similarity : 0;
-
-              const goodEnough  = topSim >= threshold;
-              const unambiguous = !secondBest || (topSim - secondSim) >= MIN_MARGIN;
-
-              if (goodEnough && unambiguous) {
-                const p = pendingMatchRef.current;
-                if (p && p.id === best.id) p.count += 1;
-                else pendingMatchRef.current = { id: best.id, count: 1 };
-
-                if (pendingMatchRef.current.count >= CONFIRM_FRAMES) {
-                  const nowT   = Date.now();
-                  const lastAt = lastMatchMap.current[best.id] || 0;
-                  if (nowT - lastAt > MATCH_COOLDOWN_MS) {
-                    lastMatchMap.current[best.id] = nowT;
-                    pendingMatchRef.current = null;
-                    setPhase('detecting');
-                    showMatchUI({
-                      id: best.id,
-                      name: best.name,
-                      role: best.role,
-                      section: SECTION_LABEL[best.section_id] || '',
-                      confidence: topSim,
-                    });
-                    return;
-                  }
-                  // Confirmed but still in cooldown for this person.
+              if (pendingMatchRef.current.count >= CONFIRM_FRAMES) {
+                const nowT  = Date.now();
+                const lastAt = lastMatchMap.current[m.employee_id] || 0;
+                if (nowT - lastAt > MATCH_COOLDOWN_MS) {
+                  lastMatchMap.current[m.employee_id] = nowT;
                   pendingMatchRef.current = null;
+                  showMatchUI({
+                    id: m.employee_id,
+                    name: m.name,
+                    role: m.role,
+                    section: SECTION_LABEL[m.section_id] || '',
+                    confidence: m.similarity,
+                  });
+                  return;
                 }
-              } else {
-                // Below threshold or ambiguous — drop the streak.
-                pendingMatchRef.current = null;
+                pendingMatchRef.current = null; // confirmed, but in cooldown
               }
             } else {
-              // Face too small — ignore the frame and drop any streak.
               pendingMatchRef.current = null;
             }
           } else {
-            // No face this tick — drop the streak.
+            if (det) lastFaceSeenAtRef.current = Date.now();
             pendingMatchRef.current = null;
           }
         }
       } catch (_) { /* swallow per-tick errors */ }
-      setTimeout(tick, 400);
+      if (!cancelled) setTimeout(tick, 500);
     };
     const handle = setTimeout(tick, 300);
     return () => {
@@ -7616,7 +7526,7 @@ const KioskScannerScreen = () => {
       clearTimeout(handle);
       pendingMatchRef.current = null;
     };
-  }, [modelsReady, cameraReady, phase, facesByEmployee, threshold, showMatchUI]);
+  }, [modelsReady, cameraReady, phase, pin, showMatchUI]);
 
   const direction = current && clockedIn.has(current.id) ? 'out' : 'in';
   const hh = now.getHours() % 12 || 12;
@@ -7685,7 +7595,7 @@ const KioskScannerScreen = () => {
         <KioskCameraFrame phase={phase} current={current} pulse={pulse}
           videoRef={videoRef} cameraErr={cameraErr} facingMode={facingMode}
           faceSeen={faceSeen}
-          enrolledCount={faces.length ? new Set(faces.map(f => f.employee_id)).size : 0} />
+          enrolledCount={enrolled} />
       </div>
 
       {/* Instruction label — only when NOT matched */}
@@ -7860,6 +7770,7 @@ const KioskScannerScreen = () => {
           onClose={() => setShowExitPrompt(false)}
           onSuccess={() => {
             setShowExitPrompt(false);
+            window.__kioskPin = null;
             setUser(null);
             setUserId(null);
             nav.reset('login');

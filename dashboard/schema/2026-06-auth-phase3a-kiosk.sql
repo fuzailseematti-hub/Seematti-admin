@@ -111,6 +111,9 @@ begin
   end if;
   return jsonb_build_object(
     'total_staff', (select count(*) from public.employees where user_type = 'staff' and is_active = true),
+    'enrolled',    (select count(distinct fe.employee_id) from public.face_embeddings fe
+                    join public.employees em on em.id = fe.employee_id
+                    where coalesce(em.is_active, true) = true and fe.embedding is not null),
     'present',     (select count(*) from public.attendance where date = v_today and status in ('present', 'late')),
     'clocked_in',  coalesce((select jsonb_agg(employee_id) from public.attendance
                              where date = v_today and status in ('present', 'late') and punch_out_time is null), '[]'::jsonb)
