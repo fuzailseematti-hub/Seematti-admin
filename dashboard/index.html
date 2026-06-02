@@ -1326,6 +1326,7 @@ const AttendancePage = () => {
       const a = byId[e.id];
       return {
         id: e.id, name: e.name, role: e.role, section_id: e.section_id,
+        employee_code: e.employee_code,
         status: a ? (DB_TO_UI[a.status] || null) : null,
         inTime: a ? a.punch_in_time : null,
         outTime: a ? a.punch_out_time : null,
@@ -3010,7 +3011,7 @@ const LeavesPage = () => {
     if (!window.sb) return;
     const { data } = await window.sb
       .from('leave_requests')
-      .select('id, employee_id, type, days, from_date, reason, status, decided_by, decided_at, created_at, employees(name, role, section_id)')
+      .select('id, employee_id, type, days, from_date, reason, status, decided_by, decided_at, created_at, employees(name, role, section_id, employee_code)')
       .order('created_at', { ascending: false });
     setItems(data || []);
     setLoading(false);
@@ -6199,9 +6200,15 @@ const BonusPlannerPage = () => {
   const load = useCallback(async () => {
     if (!window.sb) return;
     setLoading(true);
-    const [planRes, rowsRes, attRes, payRes] = await Promise.all([
-      window.sb.from('bonus_plans').select('*').eq('month', month).maybeSingle(),
-      window.sb.from('bonus_plan_rows').select('*'),
+    // Resolve the plan first so we fetch only THIS plan's rows. Previously
+    // every plan's rows were pulled with select('*') and filtered client-side,
+    // which silently truncates at 1000 rows as plans accumulate over months.
+    const planRes = await window.sb.from('bonus_plans').select('*').eq('month', month).maybeSingle();
+    const planRow = planRes.data || null;
+    const [rowsRes, attRes, payRes] = await Promise.all([
+      planRow
+        ? window.sb.from('bonus_plan_rows').select('*').eq('plan_id', planRow.id)
+        : Promise.resolve({ data: [] }),
       window.sb.from('attendance')
         .select('employee_id, status, date')
         .gte('date', month).lte('date', monthEnd),
@@ -6218,14 +6225,10 @@ const BonusPlannerPage = () => {
     (payRes.data || []).forEach(r => { payByEmp[r.employee_id] = r; });
     setPayslips(payByEmp);
     // Plan + rows.
-    const planRow = planRes.data || null;
     setPlan(planRow);
     setNote(planRow?.note || '');
     const seeded = {};
-    if (planRow) {
-      (rowsRes.data || []).filter(r => r.plan_id === planRow.id)
-        .forEach(r => { seeded[r.employee_id] = Number(r.bonus_amount) || 0; });
-    }
+    (rowsRes.data || []).forEach(r => { seeded[r.employee_id] = Number(r.bonus_amount) || 0; });
     setBonuses(seeded);
     setLoading(false);
   }, [month, monthEnd]);
@@ -6559,15 +6562,40 @@ const ReportCard = ({ title, description, children }) => (
   </div>
 );
 
+// Supabase caps a single select at 1000 rows. Page through with .range()
+// so report exports aren't silently truncated. `makeQuery(from, to)` must
+// return a fresh query builder ending in .range(from, to).
+const REPORT_PAGE = 1000;
+const fetchAllPaged = async (makeQuery) => {
+  let out = [];
+  for (let from = 0; ; from += REPORT_PAGE) {
+    const { data, error } = await makeQuery(from, from + REPORT_PAGE - 1);
+    if (error) { console.error('paged fetch failed', error); break; }
+    if (!data || !data.length) break;
+    out = out.concat(data);
+    if (data.length < REPORT_PAGE) break;
+  }
+  return out;
+};
+
 const ReportsPage = () => {
   const toast = useToast();
-  const { rows: employees } = useEmployees();
   const sectionsList = useLiveSections();
-  const empById = useMemo(() => {
-    const m = {};
-    employees.forEach(e => { m[e.id] = e; });
-    return m;
-  }, [employees]);
+  // Fetch ALL employees including inactive, so the directory export's
+  // "include inactive" toggle works. useEmployees() returns active-only,
+  // which silently excluded inactive staff (and broke the row count).
+  const [employees, setEmployees] = useState([]);
+  useEffect(() => {
+    if (!window.sb) return;
+    let cancelled = false;
+    (async () => {
+      const { data } = await window.sb.from('employees')
+        .select('id, name, role, section_id, user_type, is_active, joined_date, phone')
+        .order('id');
+      if (!cancelled) setEmployees(data || []);
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // ─ Attendance export ──────────────────────────
   const [attFrom, setAttFrom] = useState(() => fmtDateISO(new Date()));
@@ -6578,15 +6606,14 @@ const ReportsPage = () => {
 
   const fetchAttendance = useCallback(async () => {
     if (!window.sb) return [];
-    let q = window.sb.from('attendance')
+    const data = await fetchAllPaged((from, to) => window.sb.from('attendance')
       .select('date, status, punch_in_time, punch_out_time, source, employee_id, employees(name, role, section_id)')
       .gte('date', attFrom).lte('date', attTo)
-      .order('date').order('employee_id');
-    const { data } = await q;
-    const rows = (data || []).filter(r =>
+      .order('date').order('employee_id')
+      .range(from, to));
+    return data.filter(r =>
       attSection === 'all' || r.employees?.section_id === attSection
     );
-    return rows;
   }, [attFrom, attTo, attSection]);
 
   const attPreviewRun = async () => {
@@ -6626,11 +6653,12 @@ const ReportsPage = () => {
 
   const fetchPayroll = useCallback(async () => {
     if (!window.sb) return [];
-    const { data } = await window.sb.from('payslips')
+    const data = await fetchAllPaged((from, to) => window.sb.from('payslips')
       .select('*, employees(name, role, section_id)')
       .eq('month', payMonth)
-      .order('employee_id');
-    return (data || []).filter(r =>
+      .order('employee_id')
+      .range(from, to));
+    return data.filter(r =>
       paySection === 'all' || r.employees?.section_id === paySection
     );
   }, [payMonth, paySection]);
@@ -6681,13 +6709,13 @@ const ReportsPage = () => {
 
   const fetchLeaves = useCallback(async () => {
     if (!window.sb) return [];
-    let q = window.sb.from('leave_requests')
+    const data = await fetchAllPaged((from, to) => window.sb.from('leave_requests')
       .select('id, employee_id, type, days, from_date, reason, status, decided_by, decided_at, created_at, employees(name, role, section_id)')
       .gte('created_at', new Date(lvFrom + 'T00:00:00').toISOString())
       .lte('created_at', new Date(lvTo + 'T23:59:59').toISOString())
-      .order('created_at', { ascending: false });
-    const { data } = await q;
-    return (data || []).filter(r => lvStatus === 'all' || r.status === lvStatus);
+      .order('created_at', { ascending: false })
+      .range(from, to));
+    return data.filter(r => lvStatus === 'all' || r.status === lvStatus);
   }, [lvFrom, lvTo, lvStatus]);
 
   const lvPreviewRun = async () => {
@@ -7173,7 +7201,7 @@ const KioskSettingsPage = () => {
     try {
       const { error } = await window.sb.from('settings').upsert({
         key, value, updated_at: new Date().toISOString(),
-      });
+      }, { onConflict: 'key' });
       if (error) toast('Could not save');
       else {
         setSettings(s => ({ ...s, [key]: value }));
