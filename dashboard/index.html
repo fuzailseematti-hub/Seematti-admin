@@ -5421,7 +5421,7 @@ const PayslipsPage = () => {
             c.epf_12,
             c.esi_075,
             c.esi_epf,
-            c.net_wages - num(r.advance_amt),
+            c.net_wages,   // already net of the advance (computeEsiPf subtracts it once)
           ]);
         }
       });
