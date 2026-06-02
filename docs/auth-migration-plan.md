@@ -78,12 +78,23 @@ first applied and tested on a Supabase _branch_** (via the Supabase MCP
 - Fix the two linter items that are safe now: set `search_path` on existing
   functions; recreate `attendance_today_by_section` as `security_invoker`.
 
-### Phase 1 — Provision auth users (backfill)
+### Phase 1 — Provision auth users (backfill) — ✅ APPLIED 2026-06-02
 - For every `user_access` row (and a real Owner account to replace the bootstrap
   hash), create a Supabase Auth user with a **temporary password**, and set
   `user_access.auth_uid`.
 - Distribute temp passwords out-of-band; force change on first login.
 - Still no lockdown; old login path still works.
+
+**Done:** all 5 `user_access` rows (owner/admin/hr/cc/manager) now have a
+confirmed Supabase Auth user at `<employee_id>@staff.seematti.local` and a
+linked `auth_uid`. Applied via `dashboard/schema/2026-06-auth-phase1.sql`
+(direct `auth.users`/`auth.identities` insert with a pgcrypto bcrypt hash —
+the run environment can reach Supabase only over the Postgres channel, not the
+GoTrue admin API). Temp passwords were delivered to the owner out-of-band and
+are **dormant** — both apps still use the old username/password login until
+Phase 2, where login becomes `supabase.auth.signInWithPassword` and a
+change-password flow forces a reset on first sign-in. Login itself is verified
+in Phase 2 (the Auth REST endpoint isn't reachable from the migration env).
 
 ### Phase 2 — Cut the clients over to Auth
 - Replace both login flows with `supabase.auth.signInWithPassword({ email, password })`
