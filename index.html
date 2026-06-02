@@ -2215,7 +2215,7 @@ const useLoginUsers = () => {
     if (!window.sb) return;
     const { data } = await window.sb
       .from('user_access')
-      .select('employee_id, section_ids, all_sections, username, password_sha256, employees(id, name, role, section_id, user_type, is_active)')
+      .select('employee_id, section_ids, all_sections, username, employees(id, name, role, section_id, user_type, is_active)')
       .order('employee_id');
     const rows = (data || [])
       .filter(u => u.employees && u.employees.is_active !== false)
@@ -2228,7 +2228,6 @@ const useLoginUsers = () => {
         all_sections: u.all_sections,
         section_ids: u.section_ids || [],
         username: u.username || null,
-        password_sha256: u.password_sha256 || null,
       }));
     setUsers(rows);
     setLoading(false);
