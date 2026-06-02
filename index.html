@@ -4498,6 +4498,21 @@ const ApplyLeaveScreen = () => {
   const [reason, setReason] = React.useState('');
   const [employeeId, setEmployeeId] = React.useState(userId || '');
   const [submitting, setSubmitting] = React.useState(false);
+  // Start date is picker-driven (defaults to tomorrow). Previously the
+  // request was hard-coded to "today + 2 days" with a static "20 Apr" label.
+  const todayIso = dateISO(new Date());
+  const [fromDate, setFromDate] = React.useState(() => {
+    const d = new Date(); d.setDate(d.getDate() + 1);
+    return dateISO(d);
+  });
+  const fmtNice = (iso) =>
+    new Date(iso + 'T00:00:00').toLocaleDateString('en-GB',
+      { weekday: 'short', day: 'numeric', month: 'short' });
+  const backOnIso = React.useMemo(() => {
+    const d = new Date(fromDate + 'T00:00:00');
+    d.setDate(d.getDate() + days);
+    return dateISO(d);
+  }, [fromDate, days]);
 
   // Keep the picker in sync with the signed-in user when it changes.
   React.useEffect(() => {
@@ -4538,14 +4553,12 @@ const ApplyLeaveScreen = () => {
     if (submitting || !reason.trim()) return;
     if (!employeeId) { toast('Pick a person'); return; }
     setSubmitting(true);
-    const fromDate = new Date();
-    fromDate.setDate(fromDate.getDate() + 2); // default: from day after tomorrow
     try {
       await persistLeave({
         employeeId,
         type,
         days,
-        fromDate: dateISO(fromDate),
+        fromDate,
         reason: reason.trim(),
       });
       toast(employeeId === userId
@@ -4603,6 +4616,19 @@ const ApplyLeaveScreen = () => {
           ))}
         </div>
 
+        <FieldLabel>Start date</FieldLabel>
+        <input
+          type="date"
+          value={fromDate}
+          min={todayIso}
+          onChange={e => setFromDate(e.target.value || todayIso)}
+          style={{
+            width: '100%', padding: '12px 14px', borderRadius: 12,
+            background: T_.surface, border: `1px solid ${T_.border}`,
+            fontSize: 14, color: T_.ink, fontFamily: 'inherit',
+            boxSizing: 'border-box', outline: 'none', marginBottom: 20,
+          }} />
+
         <FieldLabel>Duration</FieldLabel>
         <div style={{
           background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 14,
@@ -4620,7 +4646,7 @@ const ApplyLeaveScreen = () => {
             </div>
           </div>
           <div style={{ fontSize: 11.5, color: T_.inkMuted, paddingTop: 10, borderTop: `1px solid ${T_.borderSoft}` }}>
-            From Mon, 20 Apr · Back on Tue, {20 + days} Apr
+            From {fmtNice(fromDate)} · Back on {fmtNice(backOnIso)}
           </div>
         </div>
 
@@ -4632,9 +4658,7 @@ const ApplyLeaveScreen = () => {
           resize: 'none', outline: 'none', marginBottom: 8,
         }} />
 
-        <div style={{ fontSize: 11.5, color: T_.inkMuted, marginBottom: 20 }}>
-          Remaining balance: 8 casual · 12 earned · 3 sick
-        </div>
+        <div style={{ height: 20 }} />
 
         <Button full size="lg" onClick={submit} disabled={!reason.trim()}>Submit request</Button>
       </div>
@@ -5978,7 +6002,8 @@ const CCHomeScreen = () => {
 
   const markFollowUpDone = async (id) => {
     if (!window.sb) return;
-    await window.sb.from('customer_interactions').update({ follow_up_done: true }).eq('id', id);
+    const { error } = await window.sb.from('customer_interactions').update({ follow_up_done: true }).eq('id', id);
+    if (error) { toast(lang === 'ta' ? 'முடியவில்லை · மீண்டும் முயற்சி செய்' : 'Could not update — try again'); return; }
     toast(lang === 'ta' ? 'முடிந்தது · நன்றி' : 'Marked done');
   };
 
@@ -8062,26 +8087,41 @@ const EnrollJoinerScreen = () => {
 
     setSaving(true);
     try {
-      const empId = (details.empId || '').trim().toUpperCase()
-        || `E${String(Math.floor(Math.random() * 900) + 400).padStart(3, '0')}`;
+      const manualId = (details.empId || '').trim().toUpperCase();
+      const randomId = () => `E${String(Math.floor(Math.random() * 900) + 400).padStart(3, '0')}`;
 
-      const { error: empErr } = await window.sb.from('employees').insert({
-        id:          empId,
-        name:        details.name.trim(),
-        role:        details.role.trim(),
-        section_id:  details.section,
-        user_type:   'staff',
-        joined_date: todayISO(),
-      });
+      // Insert the employee. When the ID is auto-generated, retry on a
+      // primary-key collision (two enrollments can pick the same random id)
+      // with a fresh id before giving up. A manually-typed id is never
+      // auto-changed — a duplicate there is surfaced as an error.
+      let empId = manualId || randomId();
+      let empErr = null;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const res = await window.sb.from('employees').insert({
+          id:          empId,
+          name:        details.name.trim(),
+          role:        details.role.trim(),
+          section_id:  details.section,
+          user_type:   'staff',
+          joined_date: todayISO(),
+        });
+        empErr = res.error;
+        if (!empErr) break;
+        const dup = (empErr.message || '').toLowerCase().includes('duplicate');
+        if (dup && !manualId) { empId = randomId(); continue; }
+        break;
+      }
       if (empErr) {
-        toast(empErr.message.includes('duplicate')
+        toast((empErr.message || '').toLowerCase().includes('duplicate')
           ? 'Employee ID already exists'
           : 'Could not save — try again');
         setSaving(false);
         return;
       }
 
-      // Save 3 face embeddings (front/left/right)
+      // Save 3 face embeddings (front/left/right). If this fails, roll back
+      // the employee row we just created so we don't leave an enrolled-but-
+      // faceless record that can never sign in.
       const poses = ['front', 'left', 'right'];
       const { error: faceErr } = await window.sb.from('face_embeddings').insert(
         shots.map((desc, i) => ({
@@ -8091,7 +8131,8 @@ const EnrollJoinerScreen = () => {
         }))
       );
       if (faceErr) {
-        toast('Employee saved, but face enrollment failed');
+        await window.sb.from('employees').delete().eq('id', empId);
+        toast('Face enrollment failed — please try again');
         setSaving(false);
         return;
       }

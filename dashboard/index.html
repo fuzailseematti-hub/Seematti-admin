@@ -739,7 +739,7 @@ const Gate = ({ onPass }) => {
     try {
       const { data, error } = await window.sb
         .from('user_access')
-        .select('employee_id, section_ids, all_sections, password_sha256, employees(id, name, user_type, is_active)')
+        .select('employee_id, section_ids, all_sections, password_sha256, can_approve_leaves, can_edit_attendance, can_post_announcements, can_manage_tasks, employees(id, name, user_type, is_active)')
         .eq('username', uname)
         .maybeSingle();
       if (error) throw error;
@@ -760,6 +760,10 @@ const Gate = ({ onPass }) => {
         display_name: data.employees?.name || uname,
         section_ids:  data.section_ids || [],
         all_sections: !!data.all_sections,
+        can_approve_leaves:     !!data.can_approve_leaves,
+        can_edit_attendance:    !!data.can_edit_attendance,
+        can_post_announcements: !!data.can_post_announcements,
+        can_manage_tasks:       !!data.can_manage_tasks,
         password_sha256: hash, // needed to call SECURITY DEFINER RPCs
       });
       onPass();
@@ -836,14 +840,53 @@ const PERMS = {
     muhurtham:    { read: true, edit: true,  delete: false, create: true },
     occasions:    { read: true, edit: false, delete: false, create: false },
   },
+  // Manager & Supervisor share a read-only base over the operational
+  // modules. Their edit/create/delete powers are NOT baked in here — they
+  // come from the per-user grant toggles stored on the user_access row
+  // (can_edit_attendance, can_approve_leaves, can_post_announcements,
+  // can_manage_tasks), consulted in can() via the session. No payroll,
+  // bonus, reports or access management.
+  manager: {
+    employees:    { read: true },
+    sections:     { read: true },
+    attendance:   { read: true },
+    leaves:       { read: true },
+    tasks:        { read: true },
+    announcements:{ read: true },
+    visitors:     { read: true },
+  },
+  supervisor: {
+    employees:    { read: true },
+    sections:     { read: true },
+    attendance:   { read: true },
+    leaves:       { read: true },
+    tasks:        { read: true },
+    announcements:{ read: true },
+    visitors:     { read: true },
+  },
 };
-const can = (role, area, action='read') => {
+// Maps an area to the user_access grant flag that unlocks its write actions
+// for Managers/Supervisors.
+const GRANT_FLAG = {
+  attendance:    'can_edit_attendance',
+  leaves:        'can_approve_leaves',
+  announcements: 'can_post_announcements',
+  tasks:         'can_manage_tasks',
+};
+const can = (role, area, action='read', session=null) => {
   if (area === '__everyone') return true;
   if (area === '__ownerAdmin') return role === 'owner' || role === 'admin';
   const p = PERMS[role];
   if (!p) return false;
   if (p.all) return true;
-  return !!(p[area] && p[area][action]);
+  if (p[area] && p[area][action]) return true;
+  // Manager/Supervisor write access is granted per-user via toggles on
+  // their user_access row, surfaced on the session.
+  if ((role === 'manager' || role === 'supervisor') && action !== 'read' && session) {
+    const flag = GRANT_FLAG[area];
+    if (flag && session[flag]) return true;
+  }
+  return false;
 };
 
 // ──────────────────────────────────────────────────────────
@@ -906,7 +949,7 @@ const App = () => {
   }, [allowed, visiblePage.id]);
 
   return (
-    <AppCtx.Provider value={{ role, session, page, setPage, can: (a, ac) => can(role, a, ac) }}>
+    <AppCtx.Provider value={{ role, session, page, setPage, can: (a, ac) => can(role, a, ac, session) }}>
       <div className="shell">
         <aside className="sidebar">
           <div className="sidebar-brand">
@@ -3457,8 +3500,8 @@ const AnnouncementsPage = () => {
   const del = async (id) => {
     if (!can('announcements', 'delete')) return;
     if (!window.confirm('Delete this announcement?')) return;
-    await window.sb.from('announcements').delete().eq('id', id);
-    toast('Deleted');
+    const { error } = await window.sb.from('announcements').delete().eq('id', id);
+    toast(error ? 'Could not delete — try again' : 'Deleted');
   };
 
   const startNew = () => setEditing({
@@ -9007,6 +9050,7 @@ const CustomerEditModal = ({ open, draft, onChange, onClose, onSave, saving }) =
 // ─── Customer detail sheet with Preferences + Family tabs ──
 const CustomerDetailSheet = ({ customer, onClose, onEdit, canEdit }) => {
   const { session } = useContext(AppCtx);
+  const toast = useToast();
   const [tab, setTab] = useState('summary');
   const [prefs, setPrefs]         = useState([]);
   const [family, setFamily]       = useState([]);
@@ -9072,17 +9116,17 @@ const CustomerDetailSheet = ({ customer, onClose, onEdit, canEdit }) => {
       price_max:    prefDraft.price_max === '' ? null : Number(prefDraft.price_max),
       notes:        (prefDraft.notes || '').trim() || null,
     };
-    if (prefDraft.id) {
-      await window.sb.from('customer_preferences').update(payload).eq('id', prefDraft.id);
-    } else {
-      await window.sb.from('customer_preferences').insert(payload);
-    }
+    const { error } = prefDraft.id
+      ? await window.sb.from('customer_preferences').update(payload).eq('id', prefDraft.id)
+      : await window.sb.from('customer_preferences').insert(payload);
+    if (error) { toast('Could not save preference — try again'); return; }
     setPrefDraft(null);
   };
 
   const delPref = async (p) => {
     if (!window.confirm('Delete this preference?')) return;
-    await window.sb.from('customer_preferences').delete().eq('id', p.id);
+    const { error } = await window.sb.from('customer_preferences').delete().eq('id', p.id);
+    if (error) toast('Could not delete — try again');
   };
 
   const saveFam = async () => {
@@ -9614,15 +9658,23 @@ const InteractionsPage = () => {
 
   const fetchAll = useCallback(async () => {
     if (!window.sb) return;
-    const [interRes, custRes] = await Promise.all([
-      window.sb.from('customer_interactions')
+    const custP = window.sb.from('customers').select('id, name, phone').order('name');
+    // Page through interactions so the list/search isn't silently capped at
+    // 500 rows as history accumulates.
+    const PAGE = 1000;
+    let inter = [];
+    for (let from = 0; ; from += PAGE) {
+      const { data } = await window.sb.from('customer_interactions')
         .select('*, customers(id, name, phone, city, is_vip, do_not_contact)')
         .order('occurred_at', { ascending: false })
-        .limit(500),
-      window.sb.from('customers').select('id, name, phone').order('name'),
-    ]);
-    setRows((interRes.data || []).filter(r => r.customers));
-    setCustomers(custRes.data || []);
+        .range(from, from + PAGE - 1);
+      if (!data || !data.length) break;
+      inter = inter.concat(data);
+      if (data.length < PAGE) break;
+    }
+    const { data: custRes } = await custP;
+    setRows(inter.filter(r => r.customers));
+    setCustomers(custRes || []);
     setLoading(false);
   }, []);
 
@@ -10021,15 +10073,22 @@ const MuhurthamPage = () => {
 
   const fetchAll = useCallback(async () => {
     if (!window.sb) return;
-    const [mvRes, custRes] = await Promise.all([
-      window.sb.from('muhurtham_visits')
+    const custP = window.sb.from('customers').select('id, name, phone').order('name');
+    // Page through visits so the list/search isn't silently capped at 500.
+    const PAGE = 1000;
+    let visits = [];
+    for (let from = 0; ; from += PAGE) {
+      const { data } = await window.sb.from('muhurtham_visits')
         .select('*, customers(id, name, phone, city, is_vip)')
         .order('visit_date', { ascending: true, nullsFirst: false })
-        .limit(500),
-      window.sb.from('customers').select('id, name, phone').order('name'),
-    ]);
-    setRows((mvRes.data || []).filter(r => r.customers));
-    setCustomers(custRes.data || []);
+        .range(from, from + PAGE - 1);
+      if (!data || !data.length) break;
+      visits = visits.concat(data);
+      if (data.length < PAGE) break;
+    }
+    const { data: custRes } = await custP;
+    setRows(visits.filter(r => r.customers));
+    setCustomers(custRes || []);
     setLoading(false);
   }, []);
 
@@ -10153,8 +10212,8 @@ const MuhurthamPage = () => {
   };
 
   const resolveReminder = async (row) => {
-    await window.sb.from('muhurtham_visits').update({ reminder_resolved: true }).eq('id', row.id);
-    toast('Reminder cleared');
+    const { error } = await window.sb.from('muhurtham_visits').update({ reminder_resolved: true }).eq('id', row.id);
+    toast(error ? 'Could not clear reminder — try again' : 'Reminder cleared');
   };
 
   const del = async (row) => {
