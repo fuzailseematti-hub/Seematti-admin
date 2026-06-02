@@ -1149,6 +1149,9 @@ const fmtDateISO = (d) =>
   new Date(d).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 const todayISO = () =>
   new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+// Normalise any Date or timestamp string to a Kolkata ISO date (YYYY-MM-DD).
+// Used by the Interactions + Muhurtham pages; without it both crash on render.
+const dateISO = (ts) => (ts ? fmtDateISO(ts) : null);
 
 // ──────────────────────────────────────────────────────────
 // File download — robust across phones and in-app browsers.

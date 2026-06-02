@@ -2586,9 +2586,9 @@ const OwnerHomeScreen = () => {
   const T_ = window.TOKENS;
   const M = window.MOCK;
   const live = window.useLiveAttendance ? window.useLiveAttendance() : { loading: true };
-  const a        = live.attendance || M.attendance;
-  const sections = (live.sections && live.sections.length) ? live.sections : M.floors;
-  const attendancePct = Math.round((a.present / a.total) * 100);
+  const a        = live.attendance || { present: 0, total: 0, late: 0, absent: 0, onLeave: 0 };
+  const sections = live.sections || [];
+  const attendancePct = a.total ? Math.round((a.present / a.total) * 100) : 0;
 
   // Live counts for 'Needs your attention' cards
   const { items: liveLeaves } = window.useLiveLeaves ? window.useLiveLeaves() : { items: [] };
@@ -3048,7 +3048,7 @@ const FloorCard = ({ floor }) => {
   const T_ = window.TOKENS;
   const t = useT();
   const { density, nav } = useApp();
-  const pct = Math.round((floor.present / floor.staff) * 100);
+  const pct = floor.staff ? Math.round((floor.present / floor.staff) * 100) : 0;
   const tone = pct >= 90 ? 'success' : pct >= 85 ? 'warning' : 'danger';
 
   // Only navigate when we have a real string section_id (live data).
@@ -3271,7 +3271,7 @@ const StaffHomeScreen = () => {
   const { payslip: livePayslip } = window.useLivePayslip
     ? window.useLivePayslip(STAFF_ID)
     : { payslip: null };
-  const p = livePayslip || M.payslip;
+  const p = livePayslip; // no mock fallback — real payslip or an empty state
 
   const staffInfo = employee || M.staff;
   const roleLine = employee
@@ -3465,12 +3465,12 @@ const StaffHomeScreen = () => {
           </div>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 11.5, color: T_.inkMuted, letterSpacing: 0.3, textTransform: 'uppercase', fontWeight: 600 }}>
-              {p.month || 'Latest'} payslip
+              {p ? `${p.month} payslip` : 'Payslip'}
             </div>
             <div style={{
               fontFamily: 'Fraunces, Georgia, serif',
-              fontSize: 20, fontWeight: 600, color: T_.ink, marginTop: 2, letterSpacing: -0.5,
-            }}>₹{(p.net || 0).toLocaleString('en-IN')}</div>
+              fontSize: 20, fontWeight: 600, color: p ? T_.ink : T_.inkFaint, marginTop: 2, letterSpacing: -0.5,
+            }}>{p ? `₹${p.net.toLocaleString('en-IN')}` : 'No payslip yet'}</div>
           </div>
           <Icon name="chevron" size={16} color={T_.inkFaint} />
         </button>
@@ -3574,7 +3574,7 @@ const AttendanceScreen = () => {
     ? window.useLiveRoster()
     : { roster: [], loading: false };
   const live = window.useLiveAttendance ? window.useLiveAttendance() : { attendance: null };
-  const a = live.attendance || M.attendance;
+  const a = live.attendance || { present: 0, total: 0, late: 0, absent: 0, onLeave: 0 };
 
   // Section scoping — owner/hr/all_sections see everyone; manager/supervisor
   // see only their assigned sections.
@@ -5075,13 +5075,46 @@ window.TasksScreen = TasksScreen;
 // Payslip screen
 
 const PayslipScreen = () => {
-  const { toast } = useApp();
+  const { toast, userId } = useApp();
   const T_ = window.TOKENS;
-  const M = window.MOCK;
   const { payslip, loading } = window.useLivePayslip
-    ? window.useLivePayslip('E003') // Priya — demo staff account
+    ? window.useLivePayslip(userId)
     : { payslip: null, loading: false };
-  const p = payslip || M.payslip;
+  const p = payslip;
+
+  // No fabricated fallback: show the signed-in employee's real payslip,
+  // or a clear empty state. Showing someone else's (or mock) salary here
+  // is a privacy/data-integrity problem.
+  if (userId && loading) {
+    return (
+      <div style={{ background: T_.bg, minHeight: '100%' }}>
+        <ScreenHeader back title="Payslip" />
+        <div style={{ padding: 40, textAlign: 'center', color: T_.inkFaint, fontSize: 14 }}>
+          Loading your payslip…
+        </div>
+      </div>
+    );
+  }
+  if (!p) {
+    return (
+      <div style={{ background: T_.bg, minHeight: '100%' }}>
+        <ScreenHeader back title="Payslip" />
+        <div style={{ padding: '48px 24px', textAlign: 'center', color: T_.inkSoft }}>
+          <Icon name="doc" size={32} />
+          <div style={{ marginTop: 12, fontSize: 15, fontWeight: 600, color: T_.ink }}>
+            No payslip yet
+          </div>
+          <div style={{ marginTop: 6, fontSize: 13, color: T_.inkFaint, lineHeight: 1.5 }}>
+            Your payslip will appear here once HR generates it for the month.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const paidLabel = p.paidAt
+    ? 'Paid · ' + new Date(p.paidAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
+    : 'Pending';
 
   return (
     <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 40 }}>
@@ -5115,7 +5148,7 @@ const PayslipScreen = () => {
             </div>
             <div>
               <div style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.6)', letterSpacing: 0.3, textTransform: 'uppercase', fontWeight: 600 }}>Status</div>
-              <div style={{ fontSize: 14, fontWeight: 600, marginTop: 2, color: '#C8E6C9' }}>Paid · 5 Apr</div>
+              <div style={{ fontSize: 14, fontWeight: 600, marginTop: 2, color: p.paidAt ? '#C8E6C9' : 'rgba(255,255,255,0.85)' }}>{paidLabel}</div>
             </div>
           </div>
         </div>
@@ -5157,16 +5190,11 @@ const PayslipScreen = () => {
 
         <div style={{ height: 16 }} />
 
-        <Button full size="lg" variant="secondary" icon={<Icon name="doc" size={18} />}
-          onClick={() => toast('Payslip PDF downloaded')}>
-          Download payslip PDF
-        </Button>
-
         <div style={{
-          marginTop: 14, fontSize: 11, color: T_.inkFaint, textAlign: 'center', lineHeight: 1.5,
+          marginTop: 4, fontSize: 11, color: T_.inkFaint, textAlign: 'center', lineHeight: 1.5,
         }}>
-          Paid to HDFC Bank ****4521<br />
-          Query? Contact HR — Mrs. Vijayalakshmi ext. 104
+          {p.bankLast4 ? <>Paid to bank account ****{p.bankLast4}<br /></> : null}
+          Query? Contact HR.
         </div>
       </div>
     </div>
@@ -5205,7 +5233,7 @@ const AnnouncementsScreen = () => {
   const { items, loading } = window.useLiveAnnouncements
     ? window.useLiveAnnouncements()
     : { items: [], loading: false };
-  const rows = items.length ? items : M.announcements;
+  const rows = items; // real announcements only — no fabricated notices
   const canPost = user === 'owner' || user === 'admin' || user === 'hr' ||
     (userAccess && userAccess.can_post_announcements);
 
@@ -5307,6 +5335,17 @@ const AnnouncementsScreen = () => {
       />
 
       <div style={{ padding: '0 16px' }}>
+        {!loading && !rows.length && (
+          <div style={{ padding: '48px 24px', textAlign: 'center', color: T_.inkSoft }}>
+            <Icon name="megaphone" size={32} />
+            <div style={{ marginTop: 12, fontSize: 15, fontWeight: 600, color: T_.ink }}>
+              No announcements yet
+            </div>
+            <div style={{ marginTop: 6, fontSize: 13, color: T_.inkFaint }}>
+              New notices from HR will show up here.
+            </div>
+          </div>
+        )}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           {rows.map(a => {
             const mine = myReads[a.id];
@@ -5503,7 +5542,7 @@ const HRHomeScreen = () => {
   // Scope section stats + attendance totals to the user's sections.
   const scopedSections = (live.sections || []).filter(s => hasAll || allowed.includes(s.id));
   const a = hasAll
-    ? (live.attendance || M.attendance)
+    ? (live.attendance || { total: 0, present: 0, late: 0, absent: 0, onLeave: 0 })
     : scopedSections.reduce((acc, s) => ({
         total:   acc.total   + (s.staff   || 0),
         present: acc.present + (s.present || 0),
@@ -5517,13 +5556,13 @@ const HRHomeScreen = () => {
   const hrPendingLeaves = scopedLeaves.filter(l => l.status === 'pending').length;
 
   const { items: hrAnns } = window.useLiveAnnouncements ? window.useLiveAnnouncements() : { items: [] };
-  const hrAnnCount = hrAnns.length || M.announcements.length;
+  const hrAnnCount = hrAnns.length;
   const { items: hrAdvances } = window.useLiveAdvances
     ? window.useLiveAdvances()
     : { items: [] };
   const hrPendingAdvances = hrAdvances.filter(a => a.status === 'pending').length;
   const hrSectionCount = hasAll
-    ? (live.sections ? live.sections.length : (M.floors || []).length)
+    ? (live.sections ? live.sections.length : 0)
     : (allowed?.length || 0);
   const hrApprovedThisWeek = scopedLeaves.filter(l => l.status === 'approved').length;
   const hrStats = window.useLiveHRStats ? window.useLiveHRStats() : { newJoinersWeek: 0, lateNames: [], absentNames: [], newJoinerName: null };
@@ -6432,7 +6471,7 @@ const HRToolsScreen = () => {
   const live = window.useLiveAttendance ? window.useLiveAttendance() : { attendance: null, sections: null };
   const scopedSections = (live.sections || []).filter(s => hasAll || allowed.includes(s.id));
   const a = hasAll
-    ? (live.attendance || M.attendance)
+    ? (live.attendance || { total: 0, present: 0, late: 0, absent: 0, onLeave: 0 })
     : scopedSections.reduce((acc, s) => ({
         total:   acc.total   + (s.staff   || 0),
         present: acc.present + (s.present || 0),
@@ -6446,13 +6485,13 @@ const HRToolsScreen = () => {
   const pendingLeaves = scopedLeaves.filter(l => l.status === 'pending').length;
 
   const { items: anns } = window.useLiveAnnouncements ? window.useLiveAnnouncements() : { items: [] };
-  const annCount = anns.length || M.announcements.length;
+  const annCount = anns.length;
 
   const { items: advances } = window.useLiveAdvances ? window.useLiveAdvances() : { items: [] };
   const pendingAdvances = advances.filter(x => x.status === 'pending').length;
 
   const sectionCount = hasAll
-    ? (live.sections ? live.sections.length : (M.floors || []).length)
+    ? (live.sections ? live.sections.length : 0)
     : (allowed?.length || 0);
 
   return (
@@ -6983,10 +7022,9 @@ const MarkAttendanceScreen = () => {
     toast(n ? `Marked ${n} staff as present` : 'Nothing pending');
   };
 
-  const save = () => {
-    toast(`Attendance saved · ${markedCount} of ${roster.length} marked`);
-    setTimeout(() => nav.back(), 600);
-  };
+  // Each status tap already persists immediately (per-tap upsert), so there
+  // is nothing to "save" on exit — this just returns to the previous screen.
+  const done = () => nav.back();
 
   return (
     <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 120 }}>
@@ -6994,16 +7032,6 @@ const MarkAttendanceScreen = () => {
         back
         title="Mark attendance"
         subtitle={`${markedCount} marked · ${unmarkedCount} pending · ${todayHumanIST()}`}
-        trailing={
-          <button onClick={() => toast('Biometric sync — coming soon')} style={{
-            background: T_.surfaceAlt, border: `1px solid ${T_.border}`,
-            borderRadius: 8, padding: '6px 10px', fontSize: 11.5, fontWeight: 600,
-            color: T_.ink, cursor: 'pointer', fontFamily: 'inherit',
-            display: 'flex', alignItems: 'center', gap: 4,
-          }}>
-            <Icon name="sparkle" size={12} /> Sync
-          </button>
-        }
       />
 
       {/* Search */}
@@ -7113,13 +7141,13 @@ const MarkAttendanceScreen = () => {
         }}>
           <Icon name="check" size={16} /> Mark all present
         </button>
-        <button onClick={save} style={{
+        <button onClick={done} style={{
           flex: 1.2, background: T_.maroon, border: 'none',
           borderRadius: 14, padding: '14px', fontSize: 13, fontWeight: 600,
           color: '#fff', cursor: 'pointer', fontFamily: 'inherit',
           boxShadow: '0 6px 16px -6px rgba(139, 35, 35, 0.45)',
         }}>
-          Save attendance
+          Done
         </button>
       </div>
     </div>
