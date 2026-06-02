@@ -122,21 +122,31 @@ left in place (read-only/ignored) and dropped in Phase 3. The legacy
 
 - Validate both apps on the preview URLs with each role before merge.
 
-### Phase 3 — Lock down RLS (the payoff)
-Rewrite policies table-by-table (authenticated-only, scoped). Sketch:
-- `user_access`: readable/writable only by owner/admin (or via RPC); drop
-  `password_sha256`.
-- `payslips`: employee reads **own**; owner/admin/hr read all; writes owner/admin/hr.
-- `employees`: authenticated read; PII columns via a restricted view or
-  owner/admin/hr only; writes owner/admin/hr.
-- `attendance` / `leave_requests`: read own + (managers/supervisors) their
-  sections; owner/admin/hr all; writes gated by `can_edit_attendance` /
-  `can_approve_leaves`.
-- customers + CRM tables: cc/owner/admin/hr.
-- settings/app_settings/sections/bonus*: owner/admin (+hr where used) write;
-  authenticated read where the apps need it.
-- Convert remaining privileged writes that can't be expressed in pure RLS to
-  `SECURITY DEFINER` RPCs (following `admin_change_role`).
+### Phase 3a — Server-side kiosk matching — ✅ APPLIED & MERGED 2026-06-02
+The attendance kiosk runs unauthenticated, so before RLS could drop anon access
+its face-match/punch/tally moved into PIN-gated `SECURITY DEFINER` RPCs
+(`kiosk_match`/`kiosk_punch`/`kiosk_meta`, `2026-06-auth-phase3a-kiosk.sql`) and
+the kiosk client was cut over to them (no more anon table reads).
+
+### Phase 3b — Lock down RLS (the payoff) — 🚧 VALIDATED, PENDING PROD APPLY
+`dashboard/schema/2026-06-auth-phase3b-rls.sql`. Drops every permissive policy
+and replaces with:
+- **anon → zero table access** (login + kiosk go through SECURITY DEFINER RPCs).
+- Operational tables (attendance, leaves, tasks, task_comments, announcements,
+  announcement_reads, visitors) — any authenticated user (UI gated by `can()`).
+- `employees`/`sections` read authenticated; writes owner/admin(/hr).
+- `payslips`: own, or owner/admin. `advances`: own, or owner/admin/hr.
+- `bonus_*`: owner/admin. `face_embeddings`: owner/admin/hr (kiosk via RPC).
+- `user_access`: own row, or owner/admin (writes owner/admin only).
+- customers + CRM: owner/admin/hr/cc.
+
+**Validated** via in-transaction role impersonation (anon=0 everywhere; manager
+sees all employees but only own payslip/access, no CRM/biometrics/bonus; owner
+full). **Applied to prod only after** the kiosk punch is confirmed live.
+
+Deferred to Phase 4: column-level employee-PII hiding (salary/bank from non-HR,
+needs a restricted view + client query changes) and dropping `password_sha256`
+(a dead login-picker fetch still selects it).
 
 ### Phase 4 — Cleanup & verify
 - Surface write errors in the UI (many writes currently ignore `error`).
