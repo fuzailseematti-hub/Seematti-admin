@@ -1150,6 +1150,62 @@ const fmtDateISO = (d) =>
 const todayISO = () =>
   new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 
+// ──────────────────────────────────────────────────────────
+// File download — robust across phones and in-app browsers.
+//
+// The classic "create an <a download>, click it, revoke" trick works on
+// desktop but is silently ignored on iOS Safari and inside the in-app
+// browsers used by WhatsApp / Instagram / Gmail (WKWebView): the file
+// opens inline as garbled text, or nothing happens at all — which is
+// exactly how a broken "Download report" button looks to staff on a
+// phone. On those devices we route through the native Web Share sheet
+// ("Save to Files" / "Download" / share to another app) instead, and
+// fall back to the anchor trick everywhere else.
+// ──────────────────────────────────────────────────────────
+const isProbablyMobile = () =>
+  /Android|iPhone|iPad|iPod/i.test((navigator.userAgent || '')) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1); // iPadOS
+
+const downloadBlob = async (filename, blob) => {
+  // Prefer the share sheet on phones/tablets, where a programmatic
+  // download is unreliable. canShare({ files }) tells us the platform
+  // can actually hand a file off.
+  if (isProbablyMobile() && navigator.canShare) {
+    try {
+      const file = new File([blob], filename, { type: blob.type || 'application/octet-stream' });
+      if (navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: filename });
+        return true;
+      }
+    } catch (e) {
+      // The user dismissing the share sheet throws AbortError — treat
+      // that as "handled" so we don't pop a second download at them.
+      if (e && e.name === 'AbortError') return true;
+      // Any other failure: fall through to the classic download below.
+    }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return true;
+};
+
+// Build an .xlsx Blob from a SheetJS workbook (instead of XLSX.writeFile,
+// which uses the same fragile anchor trick internally) so it flows
+// through downloadBlob and works on phones too.
+const downloadWorkbook = (filename, wb) => {
+  const out = window.XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  return downloadBlob(filename, new Blob([out], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  }));
+};
+
 // Collapsible section picker — a single button that expands into a
 // dropdown list. Used wherever 13+ sections would otherwise wrap an
 // ugly row of chips. Closes when the Owner clicks outside or picks
@@ -1872,7 +1928,7 @@ const EmployeesPage = () => {
   // Generate a sample .xlsx so HR can see the exact column layout
   // the uploader understands. Sample names are prefixed "SAMPLE —"
   // so they won't match any real employee if re-uploaded by mistake.
-  const downloadSample = () => {
+  const downloadSample = async () => {
     if (typeof window.XLSX === 'undefined') {
       toast('Excel library still loading, try again in a second');
       return;
@@ -1947,7 +2003,7 @@ const EmployeesPage = () => {
     window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.aoa_to_sheet(notes),                 'Read me first');
     window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.aoa_to_sheet([esiHeader, ...esiSample]), 'EPF & ESI');
     window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.aoa_to_sheet([njHeader,  ...njSample]),  'New joined');
-    window.XLSX.writeFile(wb, 'payroll_sample.xlsx');
+    await downloadWorkbook('payroll_sample.xlsx', wb);
     toast('Sample downloaded');
   };
 
@@ -5378,7 +5434,7 @@ const PayslipsPage = () => {
       }
       if (!wb.SheetNames.length) { toast('Nothing to export'); return; }
       const filename = `payslips_${month.slice(0, 7)}.xlsx`;
-      window.XLSX.writeFile(wb, filename);
+      await downloadWorkbook(filename, wb);
       toast(`Exported ${njRows.length + esiRows.length} payslip${njRows.length + esiRows.length === 1 ? '' : 's'}`);
     } finally { setExporting(false); }
   };
@@ -6480,15 +6536,8 @@ const toCSV = (rows, columns) => {
   ).join('\n');
   return '\uFEFF' + header + '\n' + body; // BOM for Excel UTF-8
 };
-const downloadCSV = (filename, csv) => {
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename;
-  document.body.appendChild(a); a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 100);
-};
+const downloadCSV = (filename, csv) =>
+  downloadBlob(filename, new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
 
 // Card wrapper for each report type
 const ReportCard = ({ title, description, children }) => (
@@ -6550,6 +6599,7 @@ const ReportsPage = () => {
   };
   const attDownload = async () => {
     const rows = attPreview?.rows || await fetchAttendance();
+    if (!rows.length) { toast('No attendance in this range'); return; }
     const csv = toCSV(rows, [
       { label: 'Date',          value: 'date' },
       { label: 'Employee ID',   value: 'employee_id' },
@@ -6595,6 +6645,7 @@ const ReportsPage = () => {
   };
   const payDownload = async () => {
     const rows = payPreview?.rows || await fetchPayroll();
+    if (!rows.length) { toast('No payslips for this month'); return; }
     const fmtItems = (items) => (items || [])
       .map(i => `${i.label}: ${i.amount}`).join('; ');
     const csv = toCSV(rows, [
@@ -6651,6 +6702,7 @@ const ReportsPage = () => {
   };
   const lvDownload = async () => {
     const rows = lvPreview?.rows || await fetchLeaves();
+    if (!rows.length) { toast('No leave requests in this range'); return; }
     const csv = toCSV(rows, [
       { label: 'Employee ID',    value: 'employee_id' },
       { label: 'Name',           value: r => r.employees?.name || '' },
@@ -6674,6 +6726,7 @@ const ReportsPage = () => {
 
   const empDownload = () => {
     const rows = employees.filter(e => empIncludeInactive || e.is_active);
+    if (!rows.length) { toast('No employees to export'); return; }
     const csv = toCSV(rows, [
       { label: 'ID',          value: 'id' },
       { label: 'Name',        value: 'name' },
