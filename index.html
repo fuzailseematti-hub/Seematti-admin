@@ -2333,23 +2333,27 @@ const LoginScreen = () => {
     if (!uname) { setErr('Enter your username'); setBusy(false); return; }
     if (!pwd)   { setErr('Enter your password'); setBusy(false); return; }
     try {
-      const hash = await window.sha256(pwd);
-      const { data, error } = await window.sb
+      // Resolve username -> Supabase Auth email, then sign in. Generic error
+      // message avoids leaking which part was wrong.
+      const { data: email, error: rErr } =
+        await window.sb.rpc('auth_email_for_username', { p_username: uname });
+      if (rErr || !email) { setErr('Wrong username or password'); setBusy(false); return; }
+      const { error: aErr } = await window.sb.auth.signInWithPassword({ email, password: pwd });
+      if (aErr) { setErr('Wrong username or password'); setBusy(false); return; }
+      // Derive role + employee from the signed-in user for routing.
+      const { data: { session } } = await window.sb.auth.getSession();
+      const { data } = await window.sb
         .from('user_access')
-        .select('employee_id, password_sha256, employees(id, name, user_type, is_active)')
-        .eq('username', uname)
+        .select('employee_id, employees(id, name, user_type, is_active)')
+        .eq('auth_uid', session?.user?.id)
         .maybeSingle();
-      if (error) throw error;
-      if (!data || !data.password_sha256 || data.password_sha256 !== hash) {
-        setErr('Wrong username or password'); setBusy(false); return;
+      if (!data || data.employees?.is_active === false) {
+        await window.sb.auth.signOut();
+        setErr('This account has no access'); setBusy(false); return;
       }
-      if (data.employees?.is_active === false) {
-        setErr('This account has been deactivated'); setBusy(false); return;
-      }
-      const role = data.employees?.user_type || 'hr';
-      const empId = data.employee_id;
+      const role = data.employees?.user_type || 'staff';
       setUser(role);
-      setUserId(empId);
+      setUserId(data.employee_id);
       nav.reset(ROLE_HOME[role] || 'ownerHome');
     } catch (ex) {
       console.error(ex);
@@ -8637,7 +8641,8 @@ const SettingsScreen = () => {
   const { user, userId, setUser, setUserId, nav, lang, setLang, toast } = useApp();
   const T_ = window.TOKENS;
 
-  const signOut = () => {
+  const signOut = async () => {
+    try { await window.sb.auth.signOut(); } catch (_) {}
     setUser(null);
     setUserId(null);
     nav.reset('login');
@@ -8678,15 +8683,12 @@ const SettingsScreen = () => {
     if (newPwd !== cfmPwd)  { toast('Confirmation does not match');     return; }
     setPwdBusy(true);
     try {
-      const curHash = await window.sha256(curPwd);
-      const { data: row } = await window.sb.from('user_access')
-        .select('password_sha256').eq('employee_id', userId).maybeSingle();
-      if (!row || row.password_sha256 !== curHash) {
-        toast('Current password is wrong'); return;
-      }
-      const newHash = await window.sha256(newPwd);
-      const { error } = await window.sb.from('user_access')
-        .update({ password_sha256: newHash }).eq('employee_id', userId);
+      // Confirm the current password by re-authenticating, then update via
+      // Supabase Auth (which owns the password now).
+      const email = `${String(userId).toLowerCase()}@staff.seematti.local`;
+      const { error: reauthErr } = await window.sb.auth.signInWithPassword({ email, password: curPwd });
+      if (reauthErr) { toast('Current password is wrong'); return; }
+      const { error } = await window.sb.auth.updateUser({ password: newPwd });
       if (error) { toast('Could not update'); console.error(error); return; }
       setCurPwd(''); setNewPwd(''); setCfmPwd(''); setPwdOpen(false);
       toast('Password updated');
@@ -10374,14 +10376,33 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
   }, [tweakLang]);
 
   useEffect(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem('sundari-state') || '{}');
-      if (saved.user)    setUser(saved.user);
-      if (saved.userId)  setUserId(saved.userId);
-      if (saved.stack)   setStack(saved.stack);
-      if (saved.tab)     setTab(saved.tab);
-      if (saved.lang && !tweakLang) setLangState(saved.lang);
-    } catch {}
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem('sundari-state') || '{}'); } catch {}
+    if (saved.tab) setTab(saved.tab);
+    if (saved.lang && !tweakLang) setLangState(saved.lang);
+    // The Supabase JWT is the source of truth for who's signed in — not the
+    // cached role/id in localStorage. Restore the session from it.
+    (async () => {
+      if (!window.sb) { setStack(['login']); return; }
+      const { data: { session } } = await window.sb.auth.getSession();
+      if (session?.user) {
+        const { data } = await window.sb
+          .from('user_access')
+          .select('employee_id, employees(user_type, is_active)')
+          .eq('auth_uid', session.user.id)
+          .maybeSingle();
+        if (data && data.employees?.is_active !== false) {
+          const role = data.employees?.user_type || 'staff';
+          setUser(role);
+          setUserId(data.employee_id);
+          setStack(saved.stack && saved.stack[0] !== 'login'
+            ? saved.stack : [ROLE_HOME[role] || 'ownerHome']);
+          return;
+        }
+        await window.sb.auth.signOut();
+      }
+      setUser(null); setUserId(null); setStack(['login']);
+    })();
   }, []);
   useEffect(() => {
     localStorage.setItem('sundari-state', JSON.stringify({ user, userId, stack, tab, lang }));

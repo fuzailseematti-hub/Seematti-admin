@@ -96,13 +96,31 @@ Phase 2, where login becomes `supabase.auth.signInWithPassword` and a
 change-password flow forces a reset on first sign-in. Login itself is verified
 in Phase 2 (the Auth REST endpoint isn't reachable from the migration env).
 
-### Phase 2 — Cut the clients over to Auth
+### Phase 2 — Cut the clients over to Auth — 🚧 IN REVIEW
 - Replace both login flows with `supabase.auth.signInWithPassword({ email, password })`
-  (email derived from employee_id).
-- Remove the localStorage custom session, the in-browser `sha256` compare, the
-  bootstrap hash, the "preview as role" impersonation, and the dead login code.
-- Add change-password via `supabase.auth.updateUser`.
-- Validate both apps against the Supabase branch with each role.
+  (email resolved from the typed username via `auth_email_for_username`).
+- Remove the localStorage/sessionStorage custom session and the bootstrap hash;
+  the JWT (supabase-js) is now the source of truth. "Preview as role" kept as an
+  in-memory, owner-only client override (no longer persisted).
+- Change-password via `supabase.auth.updateUser` (both apps; re-auths with the
+  current password first). Optional from settings — no forced first-login gate.
+
+**Supporting RPCs applied to prod** (`dashboard/schema/2026-06-auth-phase2.sql`,
+all SECURITY DEFINER, actor verified via `auth.uid()`):
+- `auth_email_for_username(username)` — pre-auth username→email (anon).
+- `admin_change_role_v2(employee_id, role)` — replaces the username/hash actor
+  check in `admin_change_role`.
+- `admin_provision_user(employee_id, password)` — create/link the Auth user for a
+  Team Access grant or password reset.
+- `admin_revoke_auth(employee_id)` — delete the Auth user on revoke.
+
+**Status:** client cutover is in a PR pending owner validation on Vercel previews
+(both apps point at prod Supabase; the 5 Phase-1 accounts log in there). Not
+merged to `main` until each role is verified. `user_access.password_sha256` is
+left in place (read-only/ignored) and dropped in Phase 3. The legacy
+`admin_change_role` RPC stays until Phase 3/4 cleanup.
+
+- Validate both apps on the preview URLs with each role before merge.
 
 ### Phase 3 — Lock down RLS (the payoff)
 Rewrite policies table-by-table (authenticated-only, scoped). Sketch:
