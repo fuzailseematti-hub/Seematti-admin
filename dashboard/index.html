@@ -10898,8 +10898,9 @@ const MonthlyLeavePage = () => {
 };
 
 const AUTO_TYPES = {
-  daily_attendance: 'Daily attendance report — today’s present / late / absent, section-wise',
-  next_day_leave:   'Next-day leave report — who’s on leave tomorrow, section-wise',
+  daily_attendance:    'Daily attendance report — today’s present / late / absent, section-wise',
+  prev_day_attendance: 'Previous day in/out report — yesterday’s check-in/out, late & early flagged in red',
+  next_day_leave:      'Next-day leave report — who’s on leave tomorrow, section-wise',
 };
 const ATTACH_LABEL = { none: 'No attachment', pdf: 'PDF attached', csv: 'CSV attached', both: 'PDF + CSV attached' };
 
@@ -10959,7 +10960,7 @@ const AutomationsPage = () => {
            <div key={a.id} style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, padding: '12px 16px' }}>
              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
                <div style={{ flex: 1, minWidth: 220 }}>
-                 <div style={{ fontWeight: 600, fontSize: 14 }}>{a.name || (a.type === 'next_day_leave' ? 'Next-day leave' : 'Daily attendance')}
+                 <div style={{ fontWeight: 600, fontSize: 14 }}>{a.name || (a.type === 'next_day_leave' ? 'Next-day leave' : a.type === 'prev_day_attendance' ? 'Previous day in/out' : 'Daily attendance')}
                    <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, color: a.enabled ? '#0E7C3A' : 'var(--inkMuted)' }}>{a.enabled ? '● On' : '○ Off'}</span>
                  </div>
                  <div style={{ fontSize: 12, color: 'var(--inkMuted)', marginTop: 3 }}>{AUTO_TYPES[a.type]}</div>
@@ -10988,6 +10989,7 @@ const AutomationsPage = () => {
             <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Report type</label>
             <select value={editing.type} onChange={e => setEditing({ ...editing, type: e.target.value })} style={{ ...fld, cursor: 'pointer', marginBottom: 12 }}>
               <option value="daily_attendance">Daily attendance (today)</option>
+              <option value="prev_day_attendance">Previous day in/out (yesterday)</option>
               <option value="next_day_leave">Next-day leave (tomorrow)</option>
             </select>
 
