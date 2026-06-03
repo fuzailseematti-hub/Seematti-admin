@@ -1280,35 +1280,7 @@ const useLiveRoster = () => {
       }, { onConflict: 'employee_id,date' });
   }, []);
 
-  // Bulk mark all pending employees (no attendance row today) as present.
-  const markAllPresent = React.useCallback(async (predicate, markedBy) => {
-    if (!window.sb) return 0;
-    const today = todayISO();
-    const now = new Date();
-    const hh = String(now.getHours()).padStart(2, '0');
-    const mm = String(now.getMinutes()).padStart(2, '0');
-    const stamp = `${hh}:${mm}:00`;
-
-    const targets = roster.filter(r => r.status === null && (!predicate || predicate(r)));
-    if (!targets.length) return 0;
-
-    await window.sb
-      .from('attendance')
-      .upsert(
-        targets.map(t => ({
-          employee_id:   t.id,
-          date:          today,
-          status:        'present',
-          punch_in_time: stamp,
-          source:        'manual',
-          marked_by:     markedBy || null,
-        })),
-        { onConflict: 'employee_id,date' }
-      );
-    return targets.length;
-  }, [roster]);
-
-  return { roster, loading, setStatus, markAllPresent };
+  return { roster, loading, setStatus };
 };
 window.useLiveRoster = useLiveRoster;
 
@@ -7011,10 +6983,9 @@ const MarkAttendanceScreen = () => {
     roster: fullRoster,
     loading,
     setStatus: persistStatus,
-    markAllPresent: persistMarkAll,
   } = window.useLiveRoster
     ? window.useLiveRoster()
-    : { roster: [], loading: false, setStatus: async () => {}, markAllPresent: async () => 0 };
+    : { roster: [], loading: false, setStatus: async () => {} };
 
   const isAdmin = user === 'owner' || user === 'admin' || user === 'hr';
   const hasAll  = isAdmin || !!(userAccess && userAccess.all_sections);
@@ -7053,15 +7024,6 @@ const MarkAttendanceScreen = () => {
 
   const markedCount = roster.filter(p => p.status !== null).length;
   const unmarkedCount = roster.length - markedCount;
-
-  const markAllPresent = async () => {
-    if (!canEdit) { toast('You don\u2019t have attendance edit rights'); return; }
-    const n = await persistMarkAll(
-      p => (section === 'all' || p.section === section) && (hasAll || allowed.includes(p.section)),
-      userId || 'E001'
-    );
-    toast(n ? `Marked ${n} staff as present` : 'Nothing pending');
-  };
 
   // Each status tap already persists immediately (per-tap upsert), so there
   // is nothing to "save" on exit — this just returns to the previous screen.
@@ -7174,16 +7136,8 @@ const MarkAttendanceScreen = () => {
         background: 'linear-gradient(180deg, rgba(250,248,245,0) 0%, rgba(250,248,245,0.95) 40%, rgba(250,248,245,1) 100%)',
         display: 'flex', gap: 8,
       }}>
-        <button onClick={markAllPresent} style={{
-          flex: 1, background: T_.surface, border: `1px solid ${T_.border}`,
-          borderRadius: 14, padding: '14px', fontSize: 13, fontWeight: 600,
-          color: T_.ink, cursor: 'pointer', fontFamily: 'inherit',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-        }}>
-          <Icon name="check" size={16} /> Mark all present
-        </button>
         <button onClick={done} style={{
-          flex: 1.2, background: T_.maroon, border: 'none',
+          flex: 1, background: T_.maroon, border: 'none',
           borderRadius: 14, padding: '14px', fontSize: 13, fontWeight: 600,
           color: '#fff', cursor: 'pointer', fontFamily: 'inherit',
           boxShadow: '0 6px 16px -6px rgba(139, 35, 35, 0.45)',
