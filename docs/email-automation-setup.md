@@ -34,6 +34,18 @@ That's it. The function reads `RESEND_API_KEY` from the environment; no redeploy
 needed. The next scheduled run (or any automation whose send-time has passed
 today) will email.
 
+### Sender address (RESEND_FROM)
+By default the function sends from Resend's built-in test sender
+`onboarding@resend.dev`, so you can verify the whole pipeline **before** the
+domain is verified. In test mode Resend only delivers to your own account email.
+Once `seematti.app` is verified (step 2), add another secret:
+
+```
+RESEND_FROM = Seematti Reports <reports@seematti.app>
+```
+
+Then mail is sent from your domain to any recipient.
+
 ## How sending works / dedupe
 - The cron runs every 15 min. An automation fires once per day, at the first run
   at/after its `send_time` (IST). `last_sent_on` prevents resends the same day.

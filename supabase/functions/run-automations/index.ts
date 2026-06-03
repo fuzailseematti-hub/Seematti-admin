@@ -4,7 +4,10 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 // requested report via Resend. Gated by an internal cron secret stored in
 // public.app_config (read with the service role). Set RESEND_API_KEY as an
 // edge-function secret to enable sending (see docs/email-automation-setup.md).
-const FROM = "Seematti Reports <reports@seematti.app>";
+// FROM address. Defaults to Resend's built-in test sender so you can verify the
+// pipeline before your domain is verified. Once seematti.app is verified in
+// Resend, set the RESEND_FROM secret to "Seematti Reports <reports@seematti.app>".
+const FROM = Deno.env.get("RESEND_FROM") || "Seematti Reports <onboarding@resend.dev>";
 const IST = "Asia/Kolkata";
 
 const sb = createClient(
