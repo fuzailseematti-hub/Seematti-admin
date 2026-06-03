@@ -7172,7 +7172,7 @@ const KioskSettingsPage = () => {
   const toast = useToast();
   const { can } = useContext(AppCtx);
 
-  const [settings, setSettings] = useState({ late_cutoff: '10:00', match_threshold: '0.55', kiosk_pin: '0000', checkin_start: '08:00', late_cutoff_men: '10:00', late_cutoff_women: '09:30' });
+  const [settings, setSettings] = useState({ late_cutoff: '10:00', match_threshold: '0.55', kiosk_pin: '0000', checkin_start: '08:00', late_cutoff_men: '10:00', late_cutoff_women: '09:30', early_cutoff_men: '22:00', early_cutoff_women: '20:00' });
   const [loading, setLoading] = useState(true);
   const [savingKey, setSavingKey] = useState(null);
 
@@ -7182,12 +7182,12 @@ const KioskSettingsPage = () => {
   const fetchAll = useCallback(async () => {
     if (!window.sb) return;
     const [setRes, staffRes, facesRes] = await Promise.all([
-      window.sb.from('settings').select('*').in('key', ['late_cutoff', 'match_threshold', 'kiosk_pin', 'checkin_start', 'late_cutoff_men', 'late_cutoff_women']),
+      window.sb.from('settings').select('*').in('key', ['late_cutoff', 'match_threshold', 'kiosk_pin', 'checkin_start', 'late_cutoff_men', 'late_cutoff_women', 'early_cutoff_men', 'early_cutoff_women']),
       window.sb.from('employees').select('id, name, role, section_id')
         .neq('user_type', 'owner').eq('is_active', true),
       window.sb.from('face_embeddings').select('employee_id'),
     ]);
-    const s = { late_cutoff: '10:00', match_threshold: '0.55', kiosk_pin: '0000', checkin_start: '08:00', late_cutoff_men: '10:00', late_cutoff_women: '09:30' };
+    const s = { late_cutoff: '10:00', match_threshold: '0.55', kiosk_pin: '0000', checkin_start: '08:00', late_cutoff_men: '10:00', late_cutoff_women: '09:30', early_cutoff_men: '22:00', early_cutoff_women: '20:00' };
     (setRes.data || []).forEach(r => { s[r.key] = r.value; });
     setSettings(s);
 
@@ -7234,9 +7234,11 @@ const KioskSettingsPage = () => {
     setSavingKey('timings');
     try {
       const rows = [
-        { key: 'checkin_start',     value: settings.checkin_start },
-        { key: 'late_cutoff_men',   value: settings.late_cutoff_men },
-        { key: 'late_cutoff_women', value: settings.late_cutoff_women },
+        { key: 'checkin_start',      value: settings.checkin_start },
+        { key: 'late_cutoff_men',    value: settings.late_cutoff_men },
+        { key: 'late_cutoff_women',  value: settings.late_cutoff_women },
+        { key: 'early_cutoff_men',   value: settings.early_cutoff_men },
+        { key: 'early_cutoff_women', value: settings.early_cutoff_women },
       ].map(r => ({ ...r, updated_at: new Date().toISOString() }));
       const { error } = await window.sb.from('settings').upsert(rows, { onConflict: 'key' });
       toast(error ? 'Could not save' : 'Saved');
@@ -7274,7 +7276,7 @@ const KioskSettingsPage = () => {
             letterSpacing: -0.3, marginBottom: 4,
           }}>Shift timings</div>
           <div style={{ fontSize: 13, color: 'var(--inkMuted)', marginBottom: 16 }}>
-            Scans before <strong>check-in start</strong> count as check-out (handles after-midnight). A check-in at/after the gender cutoff is marked <strong>Late</strong>.
+            Scans before <strong>check-in start</strong> count as check-out (handles after-midnight). A check-in at/after the gender cutoff is marked <strong>Late</strong>; a check-out <em>before</em> the gender closing time is flagged as <strong>Left early</strong>.
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
             <div>
@@ -7294,6 +7296,18 @@ const KioskSettingsPage = () => {
               <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Ladies — late after</label>
               <input type="time" value={settings.late_cutoff_women} disabled={readOnly}
                 onChange={e => setSettings(s => ({ ...s, late_cutoff_women: e.target.value }))}
+                style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 16, height: 42, width: '100%', boxSizing: 'border-box' }} />
+            </div>
+            <div>
+              <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Men — left early before</label>
+              <input type="time" value={settings.early_cutoff_men} disabled={readOnly}
+                onChange={e => setSettings(s => ({ ...s, early_cutoff_men: e.target.value }))}
+                style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 16, height: 42, width: '100%', boxSizing: 'border-box' }} />
+            </div>
+            <div>
+              <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Ladies — left early before</label>
+              <input type="time" value={settings.early_cutoff_women} disabled={readOnly}
+                onChange={e => setSettings(s => ({ ...s, early_cutoff_women: e.target.value }))}
                 style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 16, height: 42, width: '100%', boxSizing: 'border-box' }} />
             </div>
           </div>
@@ -10588,12 +10602,13 @@ const DailyReportPage = () => {
   const [att, setAtt] = useState([]);
   const [leaves, setLeaves] = useState([]);
   const [free, setFree] = useState([]);
+  const [cuts, setCuts] = useState({ checkin_start: '08:00', early_cutoff_men: '22:00', early_cutoff_women: '20:00' });
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     if (!window.sb) return;
     setLoading(true);
-    const [eRes, aRes, lRes, fRes] = await Promise.all([
+    const [eRes, aRes, lRes, fRes, sRes] = await Promise.all([
       window.sb.from('employees').select('id, name, role, section_id, user_type, gender')
         .eq('is_active', true).order('name'),
       window.sb.from('attendance').select('employee_id, status, punch_in_time, punch_out_time')
@@ -10601,11 +10616,15 @@ const DailyReportPage = () => {
       window.sb.from('leave_requests').select('employee_id, from_date, days, type, status')
         .eq('status', 'approved').lte('from_date', date).gte('from_date', addDaysISO(date, -60)),
       window.sb.from('free_leaves').select('employee_id').eq('leave_date', date),
+      window.sb.from('settings').select('key, value').in('key', ['checkin_start', 'early_cutoff_men', 'early_cutoff_women']),
     ]);
     setEmps(eRes.data || []);
     setAtt(aRes.data || []);
     setLeaves(lRes.data || []);
     setFree(fRes.data || []);
+    const cs = { checkin_start: '08:00', early_cutoff_men: '22:00', early_cutoff_women: '20:00' };
+    (sRes.data || []).forEach(r => { cs[r.key] = r.value; });
+    setCuts(cs);
     setLoading(false);
   }, [date]);
   useEffect(() => { load(); }, [load]);
@@ -10618,6 +10637,8 @@ const DailyReportPage = () => {
       if (date >= l.from_date && date <= end) leaveBy[l.employee_id] = l.type || 'Leave';
     });
     const freeBy = {}; (free || []).forEach(f => { freeBy[f.employee_id] = true; });
+    const startB = (cuts.checkin_start || '08:00').slice(0, 5);
+    const womanSet = ['female', 'f', 'woman', 'women', 'ladies', 'lady'];
     const roster = (emps || []).filter(e => e.user_type !== 'owner');
     return roster.map(e => {
       const a = attBy[e.id];
@@ -10631,17 +10652,24 @@ const DailyReportPage = () => {
       } else {
         status = 'absent';
       }
+      // Left early: a real checkout, during the day (not an after-midnight
+      // close), before this person's gender closing time.
+      const out5 = a?.punch_out_time ? String(a.punch_out_time).slice(0, 5) : null;
+      const isWoman = womanSet.includes(String(e.gender || '').toLowerCase());
+      const closeCut = ((isWoman ? cuts.early_cutoff_women : cuts.early_cutoff_men) || '').slice(0, 5);
+      const early = !!(out5 && (status === 'present' || status === 'late')
+        && out5 >= startB && closeCut && out5 < closeCut);
       return {
         id: e.id, name: e.name, role: e.role, section_id: e.section_id, status,
         in: a?.punch_in_time || null, out: a?.punch_out_time || null,
-        leaveType,
+        leaveType, early,
       };
     });
-  }, [emps, att, leaves, free, date]);
+  }, [emps, att, leaves, free, date, cuts]);
 
   const totals = useMemo(() => {
-    const t = { present: 0, late: 0, on_leave: 0, absent: 0 };
-    rows.forEach(r => { t[r.status] = (t[r.status] || 0) + 1; });
+    const t = { present: 0, late: 0, on_leave: 0, absent: 0, early: 0 };
+    rows.forEach(r => { t[r.status] = (t[r.status] || 0) + 1; if (r.early) t.early++; });
     return t;
   }, [rows]);
 
@@ -10657,7 +10685,7 @@ const DailyReportPage = () => {
       label: (sectionsList.find(s => s.id === k)?.label) || SECTION_META[k]?.full
              || (k === '__none' ? 'No section' : k),
       list: byId[k].slice().sort((a, b) => (DR_ORDER[a.status] - DR_ORDER[b.status]) || a.name.localeCompare(b.name)),
-      counts: byId[k].reduce((c, r) => { c[r.status] = (c[r.status] || 0) + 1; return c; }, {}),
+      counts: byId[k].reduce((c, r) => { c[r.status] = (c[r.status] || 0) + 1; if (r.early) c.early = (c.early || 0) + 1; return c; }, {}),
     }));
   }, [rows, sectionsList]);
 
@@ -10667,14 +10695,16 @@ const DailyReportPage = () => {
     const data = [];
     sections.forEach(sec => sec.list.forEach(r => data.push({
       section: sec.label, name: r.name, id: r.id, role: r.role || '',
-      status: DR_STATUS[r.status].label, in: fmtT(r.in), out: fmtT(r.out), leave: r.leaveType || '',
+      status: DR_STATUS[r.status].label, in: fmtT(r.in), out: fmtT(r.out),
+      early: r.early ? 'Yes' : '', leave: r.leaveType || '',
     })));
     if (!data.length) { toast('Nothing to export'); return; }
     downloadCSV(`daily_attendance_${date}.csv`, toCSV(data, [
       { label: 'Section', value: 'section' }, { label: 'Employee', value: 'name' },
       { label: 'ID', value: 'id' }, { label: 'Role', value: 'role' },
       { label: 'Status', value: 'status' }, { label: 'In', value: 'in' },
-      { label: 'Out', value: 'out' }, { label: 'Leave type', value: 'leave' },
+      { label: 'Out', value: 'out' }, { label: 'Left early', value: 'early' },
+      { label: 'Leave type', value: 'leave' },
     ]));
   };
 
@@ -10710,6 +10740,7 @@ const DailyReportPage = () => {
         <div className="stat late"><div className="k">Late</div><div className="v">{totals.late}</div></div>
         <div className="stat leave"><div className="k">On leave</div><div className="v">{totals.on_leave}</div></div>
         <div className="stat"><div className="k">Absent</div><div className="v">{totals.absent}</div></div>
+        <div className="stat"><div className="k">Left early</div><div className="v" style={{ color: '#C0392B' }}>{totals.early}</div></div>
         <div className="stat"><div className="k">Total</div><div className="v">{rows.length}</div></div>
       </div>
 
@@ -10720,7 +10751,7 @@ const DailyReportPage = () => {
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', borderBottom: '2px solid var(--border)', paddingBottom: 6, marginBottom: 8 }}>
             <div style={{ fontWeight: 700, fontSize: 15 }}>{sec.label}</div>
             <div style={{ fontSize: 12, color: 'var(--inkMuted)' }}>
-              Present {sec.counts.present || 0} · Late {sec.counts.late || 0} · Leave {sec.counts.on_leave || 0} · Absent {sec.counts.absent || 0}
+              Present {sec.counts.present || 0} · Late {sec.counts.late || 0} · Leave {sec.counts.on_leave || 0} · Absent {sec.counts.absent || 0}{sec.counts.early ? <span style={{ color: '#C0392B' }}> · Early {sec.counts.early}</span> : null}
             </div>
           </div>
           <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
@@ -10737,8 +10768,8 @@ const DailyReportPage = () => {
                 <tr key={r.id} style={{ borderTop: '1px solid var(--borderSoft, var(--border))' }}>
                   <td style={{ padding: '5px 8px' }}>{r.name} <span style={{ fontSize: 11, color: 'var(--inkMuted)' }}>{r.id}</span></td>
                   <td style={{ padding: '5px 8px' }}>{chip(r.status, r.leaveType)}</td>
-                  <td style={{ padding: '5px 8px', fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{fmtT(r.in)}</td>
-                  <td style={{ padding: '5px 8px', fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{fmtT(r.out)}</td>
+                  <td style={{ padding: '5px 8px', fontFamily: 'JetBrains Mono, Menlo, monospace', color: r.status === 'late' ? '#C0392B' : 'inherit', fontWeight: r.status === 'late' ? 700 : 400 }}>{fmtT(r.in)}</td>
+                  <td style={{ padding: '5px 8px', fontFamily: 'JetBrains Mono, Menlo, monospace', color: r.early ? '#C0392B' : 'inherit', fontWeight: r.early ? 700 : 400 }}>{fmtT(r.out)}{r.early ? <span style={{ fontFamily: 'system-ui, sans-serif', fontSize: 10, fontWeight: 700, marginLeft: 5 }}>EARLY</span> : null}</td>
                 </tr>
               ))}
             </tbody>
