@@ -886,6 +886,7 @@ const NAV = [
   ]},
   { section: 'Account', items: [
     { id: 'profile',  label: 'Profile',  area: '__everyone' },
+    { id: 'automations', label: 'Email automations', area: '__ownerAdmin' },
     { id: 'settings', label: 'Settings', area: '__ownerAdmin' },
   ]},
 ];
@@ -10865,6 +10866,122 @@ const MonthlyLeavePage = () => {
   );
 };
 
+const AUTO_TYPES = {
+  daily_attendance: 'Daily attendance report — today’s present / late / absent, section-wise',
+  next_day_leave:   'Next-day leave report — who’s on leave tomorrow, section-wise',
+};
+
+const AutomationsPage = () => {
+  const toast = useToast();
+  const [list, setList] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [editing, setEditing] = useState(null);
+
+  const load = useCallback(async () => {
+    if (!window.sb) return;
+    const { data } = await window.sb.from('automations').select('*').order('created_at');
+    setList(data || []);
+    setLoading(false);
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const startNew  = () => setEditing({ _new: true, type: 'daily_attendance', name: '', recipientsText: '', send_time: '09:30', enabled: true });
+  const startEdit = (a) => setEditing({ ...a, _new: false, recipientsText: (a.recipients || []).join(', ') });
+
+  const save = async () => {
+    const recipients = (editing.recipientsText || '').split(/[\s,;]+/).map(s => s.trim()).filter(Boolean);
+    if (!recipients.length) { toast('Add at least one recipient email'); return; }
+    const bad = recipients.find(r => !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(r));
+    if (bad) { toast(`Invalid email: ${bad}`); return; }
+    const payload = {
+      type: editing.type, name: (editing.name || '').trim() || null,
+      recipients, send_time: editing.send_time, enabled: !!editing.enabled,
+      updated_at: new Date().toISOString(),
+    };
+    const { error } = editing._new
+      ? await window.sb.from('automations').insert(payload)
+      : await window.sb.from('automations').update(payload).eq('id', editing.id);
+    if (error) { toast('Could not save'); console.error(error); return; }
+    setEditing(null); toast('Saved'); load();
+  };
+  const toggle = async (a) => { const { error } = await window.sb.from('automations').update({ enabled: !a.enabled, updated_at: new Date().toISOString() }).eq('id', a.id); if (error) toast('Could not update'); else load(); };
+  const del = async (a) => { if (!window.confirm('Delete this automation?')) return; const { error } = await window.sb.from('automations').delete().eq('id', a.id); if (error) toast('Could not delete'); else load(); };
+
+  const fld = { width: '100%', boxSizing: 'border-box', padding: '9px 11px', borderRadius: 9, border: '1px solid var(--border)', fontSize: 13, fontFamily: 'inherit' };
+
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 10 }}>
+        <div style={{ fontSize: 12.5, color: 'var(--inkMuted)', maxWidth: 640 }}>
+          Scheduled report emails. They run automatically (checked every 15 min) and send at the time you set, in IST.
+          Sending requires the Resend email key to be configured — see the project setup notes if emails aren't arriving.
+        </div>
+        <button className="btn primary" onClick={startNew}>+ New automation</button>
+      </div>
+
+      {loading ? <div style={{ padding: 20, color: 'var(--inkMuted)' }}>Loading…</div> :
+       list.length === 0 ? <div style={{ padding: 20, color: 'var(--inkMuted)' }}>No automations yet. Add one to start emailing reports.</div> :
+       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+         {list.map(a => (
+           <div key={a.id} style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, padding: '12px 16px' }}>
+             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
+               <div style={{ flex: 1, minWidth: 220 }}>
+                 <div style={{ fontWeight: 600, fontSize: 14 }}>{a.name || (a.type === 'next_day_leave' ? 'Next-day leave' : 'Daily attendance')}
+                   <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, color: a.enabled ? '#0E7C3A' : 'var(--inkMuted)' }}>{a.enabled ? '● On' : '○ Off'}</span>
+                 </div>
+                 <div style={{ fontSize: 12, color: 'var(--inkMuted)', marginTop: 3 }}>{AUTO_TYPES[a.type]}</div>
+                 <div style={{ fontSize: 12, color: 'var(--inkMuted)', marginTop: 3 }}>
+                   Sends at <strong>{String(a.send_time).slice(0,5)}</strong> · To: {(a.recipients || []).join(', ') || '—'}
+                   {a.last_sent_on ? ` · last sent ${a.last_sent_on}` : ''}
+                 </div>
+               </div>
+               <div style={{ display: 'flex', gap: 6 }}>
+                 <button className="btn" onClick={() => toggle(a)}>{a.enabled ? 'Disable' : 'Enable'}</button>
+                 <button className="btn" onClick={() => startEdit(a)}>Edit</button>
+                 <button className="btn" onClick={() => del(a)}>Delete</button>
+               </div>
+             </div>
+           </div>
+         ))}
+       </div>
+      }
+
+      {editing && (
+        <div onClick={() => setEditing(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 200, padding: 16 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: 'var(--surface)', borderRadius: 14, padding: 22, width: 460, maxWidth: '100%', maxHeight: '90vh', overflowY: 'auto' }}>
+            <h2 style={{ marginTop: 0 }}>{editing._new ? 'New automation' : 'Edit automation'}</h2>
+
+            <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Report type</label>
+            <select value={editing.type} onChange={e => setEditing({ ...editing, type: e.target.value })} style={{ ...fld, cursor: 'pointer', marginBottom: 12 }}>
+              <option value="daily_attendance">Daily attendance (today)</option>
+              <option value="next_day_leave">Next-day leave (tomorrow)</option>
+            </select>
+
+            <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Name (optional)</label>
+            <input value={editing.name} onChange={e => setEditing({ ...editing, name: e.target.value })} placeholder="e.g. Morning attendance" style={{ ...fld, marginBottom: 12 }} />
+
+            <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Recipient emails (comma or space separated)</label>
+            <textarea value={editing.recipientsText} onChange={e => setEditing({ ...editing, recipientsText: e.target.value })} placeholder="owner@seematti.app, hr@seematti.app" rows={2} style={{ ...fld, resize: 'vertical', marginBottom: 12 }} />
+
+            <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Send time (IST)</label>
+            <input type="time" value={String(editing.send_time).slice(0,5)} onChange={e => setEditing({ ...editing, send_time: e.target.value })} style={{ ...fld, marginBottom: 12 }} />
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, cursor: 'pointer' }}>
+              <input type="checkbox" checked={!!editing.enabled} onChange={e => setEditing({ ...editing, enabled: e.target.checked })} />
+              <span style={{ fontSize: 13 }}>Enabled</span>
+            </label>
+
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button className="btn" onClick={() => setEditing(null)}>Cancel</button>
+              <button className="btn primary" onClick={save}>Save</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const Page = ({ name }) => {
   if (name === 'attendance')    return <AttendancePage />;
   if (name === 'daily')         return <DailyReportPage />;
@@ -10882,6 +10999,7 @@ const Page = ({ name }) => {
   if (name === 'kiosk')         return <KioskSettingsPage />;
   if (name === 'team_access')   return <TeamAccessPage />;
   if (name === 'profile')       return <ProfilePage />;
+  if (name === 'automations')   return <AutomationsPage />;
   if (name === 'settings')      return <SettingsPage />;
   if (name === 'customers')     return <CustomersPage />;
   if (name === 'interactions')  return <InteractionsPage />;
