@@ -1098,7 +1098,7 @@ const useLiveAttendance = () => {
       window.sb
         .from('employees')
         .select('*', { count: 'exact', head: true })
-        .eq('user_type', 'staff')
+        .neq('user_type', 'owner')
         .eq('is_active', true),
       window.sb
         .from('attendance')
@@ -1202,7 +1202,7 @@ const useLiveRoster = () => {
     const { data: emp } = await window.sb
       .from('employees')
       .select('id, name, role, section_id, user_type, is_active')
-      .eq('user_type', 'staff')
+      .neq('user_type', 'owner')
       .eq('is_active', true)
       .order('id');
 
