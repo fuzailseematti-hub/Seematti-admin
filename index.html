@@ -10302,6 +10302,13 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     // cached role/id in localStorage. Restore the session from it.
     (async () => {
       if (!window.sb) { setStack(['login']); return; }
+      // Kiosk mode has no login session — restore it (and its PIN) from cache so
+      // a reload/remount doesn't drop the tablet to the login screen.
+      if (saved.user === 'kiosk' && saved.kioskPin) {
+        window.__kioskPin = saved.kioskPin;
+        setUser('kiosk'); setUserId(null); setStack(['kiosk']);
+        return;
+      }
       const { data: { session } } = await window.sb.auth.getSession();
       if (session?.user) {
         const { data } = await window.sb
@@ -10323,7 +10330,7 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     })();
   }, []);
   useEffect(() => {
-    localStorage.setItem('sundari-state', JSON.stringify({ user, userId, stack, tab, lang }));
+    localStorage.setItem('sundari-state', JSON.stringify({ user, userId, stack, tab, lang, kioskPin: window.__kioskPin || null }));
   }, [user, userId, stack, tab, lang]);
 
   // Fetch the logged-in user's access row so downstream screens can scope
