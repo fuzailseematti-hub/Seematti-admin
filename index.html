@@ -7378,13 +7378,15 @@ const KioskScannerScreen = () => {
     return () => { cancelled = true; clearInterval(id); };
   }, [pin]);
 
-  const persistScan = async (emp, dir) => {
-    if (!window.sb || !pin) return;
-    // Time + late/present status are computed server-side (Asia/Kolkata).
-    const { error } = await window.sb.rpc('kiosk_punch', {
-      p_pin: pin, p_employee_id: emp.id, p_dir: dir,
+  // The server decides check-in vs check-out (8 AM rule, shift day, latest-out)
+  // and returns it. Direction + late/present are authoritative from here.
+  const persistScan = async (emp) => {
+    if (!window.sb || !pin) return null;
+    const { data, error } = await window.sb.rpc('kiosk_scan', {
+      p_pin: pin, p_employee_id: emp.id,
     });
-    if (error) console.error('kiosk_punch failed', error);
+    if (error) { console.error('kiosk_scan failed', error); return null; }
+    return data; // { direction, status, time, shift_date }
   };
 
   // Show the big name card and wait for the user to Confirm or Try again.
@@ -7398,11 +7400,9 @@ const KioskScannerScreen = () => {
   const confirmMatch = async () => {
     if (!current || phase !== 'matched') return;
     const emp = current;
-    const dir = clockedIn.has(emp.id) ? 'out' : 'in';
-    await persistScan(emp, dir);
-    const hh = new Date().getHours() % 12 || 12;
-    const mm = String(new Date().getMinutes()).padStart(2, '0');
-    setRecent(r => [{ ...emp, dir, time: `${hh}:${mm}` }, ...r].slice(0, 6));
+    const res = await persistScan(emp);
+    const dir = res?.direction || (clockedIn.has(emp.id) ? 'out' : 'in');
+    setRecent(r => [{ ...emp, dir, time: res?.time || '' }, ...r].slice(0, 6));
     setClockedIn(s => {
       const ns = new Set(s);
       if (dir === 'in') ns.add(emp.id); else ns.delete(emp.id);
@@ -7492,7 +7492,16 @@ const KioskScannerScreen = () => {
     };
   }, [modelsReady, cameraReady, phase, pin, showMatchUI]);
 
-  const direction = current && clockedIn.has(current.id) ? 'out' : 'in';
+  // Predicted direction for the confirm card (the server decides for real on
+  // scan): clocked-in today -> out; before 8 AM -> out (closing yesterday); else in.
+  const direction = (current && clockedIn.has(current.id))
+    ? 'out'
+    : (now.getHours() < 8 ? 'out' : 'in');
+  const dirIn = direction === 'in';
+  const dirColor     = dirIn ? '#0E7C3A' : '#C0392B';   // green check-in / red check-out
+  const dirColorSoft = dirIn ? '#5BC47E' : '#F0857A';
+  const dirCircleBg  = dirIn ? 'rgba(14,124,58,0.25)' : 'rgba(192,57,43,0.25)';
+  const dirTint      = dirIn ? 'rgba(8,28,18,0.98)'   : 'rgba(34,10,8,0.98)';
   const hh = now.getHours() % 12 || 12;
   const mm = String(now.getMinutes()).padStart(2, '0');
   const ampm = now.getHours() >= 12 ? 'PM' : 'AM';
@@ -7661,7 +7670,7 @@ const KioskScannerScreen = () => {
       {matched && (
         <div style={{
           position: 'absolute', inset: 0,
-          background: 'linear-gradient(180deg, rgba(11,13,14,0.96) 0%, rgba(8,28,18,0.98) 100%)',
+          background: `linear-gradient(180deg, rgba(11,13,14,0.96) 0%, ${dirTint} 100%)`,
           backdropFilter: 'blur(10px)',
           display: 'flex', flexDirection: 'column',
           padding: 'calc(var(--screen-top-sm) + 12px) 22px 28px',
@@ -7672,11 +7681,11 @@ const KioskScannerScreen = () => {
           <div style={{ display: 'flex', justifyContent: 'center', marginTop: 20 }}>
             <div style={{
               width: 118, height: 118, borderRadius: '50%',
-              background: 'rgba(14, 124, 58, 0.25)', border: '3px solid #0E7C3A',
+              background: dirCircleBg, border: `3px solid ${dirColor}`,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              boxShadow: '0 0 50px rgba(14, 124, 58, 0.55)',
+              boxShadow: `0 0 50px ${dirIn ? 'rgba(14,124,58,0.55)' : 'rgba(192,57,43,0.55)'}`,
             }}>
-              <Icon name="check" size={60} color="#5BC47E" />
+              <Icon name={dirIn ? 'check' : 'close'} size={60} color={dirColorSoft} />
             </div>
           </div>
 
@@ -7684,9 +7693,9 @@ const KioskScannerScreen = () => {
           <div style={{ textAlign: 'center', marginTop: 28 }}>
             <div style={{
               fontSize: 11, letterSpacing: 1.4, textTransform: 'uppercase',
-              color: '#5BC47E', fontWeight: 700,
+              color: dirColorSoft, fontWeight: 700,
             }}>
-              {direction === 'in' ? 'Clocking in · உள்நுழைய' : 'Clocking out · வெளியேற'}
+              {dirIn ? 'Check in · உள்நுழைய' : 'Check out · வெளியேற'}
             </div>
             <div style={{
               fontFamily: 'Fraunces, Georgia, serif',
@@ -7703,16 +7712,16 @@ const KioskScannerScreen = () => {
 
           {/* Huge confirm button — designed to be easy to tap */}
           <button onClick={confirmMatch} style={{
-            background: '#0E7C3A', border: 'none', borderRadius: 20,
+            background: dirColor, border: 'none', borderRadius: 20,
             padding: '24px 22px', color: '#fff',
             fontFamily: 'inherit', fontSize: 21, fontWeight: 700,
             letterSpacing: 0.4, cursor: 'pointer',
             display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12,
-            boxShadow: '0 16px 36px -14px rgba(14,124,58,0.7)',
+            boxShadow: `0 16px 36px -14px ${dirIn ? 'rgba(14,124,58,0.7)' : 'rgba(192,57,43,0.7)'}`,
             width: '100%',
           }}>
-            <Icon name="check" size={26} color="#fff" />
-            {direction === 'in' ? 'Confirm clock in' : 'Confirm clock out'}
+            <Icon name={dirIn ? 'check' : 'close'} size={26} color="#fff" />
+            {dirIn ? 'Confirm check in' : 'Confirm check out'}
           </button>
 
           {/* Not me — small link-style button */}

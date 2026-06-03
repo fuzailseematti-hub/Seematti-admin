@@ -857,6 +857,7 @@ const can = (role, area, action='read', session=null) => {
 const NAV = [
   { section: 'Operations', items: [
     { id: 'attendance',    label: 'Attendance',    area: 'attendance' },
+    { id: 'daily',         label: 'Daily report',  area: 'attendance' },
     { id: 'leaves',        label: 'Leave requests',area: 'leaves' },
     { id: 'tasks',         label: 'Tasks',         area: 'tasks' },
     { id: 'announcements', label: 'Announcements', area: 'announcements' },
@@ -1056,7 +1057,7 @@ const useEmployees = () => {
     if (!window.sb) return;
     const { data } = await window.sb
       .from('employees')
-      .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city, employee_code, company, salary_type, monthly_salary, hra, wa, tmb_account_no, esi_no, epf_no, uan_no')
+      .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city, gender, employee_code, company, salary_type, monthly_salary, hra, wa, tmb_account_no, esi_no, epf_no, uan_no')
       .eq('is_active', true)
       .order('id');
     setRows(data || []);
@@ -1583,7 +1584,7 @@ const EmployeesPage = () => {
     if (!window.sb) return;
     const [empRes, faceRes] = await Promise.all([
       window.sb.from('employees')
-        .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city, employee_code, company, salary_type, monthly_salary, hra, wa, tmb_account_no, esi_no, epf_no, uan_no')
+        .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city, gender, employee_code, company, salary_type, monthly_salary, hra, wa, tmb_account_no, esi_no, epf_no, uan_no')
         .order('id'),
       window.sb.from('face_embeddings').select('employee_id'),
     ]);
@@ -1691,6 +1692,7 @@ const EmployeesPage = () => {
       joined_date: editing.joined_date || null,
       phone: (editing.phone || '').trim() || null,
       city: (editing.city || '').trim() || null,
+      gender: editing.gender || null,
       salary_type: editing.user_type === 'owner' ? null : (editing.salary_type || 'new_joined'),
       monthly_salary: numOrNull(editing.monthly_salary),
       hra:            numOrNull(editing.hra),
@@ -2316,6 +2318,22 @@ const EmployeesPage = () => {
                   value={editing.phone || ''}
                   onChange={e => setEditing({ ...editing, phone: e.target.value })}
                   placeholder="+91 ..." />
+              </div>
+            </div>
+
+            <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
+                <label>Gender</label>
+                <select
+                  value={editing.gender || ''}
+                  onChange={e => setEditing({ ...editing, gender: e.target.value || null })}>
+                  <option value="">—</option>
+                  <option value="male">Male</option>
+                  <option value="female">Female</option>
+                </select>
+                <div style={{ fontSize: 11, color: 'var(--inkMuted)', marginTop: 4 }}>
+                  Sets the kiosk late cutoff (ladies 9:30, men 10:00).
+                </div>
               </div>
             </div>
 
@@ -7152,7 +7170,7 @@ const KioskSettingsPage = () => {
   const toast = useToast();
   const { can } = useContext(AppCtx);
 
-  const [settings, setSettings] = useState({ late_cutoff: '10:00', match_threshold: '0.55', kiosk_pin: '0000' });
+  const [settings, setSettings] = useState({ late_cutoff: '10:00', match_threshold: '0.55', kiosk_pin: '0000', checkin_start: '08:00', late_cutoff_men: '10:00', late_cutoff_women: '09:30' });
   const [loading, setLoading] = useState(true);
   const [savingKey, setSavingKey] = useState(null);
 
@@ -7162,12 +7180,12 @@ const KioskSettingsPage = () => {
   const fetchAll = useCallback(async () => {
     if (!window.sb) return;
     const [setRes, staffRes, facesRes] = await Promise.all([
-      window.sb.from('settings').select('*').in('key', ['late_cutoff', 'match_threshold', 'kiosk_pin']),
+      window.sb.from('settings').select('*').in('key', ['late_cutoff', 'match_threshold', 'kiosk_pin', 'checkin_start', 'late_cutoff_men', 'late_cutoff_women']),
       window.sb.from('employees').select('id, name, role, section_id')
         .eq('user_type', 'staff').eq('is_active', true),
       window.sb.from('face_embeddings').select('employee_id'),
     ]);
-    const s = { late_cutoff: '10:00', match_threshold: '0.55', kiosk_pin: '0000' };
+    const s = { late_cutoff: '10:00', match_threshold: '0.55', kiosk_pin: '0000', checkin_start: '08:00', late_cutoff_men: '10:00', late_cutoff_women: '09:30' };
     (setRes.data || []).forEach(r => { s[r.key] = r.value; });
     setSettings(s);
 
@@ -7209,7 +7227,19 @@ const KioskSettingsPage = () => {
     } finally { setSavingKey(null); }
   };
 
-  const saveCutoff = () => writeSetting('late_cutoff', settings.late_cutoff);
+  const saveTimings = async () => {
+    if (!can('attendance', 'edit')) return;
+    setSavingKey('timings');
+    try {
+      const rows = [
+        { key: 'checkin_start',     value: settings.checkin_start },
+        { key: 'late_cutoff_men',   value: settings.late_cutoff_men },
+        { key: 'late_cutoff_women', value: settings.late_cutoff_women },
+      ].map(r => ({ ...r, updated_at: new Date().toISOString() }));
+      const { error } = await window.sb.from('settings').upsert(rows, { onConflict: 'key' });
+      toast(error ? 'Could not save' : 'Saved');
+    } finally { setSavingKey(null); }
+  };
   const saveThreshold = () => writeSetting('match_threshold',
     String(Math.max(0.30, Math.min(0.80, parseFloat(settings.match_threshold) || 0.55)).toFixed(2)));
 
@@ -7240,22 +7270,36 @@ const KioskSettingsPage = () => {
           <div style={{
             fontFamily: 'Fraunces, Georgia, serif', fontSize: 20, fontWeight: 500,
             letterSpacing: -0.3, marginBottom: 4,
-          }}>Late cutoff</div>
+          }}>Shift timings</div>
           <div style={{ fontSize: 13, color: 'var(--inkMuted)', marginBottom: 16 }}>
-            Kiosk punches after this time get marked as <strong>Late</strong> instead of Present.
+            Scans before <strong>check-in start</strong> count as check-out (handles after-midnight). A check-in at/after the gender cutoff is marked <strong>Late</strong>.
           </div>
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-            <input type="time"
-              value={settings.late_cutoff}
-              disabled={readOnly}
-              onChange={e => setSettings(s => ({ ...s, late_cutoff: e.target.value }))}
-              style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 18, height: 44, flex: 1 }} />
-            {!readOnly && (
-              <button className="btn primary" onClick={saveCutoff} disabled={savingKey === 'late_cutoff'}>
-                {savingKey === 'late_cutoff' ? 'Saving…' : 'Save'}
-              </button>
-            )}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+            <div>
+              <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Check-in starts</label>
+              <input type="time" value={settings.checkin_start} disabled={readOnly}
+                onChange={e => setSettings(s => ({ ...s, checkin_start: e.target.value }))}
+                style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 16, height: 42, width: '100%', boxSizing: 'border-box' }} />
+            </div>
+            <div></div>
+            <div>
+              <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Men — late after</label>
+              <input type="time" value={settings.late_cutoff_men} disabled={readOnly}
+                onChange={e => setSettings(s => ({ ...s, late_cutoff_men: e.target.value }))}
+                style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 16, height: 42, width: '100%', boxSizing: 'border-box' }} />
+            </div>
+            <div>
+              <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Ladies — late after</label>
+              <input type="time" value={settings.late_cutoff_women} disabled={readOnly}
+                onChange={e => setSettings(s => ({ ...s, late_cutoff_women: e.target.value }))}
+                style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 16, height: 42, width: '100%', boxSizing: 'border-box' }} />
+            </div>
           </div>
+          {!readOnly && (
+            <button className="btn primary" onClick={saveTimings} disabled={savingKey === 'timings'}>
+              {savingKey === 'timings' ? 'Saving…' : 'Save timings'}
+            </button>
+          )}
         </div>
 
         <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 24 }}>
@@ -10518,8 +10562,184 @@ const MuhurthamEditModal = ({ open, draft, customers, onChange, onClose, onSave,
   );
 };
 
+// ──────────────────────────────────────────────────────────
+// Daily attendance report — section-wise present / late / on-leave / absent
+// with entry & exit times. Designed to be read or printed in the morning.
+// ──────────────────────────────────────────────────────────
+const addDaysISO = (iso, n) => {
+  const d = new Date(iso + 'T00:00:00'); d.setDate(d.getDate() + n);
+  return fmtDateISO(d);
+};
+const DR_STATUS = {
+  present:  { label: 'Present',  fg: '#0E7C3A', bg: 'rgba(14,124,58,0.12)' },
+  late:     { label: 'Late',     fg: '#B8860B', bg: 'rgba(184,134,11,0.14)' },
+  on_leave: { label: 'On leave', fg: '#2B6CB0', bg: 'rgba(43,108,176,0.12)' },
+  absent:   { label: 'Absent',   fg: '#C0392B', bg: 'rgba(192,57,43,0.12)' },
+};
+const DR_ORDER = { present: 0, late: 1, on_leave: 2, absent: 3 };
+
+const DailyReportPage = () => {
+  const toast = useToast();
+  const sectionsList = useLiveSections();
+  const [date, setDate] = useState(() => fmtDateISO(new Date()));
+  const [emps, setEmps] = useState([]);
+  const [att, setAtt] = useState([]);
+  const [leaves, setLeaves] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    if (!window.sb) return;
+    setLoading(true);
+    const [eRes, aRes, lRes] = await Promise.all([
+      window.sb.from('employees').select('id, name, role, section_id, user_type, gender')
+        .eq('is_active', true).order('name'),
+      window.sb.from('attendance').select('employee_id, status, punch_in_time, punch_out_time')
+        .eq('date', date),
+      window.sb.from('leave_requests').select('employee_id, from_date, days, type, status')
+        .eq('status', 'approved').lte('from_date', date).gte('from_date', addDaysISO(date, -60)),
+    ]);
+    setEmps(eRes.data || []);
+    setAtt(aRes.data || []);
+    setLeaves(lRes.data || []);
+    setLoading(false);
+  }, [date]);
+  useEffect(() => { load(); }, [load]);
+
+  const rows = useMemo(() => {
+    const attBy = {}; (att || []).forEach(a => { attBy[a.employee_id] = a; });
+    const leaveBy = {};
+    (leaves || []).forEach(l => {
+      const end = addDaysISO(l.from_date, Math.max(0, (Number(l.days) || 1) - 1));
+      if (date >= l.from_date && date <= end) leaveBy[l.employee_id] = l.type || 'Leave';
+    });
+    const roster = (emps || []).filter(e => e.user_type === 'staff' || attBy[e.id] || leaveBy[e.id]);
+    return roster.map(e => {
+      const a = attBy[e.id];
+      let status;
+      if (a && (a.status === 'present' || a.status === 'late')) status = a.status;
+      else if (leaveBy[e.id] || a?.status === 'on_leave') status = 'on_leave';
+      else status = 'absent';
+      return {
+        id: e.id, name: e.name, role: e.role, section_id: e.section_id, status,
+        in: a?.punch_in_time || null, out: a?.punch_out_time || null,
+        leaveType: leaveBy[e.id] || null,
+      };
+    });
+  }, [emps, att, leaves, date]);
+
+  const totals = useMemo(() => {
+    const t = { present: 0, late: 0, on_leave: 0, absent: 0 };
+    rows.forEach(r => { t[r.status] = (t[r.status] || 0) + 1; });
+    return t;
+  }, [rows]);
+
+  const sections = useMemo(() => {
+    const order = (sectionsList || []).map(s => s.id);
+    const byId = {};
+    rows.forEach(r => { const k = r.section_id || '__none'; (byId[k] = byId[k] || []).push(r); });
+    return Object.keys(byId).sort((a, b) => {
+      const ia = order.indexOf(a), ib = order.indexOf(b);
+      return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
+    }).map(k => ({
+      id: k,
+      label: (sectionsList.find(s => s.id === k)?.label) || SECTION_META[k]?.full
+             || (k === '__none' ? 'No section' : k),
+      list: byId[k].slice().sort((a, b) => (DR_ORDER[a.status] - DR_ORDER[b.status]) || a.name.localeCompare(b.name)),
+      counts: byId[k].reduce((c, r) => { c[r.status] = (c[r.status] || 0) + 1; return c; }, {}),
+    }));
+  }, [rows, sectionsList]);
+
+  const fmtT = (t) => t ? String(t).slice(0, 5) : '—';
+
+  const downloadCsv = () => {
+    const data = [];
+    sections.forEach(sec => sec.list.forEach(r => data.push({
+      section: sec.label, name: r.name, id: r.id, role: r.role || '',
+      status: DR_STATUS[r.status].label, in: fmtT(r.in), out: fmtT(r.out), leave: r.leaveType || '',
+    })));
+    if (!data.length) { toast('Nothing to export'); return; }
+    downloadCSV(`daily_attendance_${date}.csv`, toCSV(data, [
+      { label: 'Section', value: 'section' }, { label: 'Employee', value: 'name' },
+      { label: 'ID', value: 'id' }, { label: 'Role', value: 'role' },
+      { label: 'Status', value: 'status' }, { label: 'In', value: 'in' },
+      { label: 'Out', value: 'out' }, { label: 'Leave type', value: 'leave' },
+    ]));
+  };
+
+  const chip = (status, leaveType) => (
+    <span style={{
+      display: 'inline-block', padding: '2px 9px', borderRadius: 20, fontSize: 11.5, fontWeight: 600,
+      color: DR_STATUS[status].fg, background: DR_STATUS[status].bg,
+    }}>{DR_STATUS[status].label}{status === 'on_leave' && leaveType ? ` · ${leaveType}` : ''}</span>
+  );
+
+  return (
+    <div>
+      <style>{`@media print {
+        .sidebar, .topbar, [data-print-hide] { display: none !important; }
+        .main { padding: 0 !important; }
+        body { background: #fff !important; }
+        .dr-section { break-inside: avoid; }
+      }`}</style>
+
+      <div className="toolbar" style={{ margin: '0 0 16px', display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }} data-print-hide>
+        <span style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Date</span>
+        <input type="date" value={date} onChange={e => setDate(e.target.value)} />
+        <button className="btn" onClick={() => window.print()}>Print</button>
+        <button className="btn" onClick={downloadCsv}>Download CSV</button>
+      </div>
+
+      <div style={{ fontFamily: 'Fraunces, Georgia, serif', fontSize: 22, fontWeight: 500, marginBottom: 12 }}>
+        Daily attendance · {new Date(date + 'T00:00:00').toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+      </div>
+
+      <div className="stat-strip" style={{ marginBottom: 18 }}>
+        <div className="stat present"><div className="k">Present</div><div className="v">{totals.present}</div></div>
+        <div className="stat late"><div className="k">Late</div><div className="v">{totals.late}</div></div>
+        <div className="stat leave"><div className="k">On leave</div><div className="v">{totals.on_leave}</div></div>
+        <div className="stat"><div className="k">Absent</div><div className="v">{totals.absent}</div></div>
+        <div className="stat"><div className="k">Total</div><div className="v">{rows.length}</div></div>
+      </div>
+
+      {loading ? <div style={{ padding: 20, color: 'var(--inkMuted)' }}>Loading…</div> :
+       sections.length === 0 ? <div style={{ padding: 20, color: 'var(--inkMuted)' }}>No staff to report for this date.</div> :
+       sections.map(sec => (
+        <div key={sec.id} className="dr-section" style={{ marginBottom: 22 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', borderBottom: '2px solid var(--border)', paddingBottom: 6, marginBottom: 8 }}>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>{sec.label}</div>
+            <div style={{ fontSize: 12, color: 'var(--inkMuted)' }}>
+              Present {sec.counts.present || 0} · Late {sec.counts.late || 0} · Leave {sec.counts.on_leave || 0} · Absent {sec.counts.absent || 0}
+            </div>
+          </div>
+          <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ color: 'var(--inkMuted)', fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.4 }}>
+                <th style={{ textAlign: 'left', padding: '4px 8px' }}>Employee</th>
+                <th style={{ textAlign: 'left', padding: '4px 8px', width: 150 }}>Status</th>
+                <th style={{ textAlign: 'left', padding: '4px 8px', width: 70 }}>In</th>
+                <th style={{ textAlign: 'left', padding: '4px 8px', width: 70 }}>Out</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sec.list.map(r => (
+                <tr key={r.id} style={{ borderTop: '1px solid var(--borderSoft, var(--border))' }}>
+                  <td style={{ padding: '5px 8px' }}>{r.name} <span style={{ fontSize: 11, color: 'var(--inkMuted)' }}>{r.id}</span></td>
+                  <td style={{ padding: '5px 8px' }}>{chip(r.status, r.leaveType)}</td>
+                  <td style={{ padding: '5px 8px', fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{fmtT(r.in)}</td>
+                  <td style={{ padding: '5px 8px', fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{fmtT(r.out)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+    </div>
+  );
+};
+
 const Page = ({ name }) => {
   if (name === 'attendance')    return <AttendancePage />;
+  if (name === 'daily')         return <DailyReportPage />;
   if (name === 'employees')     return <EmployeesPage />;
   if (name === 'leaves')        return <LeavesPage />;
   if (name === 'announcements') return <AnnouncementsPage />;
