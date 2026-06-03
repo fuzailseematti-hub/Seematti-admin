@@ -1321,7 +1321,7 @@ const AttendancePage = () => {
   const { byId, loading: attLoading } = useAttendanceForDate(date);
 
   const staff = useMemo(() =>
-    employees.filter(e => e.user_type === 'staff'), [employees]);
+    employees.filter(e => e.user_type !== 'owner'), [employees]);
 
   const rows = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -7183,7 +7183,7 @@ const KioskSettingsPage = () => {
     const [setRes, staffRes, facesRes] = await Promise.all([
       window.sb.from('settings').select('*').in('key', ['late_cutoff', 'match_threshold', 'kiosk_pin', 'checkin_start', 'late_cutoff_men', 'late_cutoff_women']),
       window.sb.from('employees').select('id, name, role, section_id')
-        .eq('user_type', 'staff').eq('is_active', true),
+        .neq('user_type', 'owner').eq('is_active', true),
       window.sb.from('face_embeddings').select('employee_id'),
     ]);
     const s = { late_cutoff: '10:00', match_threshold: '0.55', kiosk_pin: '0000', checkin_start: '08:00', late_cutoff_men: '10:00', late_cutoff_women: '09:30' };
@@ -10617,7 +10617,7 @@ const DailyReportPage = () => {
       if (date >= l.from_date && date <= end) leaveBy[l.employee_id] = l.type || 'Leave';
     });
     const freeBy = {}; (free || []).forEach(f => { freeBy[f.employee_id] = true; });
-    const roster = (emps || []).filter(e => e.user_type === 'staff' || attBy[e.id] || leaveBy[e.id] || freeBy[e.id]);
+    const roster = (emps || []).filter(e => e.user_type !== 'owner');
     return roster.map(e => {
       const a = attBy[e.id];
       let status, leaveType = null;
@@ -10774,7 +10774,7 @@ const MonthlyLeavePage = () => {
     setLoading(true);
     const [eRes, flRes, sRes] = await Promise.all([
       window.sb.from('employees').select('id, name, section_id')
-        .eq('is_active', true).eq('user_type', 'staff').order('name'),
+        .eq('is_active', true).neq('user_type', 'owner').order('name'),
       window.sb.from('free_leaves').select('id, employee_id, leave_date')
         .gte('leave_date', monthStart).lte('leave_date', monthEnd),
       window.sb.from('settings').select('value').eq('key', 'free_leave_per_month').maybeSingle(),
