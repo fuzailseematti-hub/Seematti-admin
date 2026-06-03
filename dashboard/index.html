@@ -10870,6 +10870,7 @@ const AUTO_TYPES = {
   daily_attendance: 'Daily attendance report — today’s present / late / absent, section-wise',
   next_day_leave:   'Next-day leave report — who’s on leave tomorrow, section-wise',
 };
+const ATTACH_LABEL = { none: 'No attachment', pdf: 'PDF attached', csv: 'CSV attached', both: 'PDF + CSV attached' };
 
 const AutomationsPage = () => {
   const toast = useToast();
@@ -10885,7 +10886,7 @@ const AutomationsPage = () => {
   }, []);
   useEffect(() => { load(); }, [load]);
 
-  const startNew  = () => setEditing({ _new: true, type: 'daily_attendance', name: '', recipientsText: '', send_time: '09:30', enabled: true });
+  const startNew  = () => setEditing({ _new: true, type: 'daily_attendance', name: '', recipientsText: '', send_time: '09:30', enabled: true, attach_format: 'pdf' });
   const startEdit = (a) => setEditing({ ...a, _new: false, recipientsText: (a.recipients || []).join(', ') });
 
   const save = async () => {
@@ -10896,6 +10897,7 @@ const AutomationsPage = () => {
     const payload = {
       type: editing.type, name: (editing.name || '').trim() || null,
       recipients, send_time: editing.send_time, enabled: !!editing.enabled,
+      attach_format: editing.attach_format || 'pdf',
       updated_at: new Date().toISOString(),
     };
     const { error } = editing._new
@@ -10932,6 +10934,7 @@ const AutomationsPage = () => {
                  <div style={{ fontSize: 12, color: 'var(--inkMuted)', marginTop: 3 }}>{AUTO_TYPES[a.type]}</div>
                  <div style={{ fontSize: 12, color: 'var(--inkMuted)', marginTop: 3 }}>
                    Sends at <strong>{String(a.send_time).slice(0,5)}</strong> · To: {(a.recipients || []).join(', ') || '—'}
+                   {' · '}{ATTACH_LABEL[a.attach_format] || 'No attachment'}
                    {a.last_sent_on ? ` · last sent ${a.last_sent_on}` : ''}
                  </div>
                </div>
@@ -10965,6 +10968,14 @@ const AutomationsPage = () => {
 
             <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Send time (IST)</label>
             <input type="time" value={String(editing.send_time).slice(0,5)} onChange={e => setEditing({ ...editing, send_time: e.target.value })} style={{ ...fld, marginBottom: 12 }} />
+
+            <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Attach a file (for printing / filing)</label>
+            <select value={editing.attach_format || 'pdf'} onChange={e => setEditing({ ...editing, attach_format: e.target.value })} style={{ ...fld, cursor: 'pointer', marginBottom: 12 }}>
+              <option value="pdf">PDF (printable)</option>
+              <option value="csv">CSV (spreadsheet)</option>
+              <option value="both">PDF + CSV</option>
+              <option value="none">No attachment</option>
+            </select>
 
             <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, cursor: 'pointer' }}>
               <input type="checkbox" checked={!!editing.enabled} onChange={e => setEditing({ ...editing, enabled: e.target.checked })} />
