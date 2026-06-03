@@ -42,11 +42,12 @@ const hhmm = (t: unknown) => (t ? String(t).slice(0, 5) : "—");
 
 async function loadCommon() {
   const [emp, sec] = await Promise.all([
-    sb.from("employees").select("id, name, section_id, user_type, is_active").eq("is_active", true).neq("user_type", "owner"),
+    sb.from("employees").select("id, name, section_id, user_type, is_active, gender").eq("is_active", true).neq("user_type", "owner"),
     sb.from("sections").select("id, name, sort_order").order("sort_order"),
   ]);
   return { emps: emp.data || [], sections: sec.data || [] };
 }
+const WOMAN_SET = ["female", "f", "woman", "women", "ladies", "lady"];
 function sectionGroups(emps: any[], sections: any[]) {
   const order: string[] = sections.map((s) => s.id);
   const label: Record<string, string> = {}; sections.forEach((s) => label[s.id] = s.name);
@@ -57,19 +58,25 @@ function sectionGroups(emps: any[], sections: any[]) {
 }
 
 // ── report models (plain data; rendered to html / csv / pdf below) ──────────
-async function dailyModel() {
-  const { date } = istParts();
+async function dailyModel(offset = 0, opts: any = {}) {
+  const { date: today } = istParts();
+  const date = addDays(today, offset);
   const { emps, sections } = await loadCommon();
-  const [att, lv, fl] = await Promise.all([
+  const [att, lv, fl, setRes] = await Promise.all([
     sb.from("attendance").select("employee_id, status, punch_in_time, punch_out_time").eq("date", date),
     sb.from("leave_requests").select("employee_id, from_date, days, type, status").eq("status", "approved").lte("from_date", date).gte("from_date", addDays(date, -60)),
     sb.from("free_leaves").select("employee_id").eq("leave_date", date),
+    sb.from("settings").select("key, value").in("key", ["checkin_start", "early_cutoff_men", "early_cutoff_women"]),
   ]);
+  const cs: any = { checkin_start: "08:00", early_cutoff_men: "22:00", early_cutoff_women: "20:00" };
+  (setRes.data || []).forEach((r: any) => cs[r.key] = r.value);
+  const startB = String(cs.checkin_start || "08:00").slice(0, 5);
+
   const attBy: Record<string, any> = {}; (att.data || []).forEach((a) => attBy[a.employee_id] = a);
   const leaveBy: Record<string, string> = {};
   (lv.data || []).forEach((l) => { const end = addDays(l.from_date, Math.max(0, (Number(l.days) || 1) - 1)); if (date >= l.from_date && date <= end) leaveBy[l.employee_id] = l.type || "Leave"; });
   const freeBy: Record<string, boolean> = {}; (fl.data || []).forEach((f) => freeBy[f.employee_id] = true);
-  const totals: any = { present: 0, late: 0, on_leave: 0, absent: 0 };
+  const totals: any = { present: 0, late: 0, on_leave: 0, absent: 0, early: 0 };
   const rank: any = { present: 0, late: 1, on_leave: 2, absent: 3 };
 
   const sects = sectionGroups(emps, sections).map((sec) => {
@@ -80,30 +87,40 @@ async function dailyModel() {
       else if (freeBy[e.id]) { st = "on_leave"; lt = "Free leave"; }
       else st = "absent";
       totals[st]++;
+      const out5 = a?.punch_out_time ? String(a.punch_out_time).slice(0, 5) : null;
+      const closeCut = String((WOMAN_SET.includes(String(e.gender || "").toLowerCase()) ? cs.early_cutoff_women : cs.early_cutoff_men) || "").slice(0, 5);
+      const early = !!(out5 && (st === "present" || st === "late") && out5 >= startB && closeCut && out5 < closeCut);
+      if (early) totals.early++;
       const statusText = st === "on_leave" && lt ? `On leave (${lt})` : SLABEL[st];
-      return { name: e.name, st, statusText, tone: TONE[st], in: hhmm(a?.punch_in_time), out: hhmm(a?.punch_out_time) };
+      return { name: e.name, st, statusText, tone: TONE[st], in: hhmm(a?.punch_in_time), out: hhmm(a?.punch_out_time), early };
     }).sort((a: any, b: any) => rank[a.st] - rank[b.st] || a.name.localeCompare(b.name));
-    const c: any = { present: 0, late: 0, on_leave: 0, absent: 0 }; rows.forEach((r: any) => c[r.st]++);
-    const meta = `${rows.length} staff · ${c.present} present, ${c.late} late, ${c.on_leave} leave, ${c.absent} absent`;
+    const c: any = { present: 0, late: 0, on_leave: 0, absent: 0, early: 0 };
+    rows.forEach((r: any) => { c[r.st]++; if (r.early) c.early++; });
+    const meta = `${rows.length} staff · ${c.present} present, ${c.late} late, ${c.on_leave} leave, ${c.absent} absent${c.early ? `, ${c.early} left early` : ""}`;
     return { label: sec.label, meta, rows };
   });
   const total = (totals.present + totals.late + totals.on_leave + totals.absent);
   return {
     kind: "daily",
-    subject: `Daily attendance — ${date}`,
-    title: "Daily Attendance Report",
+    subject: `${opts.subjectLabel || "Daily attendance"} — ${date}`,
+    title: opts.title || "Daily Attendance Report",
     dateLabel: longDate(date),
-    summary: `Total ${total}   Present ${totals.present}   Late ${totals.late}   On leave ${totals.on_leave}   Absent ${totals.absent}`,
-    fileBase: `daily-attendance-${date}`,
+    summary: `Total ${total}   Present ${totals.present}   Late ${totals.late}   On leave ${totals.on_leave}   Absent ${totals.absent}   Left early ${totals.early}`,
+    fileBase: `${opts.fileBase || "daily-attendance"}-${date}`,
     columns: [
       { header: "Employee", x: 44, max: 34 },
-      { header: "Status", x: 300, max: 24 },
-      { header: "Check in", x: 432, max: 8 },
-      { header: "Check out", x: 504, max: 8 },
+      { header: "Status", x: 272, max: 22 },
+      { header: "Check in", x: 398, max: 8 },
+      { header: "Check out", x: 466, max: 16 },
     ],
     sections: sects.map((s) => ({
       label: s.label, meta: s.meta,
-      rows: s.rows.map((r: any) => [{ t: r.name }, { t: r.statusText, c: r.tone }, { t: r.in, c: r.st === "late" ? "#C0392B" : undefined }, { t: r.out }]),
+      rows: s.rows.map((r: any) => [
+        { t: r.name },
+        { t: r.statusText, c: r.tone },
+        { t: r.in, c: r.st === "late" ? "#C0392B" : undefined },
+        { t: r.early ? `${r.out} early` : r.out, c: r.early ? "#C0392B" : undefined },
+      ]),
     })),
   };
 }
@@ -248,8 +265,11 @@ Deno.serve(async (req) => {
     if (!due) { results.push({ id: a.id, skipped: "not due" }); continue; }
     if (!a.recipients || !a.recipients.length) { results.push({ id: a.id, skipped: "no recipients" }); continue; }
     let model: any;
-    try { model = a.type === "next_day_leave" ? await leaveModel() : await dailyModel(); }
-    catch (e) { results.push({ id: a.id, error: String(e) }); continue; }
+    try {
+      if (a.type === "next_day_leave") model = await leaveModel();
+      else if (a.type === "prev_day_attendance") model = await dailyModel(-1, { subjectLabel: "Previous-day attendance", title: "Previous Day Attendance (In / Out)", fileBase: "attendance" });
+      else model = await dailyModel(0);
+    } catch (e) { results.push({ id: a.id, error: String(e) }); continue; }
 
     const fmt = a.attach_format || "none";
     const attachments: any[] = [];
