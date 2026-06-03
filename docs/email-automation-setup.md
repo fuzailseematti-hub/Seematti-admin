@@ -46,6 +46,14 @@ RESEND_FROM = Seematti Reports <reports@seematti.app>
 
 Then mail is sent from your domain to any recipient.
 
+## Attachments (PDF / CSV)
+Each automation has an **Attachment** choice (None / PDF / CSV / PDF + CSV). The
+edge function builds a printable **PDF** (via `pdf-lib`, with the Seemaatti logo
+header, section-wise tables, summary, page numbers) and/or a **CSV** from the
+same report data, and attaches them to the email. The logo is fetched at runtime
+from `https://seematti-admin.vercel.app/assets/seemaatti-logo.png` (falls back to
+a text wordmark if unreachable).
+
 ## How sending works / dedupe
 - The cron runs every 15 min. An automation fires once per day, at the first run
   at/after its `send_time` (IST). `last_sent_on` prevents resends the same day.
