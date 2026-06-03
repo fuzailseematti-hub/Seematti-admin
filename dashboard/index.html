@@ -859,6 +859,7 @@ const NAV = [
     { id: 'attendance',    label: 'Attendance',    area: 'attendance' },
     { id: 'daily',         label: 'Daily report',  area: 'attendance' },
     { id: 'leaves',        label: 'Leave requests',area: 'leaves' },
+    { id: 'free_leave',    label: 'Monthly leave', area: 'leaves' },
     { id: 'tasks',         label: 'Tasks',         area: 'tasks' },
     { id: 'announcements', label: 'Announcements', area: 'announcements' },
     { id: 'visitors',      label: 'Visitor log',   area: 'visitors' },
@@ -10585,22 +10586,25 @@ const DailyReportPage = () => {
   const [emps, setEmps] = useState([]);
   const [att, setAtt] = useState([]);
   const [leaves, setLeaves] = useState([]);
+  const [free, setFree] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     if (!window.sb) return;
     setLoading(true);
-    const [eRes, aRes, lRes] = await Promise.all([
+    const [eRes, aRes, lRes, fRes] = await Promise.all([
       window.sb.from('employees').select('id, name, role, section_id, user_type, gender')
         .eq('is_active', true).order('name'),
       window.sb.from('attendance').select('employee_id, status, punch_in_time, punch_out_time')
         .eq('date', date),
       window.sb.from('leave_requests').select('employee_id, from_date, days, type, status')
         .eq('status', 'approved').lte('from_date', date).gte('from_date', addDaysISO(date, -60)),
+      window.sb.from('free_leaves').select('employee_id').eq('leave_date', date),
     ]);
     setEmps(eRes.data || []);
     setAtt(aRes.data || []);
     setLeaves(lRes.data || []);
+    setFree(fRes.data || []);
     setLoading(false);
   }, [date]);
   useEffect(() => { load(); }, [load]);
@@ -10612,20 +10616,27 @@ const DailyReportPage = () => {
       const end = addDaysISO(l.from_date, Math.max(0, (Number(l.days) || 1) - 1));
       if (date >= l.from_date && date <= end) leaveBy[l.employee_id] = l.type || 'Leave';
     });
-    const roster = (emps || []).filter(e => e.user_type === 'staff' || attBy[e.id] || leaveBy[e.id]);
+    const freeBy = {}; (free || []).forEach(f => { freeBy[f.employee_id] = true; });
+    const roster = (emps || []).filter(e => e.user_type === 'staff' || attBy[e.id] || leaveBy[e.id] || freeBy[e.id]);
     return roster.map(e => {
       const a = attBy[e.id];
-      let status;
-      if (a && (a.status === 'present' || a.status === 'late')) status = a.status;
-      else if (leaveBy[e.id] || a?.status === 'on_leave') status = 'on_leave';
-      else status = 'absent';
+      let status, leaveType = null;
+      if (a && (a.status === 'present' || a.status === 'late')) {
+        status = a.status;                       // attendance wins, even on a free-leave day
+      } else if (leaveBy[e.id] || a?.status === 'on_leave') {
+        status = 'on_leave'; leaveType = leaveBy[e.id] || 'Leave';
+      } else if (freeBy[e.id]) {
+        status = 'on_leave'; leaveType = 'Free leave';
+      } else {
+        status = 'absent';
+      }
       return {
         id: e.id, name: e.name, role: e.role, section_id: e.section_id, status,
         in: a?.punch_in_time || null, out: a?.punch_out_time || null,
-        leaveType: leaveBy[e.id] || null,
+        leaveType,
       };
     });
-  }, [emps, att, leaves, date]);
+  }, [emps, att, leaves, free, date]);
 
   const totals = useMemo(() => {
     const t = { present: 0, late: 0, on_leave: 0, absent: 0 };
@@ -10737,9 +10748,127 @@ const DailyReportPage = () => {
   );
 };
 
+// ──────────────────────────────────────────────────────────
+// Monthly free leave — owner/HR pre-plan each employee's free-leave days
+// (capped per month). Counted as On-leave (not Absent) in the daily report.
+// ──────────────────────────────────────────────────────────
+const MonthlyLeavePage = () => {
+  const toast = useToast();
+  const { role } = useContext(AppCtx);
+  const canEdit = ['owner', 'admin', 'hr'].includes(role);
+  const [month, setMonth] = useState(() => fmtDateISO(new Date()).slice(0, 7)); // YYYY-MM
+  const [emps, setEmps] = useState([]);
+  const [fl, setFl] = useState([]);
+  const [cap, setCap] = useState(4);
+  const [search, setSearch] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  const monthStart = month + '-01';
+  const monthEnd = useMemo(() => {
+    const d = new Date(month + '-01T00:00:00'); d.setMonth(d.getMonth() + 1); d.setDate(0);
+    return fmtDateISO(d);
+  }, [month]);
+
+  const load = useCallback(async () => {
+    if (!window.sb) return;
+    setLoading(true);
+    const [eRes, flRes, sRes] = await Promise.all([
+      window.sb.from('employees').select('id, name, section_id')
+        .eq('is_active', true).eq('user_type', 'staff').order('name'),
+      window.sb.from('free_leaves').select('id, employee_id, leave_date')
+        .gte('leave_date', monthStart).lte('leave_date', monthEnd),
+      window.sb.from('settings').select('value').eq('key', 'free_leave_per_month').maybeSingle(),
+    ]);
+    setEmps(eRes.data || []);
+    setFl(flRes.data || []);
+    setCap(parseInt(sRes.data?.value, 10) || 4);
+    setLoading(false);
+  }, [monthStart, monthEnd]);
+  useEffect(() => { load(); }, [load]);
+
+  const byEmp = useMemo(() => {
+    const m = {};
+    (fl || []).forEach(r => { (m[r.employee_id] = m[r.employee_id] || []).push(r); });
+    Object.values(m).forEach(list => list.sort((a, b) => a.leave_date.localeCompare(b.leave_date)));
+    return m;
+  }, [fl]);
+
+  const addDate = async (empId, d) => {
+    if (!d) return;
+    if (d < monthStart || d > monthEnd) { toast('Pick a date inside the selected month'); return; }
+    const existing = byEmp[empId] || [];
+    if (existing.some(r => r.leave_date === d)) { toast('That date is already added'); return; }
+    if (existing.length >= cap) { toast(`Max ${cap} free days per month`); return; }
+    const { error } = await window.sb.from('free_leaves').insert({ employee_id: empId, leave_date: d });
+    if (error) { toast((error.message || '').toLowerCase().includes('limit') ? `Max ${cap} free days per month` : 'Could not add'); return; }
+    load();
+  };
+  const removeDate = async (id) => {
+    const { error } = await window.sb.from('free_leaves').delete().eq('id', id);
+    if (error) toast('Could not remove'); else load();
+  };
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return (emps || []).filter(e => !q || (e.name || '').toLowerCase().includes(q) || (e.id || '').toLowerCase().includes(q));
+  }, [emps, search]);
+
+  const fmtDay = (iso) => new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+
+  return (
+    <div>
+      <div className="toolbar" style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+        <span style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Month</span>
+        <input type="month" value={month} onChange={e => setMonth(e.target.value)} />
+        <input placeholder="Search employee…" value={search} onChange={e => setSearch(e.target.value)} style={{ flex: 1, minWidth: 150 }} />
+        <span style={{ fontSize: 12, color: 'var(--inkMuted)' }}>{(fl || []).length} day(s) planned · cap {cap}/employee</span>
+      </div>
+
+      <div style={{ fontSize: 12.5, color: 'var(--inkMuted)', marginBottom: 14 }}>
+        Mark each employee's free-leave dates for the month (up to {cap}). These count as <strong>On leave</strong> in the daily report — not absent. If they actually check in that day, it shows Present instead.
+        {!canEdit && <span style={{ color: 'var(--warning)' }}> · Read-only (Owner/Admin/HR can edit).</span>}
+      </div>
+
+      {loading ? <div style={{ padding: 20, color: 'var(--inkMuted)' }}>Loading…</div> :
+       filtered.length === 0 ? <div style={{ padding: 20, color: 'var(--inkMuted)' }}>No staff found.</div> :
+       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+         {filtered.map(e => {
+           const dates = byEmp[e.id] || [];
+           return (
+             <div key={e.id} style={{ display: 'flex', gap: 12, alignItems: 'center', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, padding: '10px 14px', flexWrap: 'wrap' }}>
+               <div style={{ minWidth: 170 }}>
+                 <div style={{ fontWeight: 600, fontSize: 13.5 }}>{e.name}</div>
+                 <div style={{ fontSize: 11.5, color: 'var(--inkMuted)' }}>
+                   {SECTION_META[e.section_id]?.full || e.section_id || '—'} · <strong>{dates.length}/{cap}</strong>
+                 </div>
+               </div>
+               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', flex: 1 }}>
+                 {dates.map(d => (
+                   <span key={d.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: 'rgba(43,108,176,0.1)', color: '#2B6CB0', borderRadius: 20, padding: '3px 10px', fontSize: 12, fontWeight: 600 }}>
+                     {fmtDay(d.leave_date)}
+                     {canEdit && <button onClick={() => removeDate(d.id)} style={{ background: 'none', border: 'none', color: '#2B6CB0', cursor: 'pointer', fontSize: 15, lineHeight: 1, padding: 0 }} title="Remove">×</button>}
+                   </span>
+                 ))}
+                 {canEdit && dates.length < cap && (
+                   <input type="date" min={monthStart} max={monthEnd}
+                     onChange={ev => { const v = ev.target.value; ev.target.value = ''; addDate(e.id, v); }}
+                     style={{ height: 32, fontSize: 12 }} />
+                 )}
+                 {dates.length === 0 && !canEdit && <span style={{ fontSize: 12, color: 'var(--inkMuted)' }}>—</span>}
+               </div>
+             </div>
+           );
+         })}
+       </div>
+      }
+    </div>
+  );
+};
+
 const Page = ({ name }) => {
   if (name === 'attendance')    return <AttendancePage />;
   if (name === 'daily')         return <DailyReportPage />;
+  if (name === 'free_leave')    return <MonthlyLeavePage />;
   if (name === 'employees')     return <EmployeesPage />;
   if (name === 'leaves')        return <LeavesPage />;
   if (name === 'announcements') return <AnnouncementsPage />;
