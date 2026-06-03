@@ -6933,13 +6933,17 @@ const ProfilePage = () => {
     if (newPwd !== cfmPwd) { toast('New password confirmation does not match'); return; }
     setPwdBusy(true);
     try {
-      // Confirm the current password by re-authenticating, then update via
-      // Supabase Auth. (Auth owns the password now — no hashes in our tables.)
-      const email = `${String(employeeId).toLowerCase()}@staff.seematti.local`;
-      const { error: reauthErr } = await window.sb.auth.signInWithPassword({ email, password: curPwd });
-      if (reauthErr) { toast('Current password is wrong'); return; }
-      const { error } = await window.sb.auth.updateUser({ password: newPwd });
-      if (error) { toast('Could not update password'); console.error(error); return; }
+      // set_own_password verifies the current password and sets the new one
+      // directly, so short PIN-style passwords are allowed (not bound by Auth's
+      // self-service minimum length).
+      const { error } = await window.sb.rpc('set_own_password', {
+        p_current_password: curPwd, p_new_password: newPwd,
+      });
+      if (error) {
+        toast((error.message || '').toLowerCase().includes('current password')
+          ? 'Current password is wrong' : 'Could not update password');
+        console.error(error); return;
+      }
       setCurPwd(''); setNewPwd(''); setCfmPwd('');
       toast('Password updated');
     } finally { setPwdBusy(false); }
