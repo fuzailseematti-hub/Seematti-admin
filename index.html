@@ -3797,7 +3797,7 @@ const EmployeeDetailSheet = ({ employeeId, onClose }) => {
     if (!window.sb || !employeeId) return;
     const [empRes, faceRes] = await Promise.all([
       window.sb.from('employees')
-        .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city')
+        .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city, gender')
         .eq('id', employeeId).maybeSingle(),
       window.sb.from('face_embeddings').select('pose').eq('employee_id', employeeId),
     ]);
@@ -3992,6 +3992,7 @@ const MobileEmployeeEditSheet = ({ employee, onClose, onSaved }) => {
     section_id: employee.section_id || '',
     phone: employee.phone || '',
     city: employee.city || '',
+    gender: employee.gender || '',
     is_active: !!employee.is_active,
     joined_date: employee.joined_date || '',
   });
@@ -4014,6 +4015,7 @@ const MobileEmployeeEditSheet = ({ employee, onClose, onSaved }) => {
         section_id: form.section_id || null,
         phone: form.phone.trim() || null,
         city: form.city.trim() || null,
+        gender: form.gender || null,
         is_active: !!form.is_active,
         joined_date: form.joined_date || null,
       }).eq('id', employee.id);
@@ -4062,6 +4064,16 @@ const MobileEmployeeEditSheet = ({ employee, onClose, onSaved }) => {
         <FieldLabel>City / town</FieldLabel>
         <input value={form.city} onChange={e => setForm(f => ({ ...f, city: e.target.value }))}
           placeholder="e.g. Kumbakonam" style={enrollInputStyle(T_)} />
+        <div style={{ height: 12 }} />
+
+        <FieldLabel>Gender (sets late cutoff — ladies 9:30, men 10:00)</FieldLabel>
+        <select value={form.gender}
+          onChange={e => setForm(f => ({ ...f, gender: e.target.value }))}
+          style={{ ...enrollInputStyle(T_), cursor: 'pointer' }}>
+          <option value="">— not set —</option>
+          <option value="male">Male</option>
+          <option value="female">Female</option>
+        </select>
         <div style={{ height: 12 }} />
 
         <FieldLabel>Joined date</FieldLabel>
@@ -7947,7 +7959,7 @@ const EnrollJoinerScreen = () => {
 
   const [step, setStep] = React.useState(0);
   const [details, setDetails] = React.useState({
-    name: '', empId: '', section: 'cotton', role: '',
+    name: '', empId: '', section: 'cotton', role: '', gender: '',
   });
   // Each shot is null | number[128] (the face descriptor).
   const [shots, setShots] = React.useState([null, null, null]);
@@ -7990,6 +8002,7 @@ const EnrollJoinerScreen = () => {
           name:        details.name.trim(),
           role:        details.role.trim(),
           section_id:  details.section,
+          gender:      details.gender || null,
           user_type:   'staff',
           joined_date: todayISO(),
         });
@@ -8146,6 +8159,24 @@ const EnrollDetailsStep = ({ details, setDetails, onNext }) => {
       <EnrollField label="Role">
         <input value={details.role} onChange={e => setDetails(d => ({ ...d, role: e.target.value }))}
           placeholder="e.g. Sales Associate" style={enrollInputStyle(T_)} />
+      </EnrollField>
+
+      <EnrollField label="Gender (sets late cutoff — ladies 9:30, men 10:00)">
+        <div style={{ display: 'flex', gap: 8 }}>
+          {[{ id: 'male', label: 'Male' }, { id: 'female', label: 'Female' }].map(g => {
+            const active = details.gender === g.id;
+            return (
+              <button key={g.id} onClick={() => setDetails(d => ({ ...d, gender: active ? '' : g.id }))}
+                style={{
+                  flex: 1, padding: '12px', borderRadius: 12,
+                  background: active ? 'rgba(139,35,35,0.08)' : T_.surface,
+                  border: `1px solid ${active ? T_.maroon : T_.border}`,
+                  color: active ? T_.maroon : T_.inkSoft,
+                  fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
+                }}>{g.label}</button>
+            );
+          })}
+        </div>
       </EnrollField>
 
       <button onClick={onNext} disabled={!canProceed} style={{
