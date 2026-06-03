@@ -103,7 +103,7 @@ async function dailyModel() {
     ],
     sections: sects.map((s) => ({
       label: s.label, meta: s.meta,
-      rows: s.rows.map((r: any) => [{ t: r.name }, { t: r.statusText, c: r.tone }, { t: r.in }, { t: r.out }]),
+      rows: s.rows.map((r: any) => [{ t: r.name }, { t: r.statusText, c: r.tone }, { t: r.in, c: r.st === "late" ? "#C0392B" : undefined }, { t: r.out }]),
     })),
   };
 }
@@ -199,7 +199,7 @@ async function pdfFrom(m: any): Promise<Uint8Array> {
       const logo = await doc.embedPng(logoBytes);
       const lw = 124, lh = lw * logo.height / logo.width;
       page.drawImage(logo, { x: M, y: y - lh + 4, width: lw, height: lh });
-      y -= (lh + 10); placed = true;
+      y -= (lh + 22); placed = true;
     } catch (_) { /* fall back to text */ }
   }
   if (!placed) { txt("SEEMAATTI", M, 11, bold, MAROON); y -= 20; }
