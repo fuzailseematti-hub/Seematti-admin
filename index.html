@@ -298,7 +298,7 @@
   window.computeFaceDescriptor = async (mediaEl) => {
     const det = await window.faceapi
       .detectSingleFace(mediaEl, new window.faceapi.TinyFaceDetectorOptions({
-        inputSize: 320, scoreThreshold: 0.6,
+        inputSize: 512, scoreThreshold: 0.5,
       }))
       .withFaceLandmarks(true)
       .withFaceDescriptor();
@@ -311,7 +311,7 @@
   window.computeFaceDetection = async (mediaEl) => {
     const det = await window.faceapi
       .detectSingleFace(mediaEl, new window.faceapi.TinyFaceDetectorOptions({
-        inputSize: 320, scoreThreshold: 0.6,
+        inputSize: 512, scoreThreshold: 0.5,
       }))
       .withFaceLandmarks(true)
       .withFaceDescriptor();
@@ -324,12 +324,14 @@
   };
 
   // Cheap presence check — detection only, NO landmarks/descriptor. Used by the
-  // kiosk loop to cheaply confirm a steady, large face before paying for the
-  // (heavy) descriptor + a server match. inputSize 224 is plenty for presence.
+  // kiosk loop to cheaply confirm a steady face before paying for the (heavy)
+  // descriptor + a server match. inputSize 416 (not 224) so faces further back
+  // — small in the frame — are still picked up quickly; the heavier descriptor
+  // step only runs once a face is steady, so this stays fast.
   window.computeFacePresence = async (mediaEl) => {
     const det = await window.faceapi
       .detectSingleFace(mediaEl, new window.faceapi.TinyFaceDetectorOptions({
-        inputSize: 224, scoreThreshold: 0.5,
+        inputSize: 416, scoreThreshold: 0.45,
       }));
     return det ? { box: det.box, score: det.score } : null;
   };
@@ -4140,7 +4142,7 @@ const MobileFaceReEnrollSheet = ({ employee, onClose, onDone }) => {
         setModelsReady(true);
         setHint('Opening camera…');
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+          video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
           audio: false,
         });
         if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
@@ -7267,7 +7269,7 @@ const KioskScannerScreen = () => {
   // Reliability-first matching knobs. The comment block above the
   // match loop below explains each one; defaults chosen to bias
   // STRONGLY towards "try again" when there's any doubt.
-  const MIN_FACE_PX    = 90;   // reject blurry / far-away faces
+  const MIN_FACE_PX    = 60;   // absolute floor; effective gate scales with frame width (see loop)
   const MIN_MARGIN     = 0.08; // best must be this far ahead of 2nd-best (similarity units)
   const CONFIRM_FRAMES = 2;    // same top candidate must agree on N frames in a row
 
@@ -7320,12 +7322,12 @@ const KioskScannerScreen = () => {
         // kiosk still works on devices with a single camera.
         try {
           stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: { ideal: facingMode }, width: { ideal: 640 }, height: { ideal: 480 } },
+            video: { facingMode: { ideal: facingMode }, width: { ideal: 1280 }, height: { ideal: 720 } },
             audio: false,
           });
         } catch (e) {
           stream = await navigator.mediaDevices.getUserMedia({
-            video: { width: { ideal: 640 }, height: { ideal: 480 } },
+            video: { width: { ideal: 1280 }, height: { ideal: 720 } },
             audio: false,
           });
         }
@@ -7488,12 +7490,16 @@ const KioskScannerScreen = () => {
     let inFlight = false;
     const tick = async () => {
       if (cancelled) return;
-      let delay = 180;
+      let delay = 140;
       try {
         const v = videoRef.current;
         if (v && v.readyState >= 2 && !inFlight) {
           const pres = await window.computeFacePresence(v);
-          if (pres && (pres.box?.width || 0) >= MIN_FACE_PX) {
+          // Gate on face size as a FRACTION of the frame so it behaves the same
+          // whether the camera gives 720p or falls back to 480p. ~5.5% of width
+          // (with a 60px floor) lets staff stand comfortably back and still read.
+          const minFaceW = Math.max(MIN_FACE_PX, (v.videoWidth || 1280) * 0.055);
+          if (pres && (pres.box?.width || 0) >= minFaceW) {
             lastFaceSeenAtRef.current = Date.now();
             steadyRef.current += 1;
             if (steadyRef.current >= STEADY_FRAMES) {
@@ -8251,7 +8257,7 @@ const EnrollCaptureStep = ({ shotIdx, shotConfig, captured, onCaptured, onRetake
         setModelsReady(true);
         setHint('Opening camera…');
         streamRef = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+          video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
           audio: false,
         });
         if (cancelled) { streamRef.getTracks().forEach(t => t.stop()); return; }
