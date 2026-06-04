@@ -7431,29 +7431,35 @@ const KioskScannerScreen = () => {
 
   // The server decides check-in vs check-out (8 AM rule, shift day, latest-out)
   // and returns it. Direction + late/present are authoritative from here.
-  const persistScan = async (emp) => {
+  // Persist the chosen kiosk action (check_in / check_out / outpass_out /
+  // outpass_in). The server validates it against the live state.
+  const persistEvent = async (emp, action) => {
     if (!window.sb || !pin) return null;
-    const { data, error } = await window.sb.rpc('kiosk_scan', {
-      p_pin: pin, p_employee_id: emp.id,
+    const { data, error } = await window.sb.rpc('kiosk_event', {
+      p_pin: pin, p_employee_id: emp.id, p_action: action,
     });
-    if (error) { console.error('kiosk_scan failed', error); return null; }
-    return data; // { direction, status, time, shift_date }
+    if (error) { console.error('kiosk_event failed', error); return null; }
+    return data; // { action, time, state, actions, status, shift_date }
   };
 
-  // Show the big name card and wait for the user to Confirm or Try again.
-  // The scan is persisted only when the user taps Confirm, so a wrong
-  // recognition can be rolled back before it hits the DB.
+  // Show the big name card with the state-aware buttons. Nothing is written
+  // until the person taps an action, so a wrong recognition is harmless.
   const showMatchUI = React.useCallback((emp) => {
     setCurrent(emp);
     setPhase('matched');
   }, []);
 
-  const confirmMatch = async () => {
-    if (!current || phase !== 'matched') return;
+  const actionBusyRef = React.useRef(false);
+  const ACTION_DIR = { check_in: 'in', outpass_in: 'in', outpass_out: 'out', check_out: 'out' };
+
+  const chooseAction = async (action) => {
+    if (!current || phase !== 'matched' || actionBusyRef.current) return;
+    actionBusyRef.current = true;
     const emp = current;
-    const res = await persistScan(emp);
-    const dir = res?.direction || (clockedIn.has(emp.id) ? 'out' : 'in');
-    setRecent(r => [{ ...emp, dir, time: res?.time || '' }, ...r].slice(0, 6));
+    const res = await persistEvent(emp, action);
+    const done = res?.action || action;
+    const dir = ACTION_DIR[done] || 'in';
+    setRecent(r => [{ ...emp, dir, time: res?.time || '', action: done }, ...r].slice(0, 6));
     setClockedIn(s => {
       const ns = new Set(s);
       if (dir === 'in') ns.add(emp.id); else ns.delete(emp.id);
@@ -7461,6 +7467,7 @@ const KioskScannerScreen = () => {
     });
     setPhase('idle');
     setCurrent(null);
+    actionBusyRef.current = false;
   };
 
   const tryAgainMatch = () => {
@@ -7472,6 +7479,14 @@ const KioskScannerScreen = () => {
     setCurrent(null);
     setPhase('idle');
   };
+
+  // Auto-dismiss the match card if nobody taps an action within 15s, so it
+  // never gets stuck on someone who walked away mid-choice.
+  React.useEffect(() => {
+    if (phase !== 'matched') return;
+    const t = setTimeout(() => { setCurrent(null); setPhase('idle'); }, 15000);
+    return () => clearTimeout(t);
+  }, [phase]);
 
   const pendingMatchRef = React.useRef(null); // legacy ref (reset by tryAgain)
   // Steady-face counter for the cheap presence pass: only after a large face is
@@ -7523,6 +7538,8 @@ const KioskScannerScreen = () => {
                       role: m.role,
                       section: SECTION_LABEL[m.section_id] || '',
                       confidence: m.similarity,
+                      state: m.state,
+                      actions: Array.isArray(m.actions) ? m.actions : [],
                     });
                     return;
                   }
@@ -7547,16 +7564,6 @@ const KioskScannerScreen = () => {
     };
   }, [modelsReady, cameraReady, phase, pin, showMatchUI]);
 
-  // Predicted direction for the confirm card (the server decides for real on
-  // scan): clocked-in today -> out; before 8 AM -> out (closing yesterday); else in.
-  const direction = (current && clockedIn.has(current.id))
-    ? 'out'
-    : (now.getHours() < 8 ? 'out' : 'in');
-  const dirIn = direction === 'in';
-  const dirColor     = dirIn ? '#0E7C3A' : '#C0392B';   // green check-in / red check-out
-  const dirColorSoft = dirIn ? '#5BC47E' : '#F0857A';
-  const dirCircleBg  = dirIn ? 'rgba(14,124,58,0.25)' : 'rgba(192,57,43,0.25)';
-  const dirTint      = dirIn ? 'rgba(8,28,18,0.98)'   : 'rgba(34,10,8,0.98)';
   const hh = now.getHours() % 12 || 12;
   const mm = String(now.getMinutes()).padStart(2, '0');
   const ampm = now.getHours() >= 12 ? 'PM' : 'AM';
@@ -7721,40 +7728,51 @@ const KioskScannerScreen = () => {
         </div>
       )}
 
-      {/* Matched state — full-screen takeover so nothing can overlap. */}
-      {matched && (
+      {/* Matched state — full-screen takeover so nothing can overlap.
+          Buttons depend on the person's current state (from the server):
+          needs check-in, inside (check out / outpass), or on outpass (return). */}
+      {matched && (() => {
+        const acts = current.actions || [];
+        const twoChoice = acts.includes('check_out') && acts.includes('outpass_out');
+        const onlyAction = acts.length === 1 ? acts[0] : null;
+        const headLabel =
+          onlyAction === 'check_in'   ? 'Check in · உள்நுழைய' :
+          onlyAction === 'outpass_in' ? 'Returning from outpass · திரும்பி வருகை' :
+          onlyAction === 'check_out'  ? 'Check out · வெளியேற' :
+                                        'Choose · தேர்வு செய்க';
+        return (
         <div style={{
           position: 'absolute', inset: 0,
-          background: `linear-gradient(180deg, rgba(11,13,14,0.96) 0%, ${dirTint} 100%)`,
+          background: 'linear-gradient(180deg, rgba(11,13,14,0.97) 0%, rgba(11,13,14,0.99) 100%)',
           backdropFilter: 'blur(10px)',
           display: 'flex', flexDirection: 'column',
           padding: 'calc(var(--screen-top-sm) + 12px) 22px 28px',
           animation: 'kioskMatchIn 260ms ease-out',
           zIndex: 20, overflow: 'hidden',
         }}>
-          {/* Big success check */}
-          <div style={{ display: 'flex', justifyContent: 'center', marginTop: 20 }}>
+          {/* Recognized badge (neutral — the action is chosen below) */}
+          <div style={{ display: 'flex', justifyContent: 'center', marginTop: 18 }}>
             <div style={{
-              width: 118, height: 118, borderRadius: '50%',
-              background: dirCircleBg, border: `3px solid ${dirColor}`,
+              width: 104, height: 104, borderRadius: '50%',
+              background: 'rgba(232,198,90,0.16)', border: '3px solid #E8C65A',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              boxShadow: `0 0 50px ${dirIn ? 'rgba(14,124,58,0.55)' : 'rgba(192,57,43,0.55)'}`,
+              boxShadow: '0 0 46px rgba(232,198,90,0.4)',
             }}>
-              <Icon name={dirIn ? 'check' : 'close'} size={60} color={dirColorSoft} />
+              <Icon name="check" size={52} color="#F2DD93" />
             </div>
           </div>
 
           {/* Name block */}
-          <div style={{ textAlign: 'center', marginTop: 28 }}>
+          <div style={{ textAlign: 'center', marginTop: 22 }}>
             <div style={{
               fontSize: 11, letterSpacing: 1.4, textTransform: 'uppercase',
-              color: dirColorSoft, fontWeight: 700,
+              color: '#E8C65A', fontWeight: 700,
             }}>
-              {dirIn ? 'Check in · உள்நுழைய' : 'Check out · வெளியேற'}
+              {headLabel}
             </div>
             <div style={{
               fontFamily: 'Fraunces, Georgia, serif',
-              fontSize: 34, fontWeight: 500, letterSpacing: -0.6, lineHeight: 1.1,
+              fontSize: 32, fontWeight: 500, letterSpacing: -0.6, lineHeight: 1.1,
               marginTop: 12,
             }}>{current.name}</div>
             <div style={{ fontSize: 15, color: 'rgba(255,255,255,0.65)', marginTop: 10 }}>
@@ -7765,19 +7783,24 @@ const KioskScannerScreen = () => {
 
           <div style={{ flex: 1 }} />
 
-          {/* Huge confirm button — designed to be easy to tap */}
-          <button onClick={confirmMatch} style={{
-            background: dirColor, border: 'none', borderRadius: 20,
-            padding: '24px 22px', color: '#fff',
-            fontFamily: 'inherit', fontSize: 21, fontWeight: 700,
-            letterSpacing: 0.4, cursor: 'pointer',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12,
-            boxShadow: `0 16px 36px -14px ${dirIn ? 'rgba(14,124,58,0.7)' : 'rgba(192,57,43,0.7)'}`,
-            width: '100%',
-          }}>
-            <Icon name={dirIn ? 'check' : 'close'} size={26} color="#fff" />
-            {dirIn ? 'Confirm check in' : 'Confirm check out'}
-          </button>
+          {/* Action buttons — state-aware */}
+          {twoChoice ? (
+            <div style={{ display: 'flex', gap: 12 }}>
+              <KioskActionBtn color="#C0392B" icon="close" label="Check out" sub="வெளியேற"
+                onClick={() => chooseAction('check_out')} />
+              <KioskActionBtn color="#C97A1A" icon="arrowRight" label="Outpass" sub="வெளியே செல்ல"
+                onClick={() => chooseAction('outpass_out')} />
+            </div>
+          ) : onlyAction === 'outpass_in' ? (
+            <KioskActionBtn full color="#0E7C3A" icon="arrowLeft" label="Back from outpass" sub="திரும்பி வந்தேன்"
+              onClick={() => chooseAction('outpass_in')} />
+          ) : onlyAction === 'check_out' ? (
+            <KioskActionBtn full color="#C0392B" icon="close" label="Check out" sub="வெளியேற"
+              onClick={() => chooseAction('check_out')} />
+          ) : (
+            <KioskActionBtn full color="#0E7C3A" icon="check" label="Check in" sub="உள்நுழைய"
+              onClick={() => chooseAction('check_in')} />
+          )}
 
           {/* Not me — small link-style button */}
           <button onClick={tryAgainMatch} style={{
@@ -7790,7 +7813,8 @@ const KioskScannerScreen = () => {
             Not me — try again · மீண்டும் முயற்சிக்க
           </button>
         </div>
-      )}
+        );
+      })()}
 
       {/* Exit PIN prompt */}
       {showExitPrompt && (
@@ -7809,6 +7833,21 @@ const KioskScannerScreen = () => {
     </div>
   );
 };
+
+// Big, tap-friendly kiosk action button. `full` makes it span the row.
+const KioskActionBtn = ({ color, icon, label, sub, onClick, full = false }) => (
+  <button onClick={onClick} style={{
+    flex: 1, width: full ? '100%' : undefined,
+    background: color, border: 'none', borderRadius: 20,
+    padding: '22px 16px', color: '#fff', fontFamily: 'inherit', cursor: 'pointer',
+    display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 6,
+    boxShadow: `0 16px 36px -16px ${color}`,
+  }}>
+    <Icon name={icon} size={26} color="#fff" />
+    <span style={{ fontSize: 20, fontWeight: 700, letterSpacing: 0.3 }}>{label}</span>
+    {sub && <span style={{ fontSize: 12, fontWeight: 600, opacity: 0.85 }}>{sub}</span>}
+  </button>
+);
 
 const KioskCameraFrame = ({ phase, current, pulse, videoRef, cameraErr, enrolledCount, facingMode = 'user', faceSeen = true }) => {
   const ringColor =

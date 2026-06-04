@@ -10602,13 +10602,15 @@ const DailyReportPage = () => {
   const [att, setAtt] = useState([]);
   const [leaves, setLeaves] = useState([]);
   const [free, setFree] = useState([]);
+  const [events, setEvents] = useState([]);
+  const [expanded, setExpanded] = useState(() => new Set());
   const [cuts, setCuts] = useState({ checkin_start: '08:00', early_cutoff_men: '22:00', early_cutoff_women: '20:00' });
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     if (!window.sb) return;
     setLoading(true);
-    const [eRes, aRes, lRes, fRes, sRes] = await Promise.all([
+    const [eRes, aRes, lRes, fRes, sRes, evRes] = await Promise.all([
       window.sb.from('employees').select('id, name, role, section_id, user_type, gender')
         .eq('is_active', true).order('name'),
       window.sb.from('attendance').select('employee_id, status, punch_in_time, punch_out_time')
@@ -10617,11 +10619,13 @@ const DailyReportPage = () => {
         .eq('status', 'approved').lte('from_date', date).gte('from_date', addDaysISO(date, -60)),
       window.sb.from('free_leaves').select('employee_id').eq('leave_date', date),
       window.sb.from('settings').select('key, value').in('key', ['checkin_start', 'early_cutoff_men', 'early_cutoff_women']),
+      window.sb.from('attendance_events').select('employee_id, event_type, at, seq').eq('shift_date', date).order('seq'),
     ]);
     setEmps(eRes.data || []);
     setAtt(aRes.data || []);
     setLeaves(lRes.data || []);
     setFree(fRes.data || []);
+    setEvents(evRes.data || []);
     const cs = { checkin_start: '08:00', early_cutoff_men: '22:00', early_cutoff_women: '20:00' };
     (sRes.data || []).forEach(r => { cs[r.key] = r.value; });
     setCuts(cs);
@@ -10637,6 +10641,8 @@ const DailyReportPage = () => {
       if (date >= l.from_date && date <= end) leaveBy[l.employee_id] = l.type || 'Leave';
     });
     const freeBy = {}; (free || []).forEach(f => { freeBy[f.employee_id] = true; });
+    const evBy = {}; (events || []).forEach(x => { (evBy[x.employee_id] = evBy[x.employee_id] || []).push(x); });
+    const toMin = t => { const [h, m] = String(t).slice(0, 5).split(':').map(Number); return h * 60 + m; };
     const startB = (cuts.checkin_start || '08:00').slice(0, 5);
     const womanSet = ['female', 'f', 'woman', 'women', 'ladies', 'lady'];
     const roster = (emps || []).filter(e => e.user_type !== 'owner');
@@ -10659,17 +10665,31 @@ const DailyReportPage = () => {
       const closeCut = ((isWoman ? cuts.early_cutoff_women : cuts.early_cutoff_men) || '').slice(0, 5);
       const early = !!(out5 && (status === 'present' || status === 'late')
         && out5 >= startB && closeCut && out5 < closeCut);
+      // Outpasses: pair outpass_out -> next outpass_in (in event order).
+      const evs = evBy[e.id] || [];
+      const ops = []; let openOut = null, openFlag = false;
+      for (const x of evs) {
+        if (x.event_type === 'outpass_out') { if (openOut) openFlag = true; openOut = x; }
+        else if (x.event_type === 'outpass_in') { if (openOut) { ops.push({ out: String(openOut.at).slice(0, 5), in: String(x.at).slice(0, 5) }); openOut = null; } }
+      }
+      if (openOut) { openFlag = true; ops.push({ out: String(openOut.at).slice(0, 5), in: null }); }
+      const outpassMins = ops.reduce((s, o) => s + (o.in ? Math.max(0, toMin(o.in) - toMin(o.out)) : 0), 0);
+      const inT = a?.punch_in_time ? String(a.punch_in_time).slice(0, 5) : null;
+      const outT = a?.punch_out_time ? String(a.punch_out_time).slice(0, 5) : null;
+      const hasIn = !!inT || evs.some(x => x.event_type === 'check_in');
+      const incomplete = hasIn && (!inT || !outT || openFlag);
+      const insideMins = (hasIn && inT && outT && !openFlag) ? Math.max(0, toMin(outT) - toMin(inT) - outpassMins) : null;
       return {
         id: e.id, name: e.name, role: e.role, section_id: e.section_id, status,
         in: a?.punch_in_time || null, out: a?.punch_out_time || null,
-        leaveType, early,
+        leaveType, early, ops, outpassMins, insideMins, incomplete, hasIn,
       };
     });
-  }, [emps, att, leaves, free, date, cuts]);
+  }, [emps, att, leaves, free, events, date, cuts]);
 
   const totals = useMemo(() => {
-    const t = { present: 0, late: 0, on_leave: 0, absent: 0, early: 0 };
-    rows.forEach(r => { t[r.status] = (t[r.status] || 0) + 1; if (r.early) t.early++; });
+    const t = { present: 0, late: 0, on_leave: 0, absent: 0, early: 0, outpass: 0 };
+    rows.forEach(r => { t[r.status] = (t[r.status] || 0) + 1; if (r.early) t.early++; t.outpass += (r.ops ? r.ops.length : 0); });
     return t;
   }, [rows]);
 
@@ -10690,13 +10710,21 @@ const DailyReportPage = () => {
   }, [rows, sectionsList]);
 
   const fmtT = (t) => t ? String(t).slice(0, 5) : '—';
+  const fmtDur = (m) => (m == null ? '—' : `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`);
+  const toggleExpand = (id) => setExpanded(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const opsText = (ops) => (ops || []).map(o => `${o.out}→${o.in || '…'}`).join(', ');
 
   const downloadCsv = () => {
     const data = [];
     sections.forEach(sec => sec.list.forEach(r => data.push({
       section: sec.label, name: r.name, id: r.id, role: r.role || '',
       status: DR_STATUS[r.status].label, in: fmtT(r.in), out: fmtT(r.out),
-      early: r.early ? 'Yes' : '', leave: r.leaveType || '',
+      early: r.early ? 'Yes' : '',
+      outpass_n: r.ops ? r.ops.length : 0,
+      outpass_total: r.outpassMins ? fmtDur(r.outpassMins) : '',
+      outpass_times: opsText(r.ops),
+      inside: r.incomplete ? 'Incomplete' : (r.insideMins != null ? fmtDur(r.insideMins) : ''),
+      leave: r.leaveType || '',
     })));
     if (!data.length) { toast('Nothing to export'); return; }
     downloadCSV(`daily_attendance_${date}.csv`, toCSV(data, [
@@ -10704,6 +10732,8 @@ const DailyReportPage = () => {
       { label: 'ID', value: 'id' }, { label: 'Role', value: 'role' },
       { label: 'Status', value: 'status' }, { label: 'In', value: 'in' },
       { label: 'Out', value: 'out' }, { label: 'Left early', value: 'early' },
+      { label: 'Outpasses', value: 'outpass_n' }, { label: 'Outpass total', value: 'outpass_total' },
+      { label: 'Outpass times', value: 'outpass_times' }, { label: 'Time inside', value: 'inside' },
       { label: 'Leave type', value: 'leave' },
     ]));
   };
@@ -10741,6 +10771,7 @@ const DailyReportPage = () => {
         <div className="stat leave"><div className="k">On leave</div><div className="v">{totals.on_leave}</div></div>
         <div className="stat"><div className="k">Absent</div><div className="v">{totals.absent}</div></div>
         <div className="stat"><div className="k">Left early</div><div className="v" style={{ color: '#C0392B' }}>{totals.early}</div></div>
+        <div className="stat"><div className="k">Outpasses</div><div className="v" style={{ color: '#C97A1A' }}>{totals.outpass}</div></div>
         <div className="stat"><div className="k">Total</div><div className="v">{rows.length}</div></div>
       </div>
 
@@ -10761,17 +10792,44 @@ const DailyReportPage = () => {
                 <th style={{ textAlign: 'left', padding: '4px 8px', width: 150 }}>Status</th>
                 <th style={{ textAlign: 'left', padding: '4px 8px', width: 70 }}>In</th>
                 <th style={{ textAlign: 'left', padding: '4px 8px', width: 70 }}>Out</th>
+                <th style={{ textAlign: 'left', padding: '4px 8px', width: 120 }}>Outpass</th>
+                <th style={{ textAlign: 'left', padding: '4px 8px', width: 90 }}>Inside</th>
               </tr>
             </thead>
             <tbody>
-              {sec.list.map(r => (
-                <tr key={r.id} style={{ borderTop: '1px solid var(--borderSoft, var(--border))' }}>
+              {sec.list.map(r => {
+                const hasOps = r.ops && r.ops.length > 0;
+                const isOpen = expanded.has(r.id);
+                return (
+                <React.Fragment key={r.id}>
+                <tr style={{ borderTop: '1px solid var(--borderSoft, var(--border))' }}>
                   <td style={{ padding: '5px 8px' }}>{r.name} <span style={{ fontSize: 11, color: 'var(--inkMuted)' }}>{r.id}</span></td>
                   <td style={{ padding: '5px 8px' }}>{chip(r.status, r.leaveType)}</td>
                   <td style={{ padding: '5px 8px', fontFamily: 'JetBrains Mono, Menlo, monospace', color: r.status === 'late' ? '#C0392B' : 'inherit', fontWeight: r.status === 'late' ? 700 : 400 }}>{fmtT(r.in)}</td>
                   <td style={{ padding: '5px 8px', fontFamily: 'JetBrains Mono, Menlo, monospace', color: r.early ? '#C0392B' : 'inherit', fontWeight: r.early ? 700 : 400 }}>{fmtT(r.out)}{r.early ? <span style={{ fontFamily: 'system-ui, sans-serif', fontSize: 10, fontWeight: 700, marginLeft: 5 }}>EARLY</span> : null}</td>
+                  <td style={{ padding: '5px 8px', color: '#C97A1A', cursor: hasOps ? 'pointer' : 'default' }}
+                    onClick={hasOps ? () => toggleExpand(r.id) : undefined} data-print-hide={false}>
+                    {hasOps ? <span>{r.ops.length} · {fmtDur(r.outpassMins)} <span style={{ fontSize: 10 }}>{isOpen ? '▲' : '▼'}</span></span> : <span style={{ color: 'var(--inkMuted)' }}>—</span>}
+                  </td>
+                  <td style={{ padding: '5px 8px', fontFamily: 'JetBrains Mono, Menlo, monospace', color: r.incomplete ? '#C0392B' : 'inherit' }}>
+                    {r.incomplete ? 'Incomplete' : (r.insideMins != null ? fmtDur(r.insideMins) : '—')}
+                  </td>
                 </tr>
-              ))}
+                {hasOps && isOpen && (
+                  <tr style={{ background: 'var(--surfaceAlt, rgba(0,0,0,0.02))' }}>
+                    <td colSpan={6} style={{ padding: '4px 8px 8px 16px', fontSize: 12, color: 'var(--inkMuted)' }}>
+                      {r.ops.map((o, i) => (
+                        <span key={i} style={{ marginRight: 14, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>
+                          {o.out} → {o.in || <span style={{ color: '#C0392B' }}>(no return)</span>}
+                          {o.in ? ` · ${fmtDur(Math.max(0, (Number(o.in.slice(0,2))*60+Number(o.in.slice(3,5))) - (Number(o.out.slice(0,2))*60+Number(o.out.slice(3,5)))))}` : ''}
+                        </span>
+                      ))}
+                    </td>
+                  </tr>
+                )}
+                </React.Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>
