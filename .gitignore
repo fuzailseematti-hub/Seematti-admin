@@ -1,0 +1,3 @@
+# Locally-installed agent skills (kept out of the app repo on purpose)
+.agents/
+skills-lock.json
