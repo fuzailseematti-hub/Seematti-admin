@@ -100,6 +100,71 @@ async function dailyModel(offset = 0, opts: any = {}) {
     return { label: sec.label, meta, rows };
   });
   const total = (totals.present + totals.late + totals.on_leave + totals.absent);
+
+  // Outpass + time-inside tables (previous-day report only).
+  const extraTables: any[] = [];
+  if (opts.withOutpass) {
+    const ev = await sb.from("attendance_events")
+      .select("employee_id, event_type, at, seq").eq("shift_date", date).order("seq");
+    const byEmp: Record<string, any[]> = {};
+    (ev.data || []).forEach((e: any) => { (byEmp[e.employee_id] = byEmp[e.employee_id] || []).push(e); });
+    const toMin = (t: string) => { const [h, m] = String(t).slice(0, 5).split(":").map(Number); return h * 60 + m; };
+    const fmtDur = (m: number) => `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+    const insideRows: any[] = [];
+    const logRows: any[] = [];
+    const roster = sectionGroups(emps, sections).flatMap((s) => s.list);
+    for (const e of roster) {
+      const evs = byEmp[e.id] || [];
+      const a = attBy[e.id];
+      const hasIn = !!(a?.punch_in_time) || evs.some((x: any) => x.event_type === "check_in");
+      if (!hasIn) continue;
+      const ops: any[] = []; let openOut: any = null; let openFlag = false;
+      for (const x of evs) {
+        if (x.event_type === "outpass_out") { if (openOut) openFlag = true; openOut = x; }
+        else if (x.event_type === "outpass_in") { if (openOut) { ops.push({ out: openOut.at, in: x.at }); openOut = null; } }
+      }
+      if (openOut) openFlag = true;
+      const outMins = ops.reduce((s, o) => s + Math.max(0, toMin(o.in) - toMin(o.out)), 0);
+      const ciEv = evs.find((x: any) => x.event_type === "check_in");
+      const inT = a?.punch_in_time ? String(a.punch_in_time).slice(0, 5) : (ciEv ? String(ciEv.at).slice(0, 5) : null);
+      const outT = a?.punch_out_time ? String(a.punch_out_time).slice(0, 5) : null;
+      const incomplete = !inT || !outT || openFlag;
+      const inside = incomplete ? null : Math.max(0, toMin(outT!) - toMin(inT!) - outMins);
+      insideRows.push([
+        { t: e.name },
+        { t: inT || "—" },
+        { t: outT || "—", c: !outT ? "#C0392B" : undefined },
+        { t: ops.length ? `${ops.length} · ${fmtDur(outMins)}` : "—" },
+        { t: incomplete ? "Incomplete" : fmtDur(inside as number), c: incomplete ? "#C0392B" : undefined },
+      ]);
+      ops.forEach((o) => logRows.push([
+        { t: e.name }, { t: String(o.out).slice(0, 5) }, { t: String(o.in).slice(0, 5) },
+        { t: fmtDur(Math.max(0, toMin(o.in) - toMin(o.out))) },
+      ]));
+    }
+    if (insideRows.length) extraTables.push({
+      title: "Time inside showroom",
+      columns: [
+        { header: "Employee", x: 44, max: 30 },
+        { header: "Check in", x: 250, max: 8 },
+        { header: "Check out", x: 320, max: 8 },
+        { header: "Outpass", x: 392, max: 16 },
+        { header: "Time inside", x: 486, max: 14 },
+      ],
+      rows: insideRows,
+    });
+    if (logRows.length) extraTables.push({
+      title: "Outpass log",
+      columns: [
+        { header: "Employee", x: 44, max: 34 },
+        { header: "Out", x: 300, max: 8 },
+        { header: "In", x: 372, max: 8 },
+        { header: "Duration", x: 444, max: 12 },
+      ],
+      rows: logRows,
+    });
+  }
+
   return {
     kind: "daily",
     subject: `${opts.subjectLabel || "Daily attendance"} — ${date}`,
@@ -107,6 +172,7 @@ async function dailyModel(offset = 0, opts: any = {}) {
     dateLabel: longDate(date),
     summary: `Total ${total}   Present ${totals.present}   Late ${totals.late}   On leave ${totals.on_leave}   Absent ${totals.absent}   Left early ${totals.early}`,
     fileBase: `${opts.fileBase || "daily-attendance"}-${date}`,
+    extraTables,
     columns: [
       { header: "Employee", x: 44, max: 34 },
       { header: "Status", x: 272, max: 22 },
@@ -166,6 +232,12 @@ function htmlFrom(m: any): string {
     body += sec.rows.map((r: any) => `<tr style="border-top:1px solid #eee">${r.map((cell: any) => `<td style="padding:4px 8px;${cell.c ? `color:${cell.c};font-weight:600` : ""}">${esc(cell.t)}</td>`).join("")}</tr>`).join("");
     body += `</table>`;
   }
+  for (const t of (m.extraTables || [])) {
+    body += `<h3 style="margin:22px 0 4px;font-family:Georgia,serif">${esc(t.title)}</h3>`;
+    body += `<table style="width:100%;border-collapse:collapse;font-size:13px"><tr style="color:#777;text-align:left">${t.columns.map((c: any) => `<th style="padding:4px 8px;font-weight:600">${esc(c.header)}</th>`).join("")}</tr>`;
+    body += t.rows.map((r: any) => `<tr style="border-top:1px solid #eee">${r.map((cell: any) => `<td style="padding:4px 8px;${cell.c ? `color:${cell.c};font-weight:600` : ""}">${esc(cell.t)}</td>`).join("")}</tr>`).join("");
+    body += `</table>`;
+  }
   return `<div style="font-family:Arial,Helvetica,sans-serif;color:#111;max-width:680px">
     <img src="${LOGO_URL}" alt="Seemaatti" height="42" style="display:block;height:42px;margin-bottom:8px;border:0" />
     <h2 style="font-family:Georgia,serif;margin:4px 0 2px">${esc(m.title)}</h2>
@@ -182,6 +254,12 @@ function csvFrom(m: any): string {
   for (const sec of m.sections) {
     const secName = sec.label.replace(/\s*\(\d+\)\s*$/, "");
     for (const r of sec.rows) lines.push([secName, ...r.map((cell: any) => cell.t)].map(q).join(","));
+  }
+  for (const t of (m.extraTables || [])) {
+    lines.push("");
+    lines.push(q(t.title));
+    lines.push(t.columns.map((c: any) => q(c.header)).join(","));
+    for (const r of t.rows) lines.push(r.map((cell: any) => q(cell.t)).join(","));
   }
   return lines.join("\r\n");
 }
@@ -207,7 +285,14 @@ async function pdfFrom(m: any): Promise<Uint8Array> {
   };
   const newPage = () => { footer(); page = doc.addPage([W, H]); y = H - M; pageNo++; };
   const need = (h: number) => { if (y - h < 52) newPage(); };
-  const colHeader = () => { m.columns.forEach((c: any) => txt(c.header, c.x, 7.5, bold, MUTE)); y -= 6; rule(); y -= 12; };
+  const colHeader = (cols: any[]) => { cols.forEach((c: any) => txt(c.header, c.x, 7.5, bold, MUTE)); y -= 6; rule(); y -= 12; };
+  const drawRows = (cols: any[], rows: any[]) => {
+    for (const r of rows) {
+      need(15);
+      r.forEach((cell: any, i: number) => txt(clip(cell.t, cols[i].max), cols[i].x, 9.5, font, cell.c ? hexRgb(cell.c) : INK));
+      y -= 14;
+    }
+  };
 
   const logoBytes = await getLogo();
   let placed = false;
@@ -229,12 +314,16 @@ async function pdfFrom(m: any): Promise<Uint8Array> {
     need(60);
     txt(sec.label, M, 13, bold);
     if (sec.meta) txt(sec.meta, W - M - font.widthOfTextAtSize(sec.meta, 8.5), 8.5, font, MUTE);
-    y -= 16; colHeader();
-    for (const r of sec.rows) {
-      need(15);
-      r.forEach((cell: any, i: number) => txt(clip(cell.t, m.columns[i].max), m.columns[i].x, 9.5, font, cell.c ? hexRgb(cell.c) : INK));
-      y -= 14;
-    }
+    y -= 16; colHeader(m.columns);
+    drawRows(m.columns, sec.rows);
+    y -= 14;
+  }
+  for (const t of (m.extraTables || [])) {
+    need(80);
+    y -= 6;
+    txt(t.title, M, 13, bold);
+    y -= 16; colHeader(t.columns);
+    drawRows(t.columns, t.rows);
     y -= 14;
   }
   footer();
@@ -267,7 +356,7 @@ Deno.serve(async (req) => {
     let model: any;
     try {
       if (a.type === "next_day_leave") model = await leaveModel();
-      else if (a.type === "prev_day_attendance") model = await dailyModel(-1, { subjectLabel: "Previous-day attendance", title: "Previous Day Attendance (In / Out)", fileBase: "attendance" });
+      else if (a.type === "prev_day_attendance") model = await dailyModel(-1, { subjectLabel: "Previous-day attendance", title: "Previous Day Attendance (In / Out)", fileBase: "attendance", withOutpass: true });
       else model = await dailyModel(0);
     } catch (e) { results.push({ id: a.id, error: String(e) }); continue; }
 
