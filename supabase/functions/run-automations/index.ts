@@ -92,7 +92,7 @@ async function dailyModel(offset = 0, opts: any = {}) {
       const early = !!(out5 && (st === "present" || st === "late") && out5 >= startB && closeCut && out5 < closeCut);
       if (early) totals.early++;
       const statusText = st === "on_leave" && lt ? `On leave (${lt})` : SLABEL[st];
-      return { name: e.name, st, statusText, tone: TONE[st], in: hhmm(a?.punch_in_time), out: hhmm(a?.punch_out_time), early };
+      return { id: e.id, name: e.name, st, statusText, tone: TONE[st], in: hhmm(a?.punch_in_time), out: hhmm(a?.punch_out_time), early };
     }).sort((a: any, b: any) => rank[a.st] - rank[b.st] || a.name.localeCompare(b.name));
     const c: any = { present: 0, late: 0, on_leave: 0, absent: 0, early: 0 };
     rows.forEach((r: any) => { c[r.st]++; if (r.early) c.early++; });
@@ -100,79 +100,72 @@ async function dailyModel(offset = 0, opts: any = {}) {
     return { label: sec.label, meta, rows };
   });
   const total = (totals.present + totals.late + totals.on_leave + totals.absent);
+  const subject = `${opts.subjectLabel || "Daily attendance"} — ${date}`;
+  const title = opts.title || "Daily Attendance Report";
+  const fileBase = `${opts.fileBase || "daily-attendance"}-${date}`;
+  const summary = `Total ${total}   Present ${totals.present}   Late ${totals.late}   On leave ${totals.on_leave}   Absent ${totals.absent}   Left early ${totals.early}`;
 
-  // Outpass + time-inside tables (previous-day report only).
-  const extraTables: any[] = [];
+  // Previous-day report: ONE landscape table per section — every employee on a
+  // single line, including outpass times and total time inside the showroom.
   if (opts.withOutpass) {
+    const RED = "#C0392B", AMBER = "#C97A1A";
     const ev = await sb.from("attendance_events")
       .select("employee_id, event_type, at, seq").eq("shift_date", date).order("seq");
     const byEmp: Record<string, any[]> = {};
     (ev.data || []).forEach((e: any) => { (byEmp[e.employee_id] = byEmp[e.employee_id] || []).push(e); });
     const toMin = (t: string) => { const [h, m] = String(t).slice(0, 5).split(":").map(Number); return h * 60 + m; };
-    const fmtDur = (m: number) => `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
-    const insideRows: any[] = [];
-    const logRows: any[] = [];
-    const roster = sectionGroups(emps, sections).flatMap((s) => s.list);
-    for (const e of roster) {
-      const evs = byEmp[e.id] || [];
-      const a = attBy[e.id];
-      const hasIn = !!(a?.punch_in_time) || evs.some((x: any) => x.event_type === "check_in");
-      if (!hasIn) continue;
-      const ops: any[] = []; let openOut: any = null; let openFlag = false;
-      for (const x of evs) {
-        if (x.event_type === "outpass_out") { if (openOut) openFlag = true; openOut = x; }
-        else if (x.event_type === "outpass_in") { if (openOut) { ops.push({ out: openOut.at, in: x.at }); openOut = null; } }
-      }
-      if (openOut) openFlag = true;
-      const outMins = ops.reduce((s, o) => s + Math.max(0, toMin(o.in) - toMin(o.out)), 0);
-      const ciEv = evs.find((x: any) => x.event_type === "check_in");
-      const inT = a?.punch_in_time ? String(a.punch_in_time).slice(0, 5) : (ciEv ? String(ciEv.at).slice(0, 5) : null);
-      const outT = a?.punch_out_time ? String(a.punch_out_time).slice(0, 5) : null;
-      const incomplete = !inT || !outT || openFlag;
-      const inside = incomplete ? null : Math.max(0, toMin(outT!) - toMin(inT!) - outMins);
-      insideRows.push([
-        { t: e.name },
-        { t: inT || "—" },
-        { t: outT || "—", c: !outT ? "#C0392B" : undefined },
-        { t: ops.length ? `${ops.length} · ${fmtDur(outMins)}` : "—" },
-        { t: incomplete ? "Incomplete" : fmtDur(inside as number), c: incomplete ? "#C0392B" : undefined },
-      ]);
-      ops.forEach((o) => logRows.push([
-        { t: e.name }, { t: String(o.out).slice(0, 5) }, { t: String(o.in).slice(0, 5) },
-        { t: fmtDur(Math.max(0, toMin(o.in) - toMin(o.out))) },
-      ]));
-    }
-    if (insideRows.length) extraTables.push({
-      title: "Time inside showroom",
+    const fmtDur = (mn: number) => `${Math.floor(mn / 60)}h ${String(mn % 60).padStart(2, "0")}m`;
+    let outpassCount = 0;
+
+    const consSections = sects.map((sec) => ({
+      label: sec.label, meta: sec.meta,
+      rows: sec.rows.map((r: any) => {
+        const evs = byEmp[r.id] || [];
+        const ops: any[] = []; let openOut: any = null; let openFlag = false;
+        for (const x of evs) {
+          if (x.event_type === "outpass_out") { if (openOut) openFlag = true; openOut = x; }
+          else if (x.event_type === "outpass_in") { if (openOut) { ops.push({ out: String(openOut.at).slice(0, 5), in: String(x.at).slice(0, 5) }); openOut = null; } }
+        }
+        if (openOut) { openFlag = true; ops.push({ out: String(openOut.at).slice(0, 5), in: null }); }
+        outpassCount += ops.length;
+        const outMins = ops.reduce((s, o) => s + (o.in ? Math.max(0, toMin(o.in) - toMin(o.out)) : 0), 0);
+        const inT = r.in !== "—" ? r.in : null;
+        const outT = r.out !== "—" ? r.out : null;
+        const hasIn = !!inT || evs.some((x: any) => x.event_type === "check_in");
+        const incomplete = hasIn && (!inT || !outT || openFlag);
+        const inside = (hasIn && inT && outT && !openFlag) ? Math.max(0, toMin(outT) - toMin(inT) - outMins) : null;
+        const opTimes = ops.map((o) => `${o.out}-${o.in || "…"}`).join(", ");
+        return [
+          { t: r.name },
+          { t: r.statusText, c: r.tone },
+          { t: r.in, c: r.st === "late" ? RED : undefined },
+          { t: r.early ? `${r.out} early` : r.out, c: r.early ? RED : undefined },
+          { t: ops.length ? `${ops.length} · ${fmtDur(outMins)}` : "—", c: ops.length ? AMBER : undefined },
+          { t: opTimes },
+          { t: incomplete ? "Incomplete" : (inside != null ? fmtDur(inside) : "—"), c: incomplete ? RED : undefined },
+        ];
+      }),
+    }));
+
+    return {
+      kind: "daily", subject, title, dateLabel: longDate(date),
+      summary: `${summary}   Outpasses ${outpassCount}`,
+      fileBase, landscape: true,
       columns: [
-        { header: "Employee", x: 44, max: 30 },
-        { header: "Check in", x: 250, max: 8 },
-        { header: "Check out", x: 320, max: 8 },
-        { header: "Outpass", x: 392, max: 16 },
-        { header: "Time inside", x: 486, max: 14 },
+        { header: "Employee", x: 36, max: 26 },
+        { header: "Status", x: 232, max: 14 },
+        { header: "In", x: 332, max: 8 },
+        { header: "Out", x: 382, max: 11 },
+        { header: "Outpass", x: 452, max: 12 },
+        { header: "Outpass times", x: 532, max: 30 },
+        { header: "Time inside", x: 740, max: 12 },
       ],
-      rows: insideRows,
-    });
-    if (logRows.length) extraTables.push({
-      title: "Outpass log",
-      columns: [
-        { header: "Employee", x: 44, max: 34 },
-        { header: "Out", x: 300, max: 8 },
-        { header: "In", x: 372, max: 8 },
-        { header: "Duration", x: 444, max: 12 },
-      ],
-      rows: logRows,
-    });
+      sections: consSections,
+    };
   }
 
   return {
-    kind: "daily",
-    subject: `${opts.subjectLabel || "Daily attendance"} — ${date}`,
-    title: opts.title || "Daily Attendance Report",
-    dateLabel: longDate(date),
-    summary: `Total ${total}   Present ${totals.present}   Late ${totals.late}   On leave ${totals.on_leave}   Absent ${totals.absent}   Left early ${totals.early}`,
-    fileBase: `${opts.fileBase || "daily-attendance"}-${date}`,
-    extraTables,
+    kind: "daily", subject, title, dateLabel: longDate(date), summary, fileBase,
     columns: [
       { header: "Employee", x: 44, max: 34 },
       { header: "Status", x: 272, max: 22 },
@@ -238,7 +231,7 @@ function htmlFrom(m: any): string {
     body += t.rows.map((r: any) => `<tr style="border-top:1px solid #eee">${r.map((cell: any) => `<td style="padding:4px 8px;${cell.c ? `color:${cell.c};font-weight:600` : ""}">${esc(cell.t)}</td>`).join("")}</tr>`).join("");
     body += `</table>`;
   }
-  return `<div style="font-family:Arial,Helvetica,sans-serif;color:#111;max-width:680px">
+  return `<div style="font-family:Arial,Helvetica,sans-serif;color:#111;max-width:${m.landscape ? 1040 : 680}px">
     <img src="${LOGO_URL}" alt="Seemaatti" height="42" style="display:block;height:42px;margin-bottom:8px;border:0" />
     <h2 style="font-family:Georgia,serif;margin:4px 0 2px">${esc(m.title)}</h2>
     <div style="font-size:13px;color:#666">${esc(m.dateLabel)}</div>
@@ -273,7 +266,8 @@ async function pdfFrom(m: any): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
   const font = await doc.embedFont(StandardFonts.Helvetica);
   const bold = await doc.embedFont(StandardFonts.HelveticaBold);
-  const W = 595.28, H = 841.89, M = 44;
+  const landscape = !!m.landscape;
+  const W = landscape ? 841.89 : 595.28, H = landscape ? 595.28 : 841.89, M = landscape ? 36 : 44;
   const INK = rgb(0.10, 0.10, 0.12), MUTE = rgb(0.42, 0.42, 0.46), RULE = rgb(0.86, 0.86, 0.88), MAROON = rgb(0.43, 0.11, 0.13);
   let page = doc.addPage([W, H]); let y = H - M; let pageNo = 1;
   const clip = (s: unknown, n: number) => { const str = String(s ?? ""); return str.length > n ? str.slice(0, n - 1) + "." : str; };
@@ -291,6 +285,8 @@ async function pdfFrom(m: any): Promise<Uint8Array> {
       need(15);
       r.forEach((cell: any, i: number) => txt(clip(cell.t, cols[i].max), cols[i].x, 9.5, font, cell.c ? hexRgb(cell.c) : INK));
       y -= 14;
+      // Faint divider, placed clear of both rows (avoids cutting through text).
+      if (landscape) page.drawLine({ start: { x: M, y: y + 9 }, end: { x: W - M, y: y + 9 }, thickness: 0.3, color: rgb(0.92, 0.92, 0.93) });
     }
   };
 
