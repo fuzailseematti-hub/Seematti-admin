@@ -1411,8 +1411,8 @@ const AttendancePage = () => {
       {/* Stat strip */}
       <div className="stat-strip">
         <div className="stat"><div className="k">Staff</div><div className="v">{totals.total}</div></div>
-        <div className="stat present"><div className="k">Present</div><div className="v">{totals.present}</div></div>
-        <div className="stat late"><div className="k">Late</div><div className="v">{totals.late}</div></div>
+        <div className="stat present"><div className="k">Present</div><div className="v">{totals.present + totals.late}</div><div className="sub" style={{ fontSize: 10.5, color: 'var(--inkMuted)' }}>incl. late</div></div>
+        <div className="stat late"><div className="k">of which late</div><div className="v">{totals.late}</div></div>
         <div className="stat absent"><div className="k">Absent</div><div className="v">{totals.absent}</div></div>
         <div className="stat leave"><div className="k">On leave</div><div className="v">{totals.leave}</div></div>
       </div>
@@ -10788,8 +10788,8 @@ const DailyReportPage = () => {
       </div>
 
       <div className="stat-strip" style={{ marginBottom: 18 }}>
-        <div className="stat present"><div className="k">Present</div><div className="v">{totals.present}</div></div>
-        <div className="stat late"><div className="k">Late</div><div className="v">{totals.late}</div></div>
+        <div className="stat present"><div className="k">Present</div><div className="v">{totals.present + totals.late}</div><div style={{ fontSize: 10.5, color: 'var(--inkMuted)' }}>incl. late</div></div>
+        <div className="stat late"><div className="k">of which late</div><div className="v">{totals.late}</div></div>
         <div className="stat leave"><div className="k">On leave</div><div className="v">{totals.on_leave}</div></div>
         <div className="stat"><div className="k">Absent</div><div className="v">{totals.absent}</div></div>
         <div className="stat"><div className="k">Left early</div><div className="v" style={{ color: '#C0392B' }}>{totals.early}</div></div>
