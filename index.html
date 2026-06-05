@@ -7433,6 +7433,7 @@ const KioskScannerScreen = () => {
   // and returns it. Direction + late/present are authoritative from here.
   // Persist the chosen kiosk action (check_in / check_out / outpass_out /
   // outpass_in). The server validates it against the live state.
+  const [saveError, setSaveError] = React.useState(false);
   const persistEvent = async (emp, action) => {
     if (!window.sb || !pin) return null;
     const { data, error } = await window.sb.rpc('kiosk_event', {
@@ -7445,6 +7446,7 @@ const KioskScannerScreen = () => {
   // Show the big name card with the state-aware buttons. Nothing is written
   // until the person taps an action, so a wrong recognition is harmless.
   const showMatchUI = React.useCallback((emp) => {
+    setSaveError(false);
     setCurrent(emp);
     setPhase('matched');
   }, []);
@@ -7455,11 +7457,22 @@ const KioskScannerScreen = () => {
   const chooseAction = async (action) => {
     if (!current || phase !== 'matched' || actionBusyRef.current) return;
     actionBusyRef.current = true;
+    setSaveError(false);
     const emp = current;
-    const res = await persistEvent(emp, action);
-    const done = res?.action || action;
+    // Try to save; retry once for a transient network blip on the kiosk's wifi.
+    let res = await persistEvent(emp, action);
+    if (!res) res = await persistEvent(emp, action);
+    if (!res) {
+      // CRITICAL: the save failed. Never pretend it worked — show an error so
+      // the employee scans again, otherwise they'd walk away thinking they
+      // checked in while nothing was recorded.
+      actionBusyRef.current = false;
+      setSaveError(true);
+      return;
+    }
+    const done = res.action || action;
     const dir = ACTION_DIR[done] || 'in';
-    setRecent(r => [{ ...emp, dir, time: res?.time || '', action: done }, ...r].slice(0, 6));
+    setRecent(r => [{ ...emp, dir, time: res.time || '', action: done }, ...r].slice(0, 6));
     setClockedIn(s => {
       const ns = new Set(s);
       if (dir === 'in') ns.add(emp.id); else ns.delete(emp.id);
@@ -7476,6 +7489,7 @@ const KioskScannerScreen = () => {
     // right away — useful when the wrong person was recognised.
     delete lastMatchMap.current[current.id];
     pendingMatchRef.current = null;
+    setSaveError(false);
     setCurrent(null);
     setPhase('idle');
   };
@@ -7484,9 +7498,13 @@ const KioskScannerScreen = () => {
   // never gets stuck on someone who walked away mid-choice.
   React.useEffect(() => {
     if (phase !== 'matched') return;
-    const t = setTimeout(() => { setCurrent(null); setPhase('idle'); }, 15000);
+    const t = setTimeout(() => { setSaveError(false); setCurrent(null); setPhase('idle'); }, 15000);
     return () => clearTimeout(t);
   }, [phase]);
+
+  // Tell the auto-updater (bottom of file) when a scan/choice is in progress so
+  // it never reloads the tablet mid-interaction.
+  React.useEffect(() => { window.__kioskBusy = (phase !== 'idle'); }, [phase]);
 
   const pendingMatchRef = React.useRef(null); // legacy ref (reset by tryAgain)
   // Steady-face counter for the cheap presence pass: only after a large face is
@@ -7783,8 +7801,21 @@ const KioskScannerScreen = () => {
 
           <div style={{ flex: 1 }} />
 
-          {/* Action buttons — state-aware */}
-          {twoChoice ? (
+          {/* Action buttons — state-aware. On a save failure show a clear
+              error instead of fake success, so the person scans again. */}
+          {saveError ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, alignItems: 'stretch' }}>
+              <div style={{
+                background: 'rgba(192,57,43,0.18)', border: '2px solid #C0392B',
+                borderRadius: 16, padding: '16px 18px', textAlign: 'center',
+              }}>
+                <div style={{ color: '#F0857A', fontWeight: 700, fontSize: 17 }}>⚠ Not saved — scan again</div>
+                <div style={{ color: 'rgba(255,255,255,0.7)', fontWeight: 600, fontSize: 13, marginTop: 4 }}>சேமிக்கப்படவில்லை — மீண்டும் ஸ்கேன் செய்யவும்</div>
+              </div>
+              <KioskActionBtn full color="#0E7C3A" icon="check" label="Scan again" sub="மீண்டும்"
+                onClick={tryAgainMatch} />
+            </div>
+          ) : twoChoice ? (
             <div style={{ display: 'flex', gap: 12 }}>
               <KioskActionBtn color="#C0392B" icon="close" label="Check out" sub="வெளியேற"
                 onClick={() => chooseAction('check_out')} />
@@ -10757,6 +10788,29 @@ const mountWhenReady = async (attempts = 0) => {
   }
 };
 mountWhenReady();
+
+// ──────────────────────────────────────────────────────────
+// Kiosk auto-update: the kiosk runs unattended for days, so without this it
+// keeps running old code (e.g. before a bug fix) until someone manually
+// refreshes the tablet. Snapshot the deployed index.html after load; if it
+// later changes, a new version is out — reload automatically, but only while
+// the kiosk is IDLE (never mid-scan), so no one's check-in is interrupted.
+(function kioskAutoUpdate() {
+  let baseline = null;
+  const check = async () => {
+    if (navigator.onLine === false) return;
+    try {
+      const res = await fetch('index.html?_=' + Date.now(), { cache: 'no-store' });
+      if (!res.ok) return;
+      const html = await res.text();
+      if (baseline === null) { baseline = html; return; }
+      if (html !== baseline && !window.__kioskBusy) location.reload();
+    } catch (_) { /* offline / transient — ignore */ }
+  };
+  setTimeout(check, 5000);
+  setInterval(check, 10 * 60 * 1000);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') check(); });
+})();
 
 </script>
 
