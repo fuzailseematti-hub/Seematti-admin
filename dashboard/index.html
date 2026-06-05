@@ -8,6 +8,9 @@
 <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate" />
 <meta http-equiv="pragma" content="no-cache" />
 <meta http-equiv="expires" content="0" />
+<!-- Informational build stamp (handy for support). The in-app updater at the
+     bottom of the file is content-based and does not depend on this value. -->
+<meta name="app-build" content="2026-06-05T11:10" />
 <title>Seemaatti · Admin Dashboard</title>
 <link rel="icon" type="image/png" href="assets/seemaatti-logo.png" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -11259,6 +11262,43 @@ const mount = async (attempts = 0) => {
   }
 };
 mount();
+
+// ──────────────────────────────────────────────────────────
+// Auto-update: this is a long-lived single-page app, so once it's open it can
+// keep running old code until a manual hard refresh. We snapshot the deployed
+// index.html shortly after load, then re-check it (on foreground + every 10
+// min); if the deployed file has changed, a new version is out, so we show a
+// one-tap "Reload" bar. Fully automatic — no build step or version bumping.
+(function autoUpdate() {
+  let baseline = null;
+  let banner = null;
+  const showBanner = () => {
+    if (banner) return;
+    banner = document.createElement('div');
+    banner.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:2147483647;background:#0E7C3A;color:#fff;padding:10px 14px;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.28);font:600 13px/1.2 system-ui,-apple-system,sans-serif;display:flex;gap:12px;align-items:center';
+    const span = document.createElement('span');
+    span.textContent = 'A new version is available.';
+    const btn = document.createElement('button');
+    btn.textContent = 'Reload';
+    btn.style.cssText = 'background:#fff;color:#0E7C3A;border:none;border-radius:8px;padding:6px 12px;font:700 13px system-ui,sans-serif;cursor:pointer';
+    btn.onclick = () => location.reload();
+    banner.appendChild(span); banner.appendChild(btn);
+    document.body.appendChild(banner);
+  };
+  const check = async () => {
+    if (banner || (navigator.onLine === false)) return;
+    try {
+      const res = await fetch('index.html?_=' + Date.now(), { cache: 'no-store' });
+      if (!res.ok) return;
+      const html = await res.text();
+      if (baseline === null) { baseline = html; return; }
+      if (html !== baseline) showBanner();
+    } catch (_) { /* offline / transient — ignore */ }
+  };
+  setTimeout(check, 4000);
+  setInterval(check, 10 * 60 * 1000);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') check(); });
+})();
 </script>
 </body>
 </html>
