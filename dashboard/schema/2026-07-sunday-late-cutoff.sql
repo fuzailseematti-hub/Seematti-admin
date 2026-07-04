@@ -1,0 +1,45 @@
+-- ───────────────────────────────────────────────────────────────────────────
+-- Sunday late cutoff — APPLIED to prod 2026-07-04 (via MCP migration
+-- `sunday_late_cutoff`).
+--
+-- On Sundays the showroom opens later, so the late mark moves to 10:30 for
+-- EVERYONE — the gender split (ladies 9:30 / men 10:00) applies Mon–Sat only.
+--
+-- 1. New setting `late_cutoff_sunday` (default '10:30'), editable in the
+--    dashboard Kiosk settings page like the other cutoffs.
+-- 2. `kiosk_event` (the active kiosk path) picks the cutoff per shift date:
+--       extract(dow from v_shift) = 0  →  late_cutoff_sunday for all genders
+--       else                           →  gender cutoff as before
+-- 3. `kiosk_scan` (legacy, still callable by a not-yet-updated tablet) got
+--    the same branch so stale clients stay consistent.
+--
+-- The dow test uses v_shift (the shift date), not the wall-clock date, so an
+-- after-midnight boundary still resolves to the correct day's cutoff.
+-- kiosk_punch (dead since kiosk_scan) was left untouched.
+--
+-- See the live DB for the full function bodies; the check-in branch now reads:
+--
+--   if p_action = 'check_in' then
+--     if extract(dow from v_shift) = 0 then
+--       -- Sunday: single cutoff for everyone, regardless of gender.
+--       v_cut := coalesce((select value from public.settings
+--                          where key='late_cutoff_sunday'), '10:30');
+--     else
+--       select lower(coalesce(gender,'')) into v_gender
+--         from public.employees where id=p_employee_id;
+--       if v_gender in ('female','f','woman','women','ladies','lady') then
+--         v_cut := coalesce((select value from public.settings
+--                            where key='late_cutoff_women'), '09:30');
+--       else
+--         v_cut := coalesce((select value from public.settings
+--                            where key='late_cutoff_men'),
+--                           (select value from public.settings
+--                            where key='late_cutoff'), '10:00');
+--       end if;
+--     end if;
+--     v_status := case when v_time >= v_cut then 'late' else 'present' end;
+--     ...
+-- ───────────────────────────────────────────────────────────────────────────
+
+insert into public.settings(key, value) values ('late_cutoff_sunday', '10:30')
+  on conflict (key) do nothing;
