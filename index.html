@@ -1698,10 +1698,13 @@ const useLiveStaffEmployee = (employeeId) => {
     const now = new Date();
     const hh = String(now.getHours()).padStart(2, '0');
     const mm = String(now.getMinutes()).padStart(2, '0');
+    // Sundays open late: everyone is on-time until 10:30. Other days 10:00.
+    const lateAfterMins = now.getDay() === 0 ? 10 * 60 + 30 : 10 * 60;
+    const nowMins = now.getHours() * 60 + now.getMinutes();
     await window.sb.from('attendance').upsert({
       employee_id: employeeId,
       date:        dateISO(now),
-      status:      now.getHours() >= 10 ? 'late' : 'present',
+      status:      nowMins >= lateAfterMins ? 'late' : 'present',
       punch_in_time: `${hh}:${mm}:00`,
       source:      'self',
     }, { onConflict: 'employee_id,date' });
@@ -4069,7 +4072,7 @@ const MobileEmployeeEditSheet = ({ employee, onClose, onSaved }) => {
           placeholder="e.g. Kumbakonam" style={enrollInputStyle(T_)} />
         <div style={{ height: 12 }} />
 
-        <FieldLabel>Gender (sets late cutoff — ladies 9:30, men 10:00)</FieldLabel>
+        <FieldLabel>Gender (sets late cutoff — ladies 9:30, men 10:00; Sun 10:30 all)</FieldLabel>
         <select value={form.gender}
           onChange={e => setForm(f => ({ ...f, gender: e.target.value }))}
           style={{ ...enrollInputStyle(T_), cursor: 'pointer' }}>
@@ -8275,7 +8278,7 @@ const EnrollDetailsStep = ({ details, setDetails, onNext }) => {
           placeholder="e.g. Sales Associate" style={enrollInputStyle(T_)} />
       </EnrollField>
 
-      <EnrollField label="Gender (sets late cutoff — ladies 9:30, men 10:00)">
+      <EnrollField label="Gender (sets late cutoff — ladies 9:30, men 10:00; Sun 10:30 all)">
         <div style={{ display: 'flex', gap: 8 }}>
           {[{ id: 'male', label: 'Male' }, { id: 'female', label: 'Female' }].map(g => {
             const active = details.gender === g.id;

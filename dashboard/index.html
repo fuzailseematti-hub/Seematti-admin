@@ -2337,7 +2337,7 @@ const EmployeesPage = () => {
                   <option value="female">Female</option>
                 </select>
                 <div style={{ fontSize: 11, color: 'var(--inkMuted)', marginTop: 4 }}>
-                  Sets the kiosk late cutoff (ladies 9:30, men 10:00).
+                  Sets the kiosk late cutoff (ladies 9:30, men 10:00; Sundays 10:30 for everyone).
                 </div>
               </div>
             </div>
@@ -7175,7 +7175,7 @@ const KioskSettingsPage = () => {
   const toast = useToast();
   const { can } = useContext(AppCtx);
 
-  const [settings, setSettings] = useState({ late_cutoff: '10:00', match_threshold: '0.55', kiosk_pin: '0000', checkin_start: '08:00', late_cutoff_men: '10:00', late_cutoff_women: '09:30', early_cutoff_men: '22:00', early_cutoff_women: '20:00' });
+  const [settings, setSettings] = useState({ late_cutoff: '10:00', match_threshold: '0.55', kiosk_pin: '0000', checkin_start: '08:00', late_cutoff_men: '10:00', late_cutoff_women: '09:30', late_cutoff_sunday: '10:30', early_cutoff_men: '22:00', early_cutoff_women: '20:00' });
   const [loading, setLoading] = useState(true);
   const [savingKey, setSavingKey] = useState(null);
 
@@ -7185,12 +7185,12 @@ const KioskSettingsPage = () => {
   const fetchAll = useCallback(async () => {
     if (!window.sb) return;
     const [setRes, staffRes, facesRes] = await Promise.all([
-      window.sb.from('settings').select('*').in('key', ['late_cutoff', 'match_threshold', 'kiosk_pin', 'checkin_start', 'late_cutoff_men', 'late_cutoff_women', 'early_cutoff_men', 'early_cutoff_women']),
+      window.sb.from('settings').select('*').in('key', ['late_cutoff', 'match_threshold', 'kiosk_pin', 'checkin_start', 'late_cutoff_men', 'late_cutoff_women', 'late_cutoff_sunday', 'early_cutoff_men', 'early_cutoff_women']),
       window.sb.from('employees').select('id, name, role, section_id')
         .neq('user_type', 'owner').eq('is_active', true),
       window.sb.from('face_embeddings').select('employee_id'),
     ]);
-    const s = { late_cutoff: '10:00', match_threshold: '0.55', kiosk_pin: '0000', checkin_start: '08:00', late_cutoff_men: '10:00', late_cutoff_women: '09:30', early_cutoff_men: '22:00', early_cutoff_women: '20:00' };
+    const s = { late_cutoff: '10:00', match_threshold: '0.55', kiosk_pin: '0000', checkin_start: '08:00', late_cutoff_men: '10:00', late_cutoff_women: '09:30', late_cutoff_sunday: '10:30', early_cutoff_men: '22:00', early_cutoff_women: '20:00' };
     (setRes.data || []).forEach(r => { s[r.key] = r.value; });
     setSettings(s);
 
@@ -7240,6 +7240,7 @@ const KioskSettingsPage = () => {
         { key: 'checkin_start',      value: settings.checkin_start },
         { key: 'late_cutoff_men',    value: settings.late_cutoff_men },
         { key: 'late_cutoff_women',  value: settings.late_cutoff_women },
+        { key: 'late_cutoff_sunday', value: settings.late_cutoff_sunday },
         { key: 'early_cutoff_men',   value: settings.early_cutoff_men },
         { key: 'early_cutoff_women', value: settings.early_cutoff_women },
       ].map(r => ({ ...r, updated_at: new Date().toISOString() }));
@@ -7279,7 +7280,7 @@ const KioskSettingsPage = () => {
             letterSpacing: -0.3, marginBottom: 4,
           }}>Shift timings</div>
           <div style={{ fontSize: 13, color: 'var(--inkMuted)', marginBottom: 16 }}>
-            Scans before <strong>check-in start</strong> count as check-out (handles after-midnight). A check-in at/after the gender cutoff is marked <strong>Late</strong>; a check-out <em>before</em> the gender closing time is flagged as <strong>Left early</strong>.
+            Scans before <strong>check-in start</strong> count as check-out (handles after-midnight). A check-in at/after the gender cutoff is marked <strong>Late</strong>; a check-out <em>before</em> the gender closing time is flagged as <strong>Left early</strong>. On <strong>Sundays</strong> a single late cutoff applies to everyone, regardless of gender.
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
             <div>
@@ -7288,7 +7289,12 @@ const KioskSettingsPage = () => {
                 onChange={e => setSettings(s => ({ ...s, checkin_start: e.target.value }))}
                 style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 16, height: 42, width: '100%', boxSizing: 'border-box' }} />
             </div>
-            <div></div>
+            <div>
+              <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Sunday — late after (everyone)</label>
+              <input type="time" value={settings.late_cutoff_sunday} disabled={readOnly}
+                onChange={e => setSettings(s => ({ ...s, late_cutoff_sunday: e.target.value }))}
+                style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 16, height: 42, width: '100%', boxSizing: 'border-box' }} />
+            </div>
             <div>
               <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Men — late after</label>
               <input type="time" value={settings.late_cutoff_men} disabled={readOnly}
