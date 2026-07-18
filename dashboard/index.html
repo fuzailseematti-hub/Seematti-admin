@@ -1310,6 +1310,64 @@ const SectionDropdown = ({ value, onChange, sectionsList, allLabel = 'All sectio
   );
 };
 
+// ── Kiosk health (heartbeat monitor) ──────────────────────────────
+// The kiosk tablet calls the kiosk_heartbeat RPC every minute. If the
+// newest ping is older than KIOSK_STALE_MIN during store hours, the
+// tablet is frozen/offline and scans are silently being lost — surface
+// it loudly instead of finding out at closing time (2026-07-18 outage).
+const KIOSK_STALE_MIN = 5;
+const kioskStoreHoursNow = () => {
+  const h = Number(new Date().toLocaleString('en-GB', {
+    timeZone: 'Asia/Kolkata', hour: '2-digit', hour12: false,
+  }));
+  return h >= 8 && h < 23;
+};
+const useKioskHealth = () => {
+  const [beats, setBeats] = useState([]);
+  const [tick, setTick] = useState(0);        // re-render so ages stay fresh
+  useEffect(() => {
+    if (!window.sb) return;
+    let stop = false;
+    const fetchBeats = async () => {
+      const { data } = await window.sb.from('kiosk_heartbeats')
+        .select('device_id, last_seen, loaded_at, ua')
+        .order('last_seen', { ascending: false });
+      if (!stop) { setBeats(data || []); setTick(t => t + 1); }
+    };
+    fetchBeats();
+    const iv = setInterval(fetchBeats, 30000);
+    return () => { stop = true; clearInterval(iv); };
+  }, []);
+  const ageMin = (iso) => Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  // Ignore devices silent for over a week (retired/replaced tablets).
+  const recent = beats.filter(b => ageMin(b.last_seen) < 7 * 24 * 60);
+  const newest = recent[0] || null;
+  const stale = !!newest && ageMin(newest.last_seen) >= KIOSK_STALE_MIN;
+  return { beats: recent, newest, stale, ageMin, tick };
+};
+const fmtKioskAge = (mins) =>
+  mins < 1 ? 'just now'
+  : mins < 60 ? `${mins} min ago`
+  : `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
+const KioskHealthBanner = () => {
+  const { newest, stale, ageMin } = useKioskHealth();
+  if (!newest || !stale || !kioskStoreHoursNow()) return null;
+  return (
+    <div style={{
+      background: 'var(--dangerSoft)', border: '1px solid var(--danger)',
+      color: 'var(--danger)', borderRadius: 12, padding: '10px 14px',
+      marginBottom: 14, fontSize: 13, fontWeight: 600,
+      display: 'flex', alignItems: 'center', gap: 8,
+    }}>
+      <span aria-hidden="true">⚠</span>
+      <span>
+        Kiosk not responding — last seen {fmtKioskAge(ageMin(newest.last_seen))}.
+        Scans are not being recorded; check or restart the tablet.
+      </span>
+    </div>
+  );
+};
+
 const AttendancePage = () => {
   const toast = useToast();
   const { can } = useContext(AppCtx);
@@ -1411,6 +1469,7 @@ const AttendancePage = () => {
 
   return (
     <div>
+      <KioskHealthBanner />
       {/* Stat strip */}
       <div className="stat-strip">
         <div className="stat"><div className="k">Staff</div><div className="v">{totals.total}</div></div>
@@ -7261,15 +7320,65 @@ const KioskSettingsPage = () => {
 
   const readOnly = !can('attendance', 'edit');
   const thresholdPct = Math.round(parseFloat(settings.match_threshold) * 100);
+  const kioskHealth = useKioskHealth();
 
   return (
     <div>
+      <KioskHealthBanner />
       <div className="stat-strip">
         <div className="stat present"><div className="k">Enrolled</div><div className="v">{faceStats.enrolled}</div></div>
         <div className="stat late"><div className="k">Partial</div><div className="v">{faceStats.partials}</div></div>
         <div className="stat"><div className="k">Active staff</div><div className="v">{faceStats.totalStaff}</div></div>
         <div className="stat leave"><div className="k">Coverage</div><div className="v">{faceStats.totalStaff ? Math.round((faceStats.enrolled / faceStats.totalStaff) * 100) : 0}%</div></div>
         <div className="stat"><div className="k">Threshold</div><div className="v">{thresholdPct}%</div></div>
+      </div>
+
+      {/* Kiosk device health — one row per tablet that has ever pinged */}
+      <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 24, marginBottom: 16 }}>
+        <div style={{
+          fontFamily: 'Fraunces, Georgia, serif', fontSize: 20, fontWeight: 500,
+          letterSpacing: -0.3, marginBottom: 4,
+        }}>Kiosk health</div>
+        <div style={{ fontSize: 13, color: 'var(--inkMuted)', marginBottom: 14 }}>
+          The tablet pings every minute while the kiosk is open. It also refreshes
+          itself once a day (after 4:00 AM) so the browser never runs stale for weeks.
+          If a device stops pinging during store hours, a red warning appears here and
+          on the Attendance / Daily report pages.
+        </div>
+        {kioskHealth.beats.length === 0 ? (
+          <div style={{ fontSize: 13, color: 'var(--inkMuted)' }}>
+            No pings yet — the kiosk sends its first heartbeat within a minute of
+            opening the scanner on the updated app.
+          </div>
+        ) : kioskHealth.beats.map(b => {
+          const mins = kioskHealth.ageMin(b.last_seen);
+          const online = mins < KIOSK_STALE_MIN;
+          return (
+            <div key={b.device_id} style={{
+              display: 'flex', alignItems: 'center', gap: 12,
+              padding: '8px 0', borderTop: '1px solid var(--borderSoft)',
+              fontSize: 13,
+            }}>
+              <span className={`status-pill ${online ? 'present' : 'absent'}`}>
+                {online ? 'Online' : 'Not responding'}
+              </span>
+              <span style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 12, color: 'var(--inkMuted)' }}>
+                {b.device_id}
+              </span>
+              <span style={{ color: 'var(--inkSoft)' }}>
+                Last seen {fmtKioskAge(mins)}
+              </span>
+              {b.loaded_at && (
+                <span style={{ color: 'var(--inkMuted)', marginLeft: 'auto', fontSize: 12 }}>
+                  Page running since {new Date(b.loaded_at).toLocaleString('en-GB', {
+                    timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short',
+                    hour: '2-digit', minute: '2-digit',
+                  })}
+                </span>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {/* Late cutoff + threshold in a two-column layout */}
@@ -10779,6 +10888,8 @@ const DailyReportPage = () => {
         body { background: #fff !important; }
         .dr-section { break-inside: avoid; }
       }`}</style>
+
+      <div data-print-hide><KioskHealthBanner /></div>
 
       <div className="toolbar" style={{ margin: '0 0 16px', display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }} data-print-hide>
         <span style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Date</span>
