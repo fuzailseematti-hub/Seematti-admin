@@ -7302,6 +7302,60 @@ const KioskScannerScreen = () => {
     return () => clearInterval(t);
   }, []);
 
+  // ── Kiosk health: heartbeat + nightly self-refresh ─────────────────
+  // Heartbeat: ping the server every minute so the dashboard can show
+  // "kiosk last seen X min ago" and flag a frozen tablet within minutes.
+  // (2026-07-18: the tablet froze at 09:30 and the missing check-outs
+  // went unnoticed until closing.)
+  // Nightly refresh: reload the page once per day at/after 04:00 IST so
+  // the browser starts fresh daily instead of degrading over weeks of
+  // continuous camera + face-detection work. If the tablet sleeps
+  // through the night, the pending refresh fires on first wake instead.
+  // Never fires mid-scan, and only after 1h uptime so it can't loop.
+  React.useEffect(() => {
+    if (!pin) return;
+    let deviceId;
+    try {
+      deviceId = localStorage.getItem('kiosk-device-id');
+      if (!deviceId) {
+        deviceId = 'kiosk-' + Math.random().toString(36).slice(2, 10);
+        localStorage.setItem('kiosk-device-id', deviceId);
+      }
+    } catch (_) { deviceId = 'kiosk-nostorage'; }
+    const loadedAt = new Date(performance.timeOrigin || Date.now()).toISOString();
+    const beat = async () => {
+      if (!window.sb || navigator.onLine === false) return;
+      try {
+        await window.sb.rpc('kiosk_heartbeat', {
+          p_pin: pin,
+          p_device_id: deviceId,
+          p_loaded_at: loadedAt,
+          p_ua: (navigator.userAgent || '').slice(0, 300),
+        });
+      } catch (_) { /* transient network — next beat retries */ }
+    };
+    const nightlyRefresh = () => {
+      try {
+        const istHour = Number(new Date().toLocaleString('en-GB', {
+          timeZone: 'Asia/Kolkata', hour: '2-digit', hour12: false,
+        }));
+        const istDate = window.todayISO ? window.todayISO() : null;
+        const uptimeMs = Date.now() - (performance.timeOrigin || Date.now());
+        if (istDate && istHour >= 4
+            && localStorage.getItem('kiosk-nightly-refresh') !== istDate
+            && uptimeMs > 60 * 60 * 1000
+            && !window.__kioskBusy) {
+          localStorage.setItem('kiosk-nightly-refresh', istDate);
+          location.reload();
+        }
+      } catch (_) { /* storage unavailable — skip, heartbeat still works */ }
+    };
+    beat();
+    const hb = setInterval(beat, 60 * 1000);
+    const nr = setInterval(nightlyRefresh, 60 * 1000);
+    return () => { clearInterval(hb); clearInterval(nr); };
+  }, [pin]);
+
   // Camera (re)acquisition. `camNonce` is bumped to force a fresh open after the
   // Android OS kills the stream on screen-sleep / app-background. `acquiringRef`
   // guards the self-heal check below so it doesn't fire while we're mid-open.
