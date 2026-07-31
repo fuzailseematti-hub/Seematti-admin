@@ -271,9 +271,19 @@
   // ──────────────────────────────────────────────────────────
   window.FACE_MODELS_URL =
     'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights';
+  window.FACE_MODELS_URL_FALLBACK =
+    'https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights';
 
   window.loadFaceModels = (() => {
     let promise = null;
+    const loadAll = async (uri) => {
+      const { nets } = window.faceapi;
+      await Promise.all([
+        nets.tinyFaceDetector.loadFromUri(uri),
+        nets.faceLandmark68TinyNet.loadFromUri(uri),
+        nets.faceRecognitionNet.loadFromUri(uri),
+      ]);
+    };
     return () => {
       if (promise) return promise;
       promise = (async () => {
@@ -282,13 +292,16 @@
           await new Promise(r => setTimeout(r, 25));
         }
         if (!window.faceapi) throw new Error('face-api.js did not load');
-        const { nets } = window.faceapi;
-        await Promise.all([
-          nets.tinyFaceDetector.loadFromUri(window.FACE_MODELS_URL),
-          nets.faceLandmark68TinyNet.loadFromUri(window.FACE_MODELS_URL),
-          nets.faceRecognitionNet.loadFromUri(window.FACE_MODELS_URL),
-        ]);
+        try {
+          await loadAll(window.FACE_MODELS_URL);
+        } catch (_) {
+          await loadAll(window.FACE_MODELS_URL_FALLBACK);
+        }
       })();
+      // A failed download must NOT stay cached — clear it so the kiosk's
+      // heal loop (and any later caller) genuinely retries instead of
+      // replaying the same rejection until someone reloads the tablet.
+      promise.catch(() => { promise = null; });
       return promise;
     };
   })();
@@ -7362,6 +7375,18 @@ const KioskScannerScreen = () => {
   const [camNonce, setCamNonce] = React.useState(0);
   const acquiringRef = React.useRef(false);
 
+  // Detector health. The camera heal loop above only notices DEAD TRACKS —
+  // it cannot see a dead face-detector (e.g. the WebGL/TF backend lost its
+  // context after hours of inference: tracks stay "live", the detector just
+  // throws forever, and the idle dim makes it look like a frozen black
+  // screen). Every successful detector pass stamps detOkAtRef; a watchdog
+  // in the matching loop escalates when it goes stale: re-acquire the
+  // camera first, then (after repeated strikes) a guarded page reload —
+  // the only reliable cure for a dead WebGL context.
+  const detOkAtRef = React.useRef(Date.now());
+  const watchdogStrikesRef = React.useRef(0);
+  const [detStalled, setDetStalled] = React.useState(false);
+
   // Load face-api models + open the webcam. Re-runs on camera flip and whenever
   // camNonce is bumped (a self-heal re-acquire).
   React.useEffect(() => {
@@ -7583,8 +7608,13 @@ const KioskScannerScreen = () => {
       let delay = 140;
       try {
         const v = videoRef.current;
-        if (v && v.readyState >= 2 && !inFlight) {
+        if (v && v.readyState >= 2 && v.videoWidth > 0 && !inFlight) {
           const pres = await window.computeFacePresence(v);
+          if (cancelled) return;
+          // Detector produced a result (face or not) — pipeline is alive.
+          detOkAtRef.current = Date.now();
+          watchdogStrikesRef.current = 0;
+          setDetStalled(s => s ? false : s);
           // Gate on face size as a FRACTION of the frame so it behaves the same
           // whether the camera gives 720p or falls back to 480p. ~5.5% of width
           // (with a 60px floor) lets staff stand comfortably back and still read.
@@ -7632,9 +7662,33 @@ const KioskScannerScreen = () => {
       if (!cancelled) setTimeout(tick, delay);
     };
     const handle = setTimeout(tick, 250);
+    // Watchdog: the loop is supposed to produce a detector pass every few
+    // hundred ms. 20s with none means the pipeline is dead even though the
+    // camera tracks look live. Strike 1-2: re-acquire the camera. Strike 3+:
+    // guarded reload (never mid-scan, at most once per 10 minutes).
+    detOkAtRef.current = Date.now();
+    const watchdog = setInterval(() => {
+      if (cancelled) return;
+      if (Date.now() - detOkAtRef.current < 20000) return;
+      detOkAtRef.current = Date.now(); // pace the next escalation
+      watchdogStrikesRef.current += 1;
+      setDetStalled(true);
+      if (watchdogStrikesRef.current >= 3) {
+        try {
+          const last = Number(localStorage.getItem('kiosk-watchdog-reload') || 0);
+          if (!window.__kioskBusy && Date.now() - last > 10 * 60 * 1000) {
+            localStorage.setItem('kiosk-watchdog-reload', String(Date.now()));
+            location.reload();
+            return;
+          }
+        } catch (_) { /* storage unavailable — fall through to re-acquire */ }
+      }
+      setCamNonce(n => n + 1);
+    }, 5000);
     return () => {
       cancelled = true;
       clearTimeout(handle);
+      clearInterval(watchdog);
       steadyRef.current = 0;
     };
   }, [modelsReady, cameraReady, phase, pin, showMatchUI]);
@@ -7704,7 +7758,7 @@ const KioskScannerScreen = () => {
       <div style={{ flex: 1, padding: '0 20px', position: 'relative', minHeight: 0 }}>
         <KioskCameraFrame phase={phase} current={current} pulse={pulse}
           videoRef={videoRef} cameraErr={cameraErr} facingMode={facingMode}
-          faceSeen={faceSeen}
+          faceSeen={faceSeen} stalled={detStalled}
           enrolledCount={enrolled} />
       </div>
 
@@ -7937,7 +7991,7 @@ const KioskActionBtn = ({ color, icon, label, sub, onClick, full = false }) => (
   </button>
 );
 
-const KioskCameraFrame = ({ phase, current, pulse, videoRef, cameraErr, enrolledCount, facingMode = 'user', faceSeen = true }) => {
+const KioskCameraFrame = ({ phase, current, pulse, videoRef, cameraErr, enrolledCount, facingMode = 'user', faceSeen = true, stalled = false }) => {
   const ringColor =
     phase === 'matched' ? '#0E7C3A' :
     phase === 'detecting' || phase === 'matching' ? '#E8C65A' :
@@ -7967,13 +8021,15 @@ const KioskCameraFrame = ({ phase, current, pulse, videoRef, cameraErr, enrolled
             position: 'absolute', inset: 0,
             width: '100%', height: '100%', objectFit: 'cover',
             transform: facingMode === 'user' ? 'scaleX(-1)' : 'none',
-            opacity: phase === 'matched' ? 0.2 : (faceSeen ? 0.85 : 0.18),
+            // Never idle-dim while the pipeline is unhealthy — a failure
+            // must look like a message, not a frozen black screen.
+            opacity: phase === 'matched' ? 0.2 : ((faceSeen || stalled || cameraErr) ? 0.85 : 0.18),
             transition: 'opacity 400ms',
           }} />
       )}
       {/* Idle-dim overlay — shown when nobody is standing in front of the
           camera. Detection keeps ticking so the first face wakes us up. */}
-      {phase === 'idle' && !faceSeen && !cameraErr && (
+      {phase === 'idle' && !faceSeen && !cameraErr && !stalled && (
         <div style={{
           position: 'absolute', inset: 0,
           display: 'flex', flexDirection: 'column',
@@ -7996,6 +8052,15 @@ const KioskCameraFrame = ({ phase, current, pulse, videoRef, cameraErr, enrolled
           background: 'rgba(179, 38, 30, 0.2)', border: '1px solid rgba(179, 38, 30, 0.4)',
           color: '#ffd9d3', fontSize: 11.5, textAlign: 'center',
         }}>{cameraErr}</div>
+      )}
+      {/* Watchdog badge — detector died and is being rebuilt */}
+      {!cameraErr && stalled && (
+        <div style={{
+          position: 'absolute', left: 16, right: 16, top: 16,
+          padding: '10px 12px', borderRadius: 10,
+          background: 'rgba(232, 198, 90, 0.15)', border: '1px solid rgba(232, 198, 90, 0.4)',
+          color: '#E8C65A', fontSize: 11.5, textAlign: 'center',
+        }}>Restarting camera… · கேமரா மறுதொடக்கம்…</div>
       )}
       {/* Enrolled count badge */}
       {!cameraErr && phase === 'idle' && (
