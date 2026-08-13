@@ -2,3 +2,7 @@
 .agents/
 skills-lock.json
 .claude/
+
+# Wrangler local state (adms-bridge deploys via `npx wrangler deploy`)
+.wrangler/
+.DS_Store

@@ -1,0 +1,8 @@
+name = "adms"
+main = "worker.js"
+compatibility_date = "2026-08-01"
+
+# Secrets (set once, never committed):
+#   npx wrangler secret put SUPABASE_URL
+#   npx wrangler secret put SUPABASE_ANON_KEY
+#   npx wrangler secret put ADMS_SECRET
