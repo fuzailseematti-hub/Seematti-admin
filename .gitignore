@@ -6,3 +6,5 @@ skills-lock.json
 # Wrangler local state (adms-bridge deploys via `npx wrangler deploy`)
 .wrangler/
 .DS_Store
+graphify-out
+.claude/settings.local.json
