@@ -1363,16 +1363,27 @@ const useLiveLeaves = () => {
     return () => { window.sb.removeChannel(channel); };
   }, [fetchAll]);
 
+  // A decision is never a bare status flip: approving marks attendance
+  // 'on_leave' for every covered day (approve_leave), rejecting/re-opening
+  // removes exactly the rows that approval wrote (unapprove_leave). Both
+  // RPCs stamp decided_at; decided_by stays ours for the audit trail.
+  // Returns coverage warnings so the caller can surface them.
   const decide = React.useCallback(async (id, action, deciderId) => {
-    if (!window.sb) return;
+    if (!window.sb) return { warnings: [] };
+    let warnings = [];
+    if (action === 'approved') {
+      const { data, error } = await window.sb.rpc('approve_leave', { p_id: id });
+      if (error) { console.error('approve_leave failed', error); return { error, warnings }; }
+      warnings = Array.isArray(data?.coverage_warnings) ? data.coverage_warnings : [];
+    } else {
+      const { error } = await window.sb.rpc('unapprove_leave', { p_id: id, p_status: action });
+      if (error) { console.error('unapprove_leave failed', error); return { error, warnings }; }
+    }
     await window.sb
       .from('leave_requests')
-      .update({
-        status:     action,
-        decided_by: deciderId || null,
-        decided_at: new Date().toISOString(),
-      })
+      .update({ decided_by: deciderId || null })
       .eq('id', id);
+    return { warnings };
   }, []);
 
   const submit = React.useCallback(async ({ employeeId, type, days, fromDate, reason }) => {
@@ -4317,6 +4328,29 @@ const LeavesScreen = () => {
     : { items: [], loading: false, decide: async () => {} };
   const [active, setActive] = React.useState(null);
 
+  // Real free-leave usage for whoever's request is open, this calendar month.
+  // (There is no annual Casual/Sick/Earned balance system — do not invent one.)
+  const [leaveBank, setLeaveBank] = React.useState(null);
+  React.useEffect(() => {
+    let alive = true;
+    setLeaveBank(null);
+    const empId = active?.employee_id;
+    if (!empId || !window.sb) return;
+    (async () => {
+      const now = new Date();
+      const first = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+      const last = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().slice(0, 10);
+      const [{ data: s }, { data: fl }] = await Promise.all([
+        window.sb.from('settings').select('value').eq('key', 'free_leave_per_month').maybeSingle(),
+        window.sb.from('free_leaves').select('leave_date').eq('employee_id', empId)
+          .gte('leave_date', first).lte('leave_date', last),
+      ]);
+      const bank = parseInt(s?.value, 10);
+      if (alive) setLeaveBank({ bank: Number.isFinite(bank) ? bank : 4, used: (fl || []).length });
+    })();
+    return () => { alive = false; };
+  }, [active?.employee_id]);
+
   const isAdmin = user === 'owner' || user === 'admin' || user === 'hr';
   const hasAll = isAdmin || !!(userAccess && userAccess.all_sections);
   const allowed = hasAll ? null : (userAccess?.section_ids || []);
@@ -4334,9 +4368,13 @@ const LeavesScreen = () => {
   const handleAction = async (id, action) => {
     if (!canApprove) { toast('You don\u2019t have leave approval rights'); return; }
     const target = items.find(x => x.id === id);
-    await decide(id, action, userId || 'E000');
+    const res = await decide(id, action, userId || 'E000');
+    if (res?.error) { toast('Could not save the decision — try again'); return; }
+    const warn = (res?.warnings || []).length;
     toast(action === 'approved'
-      ? `Leave approved for ${target?.name || 'employee'}`
+      ? (warn
+          ? `Approved — ⚠️ ${warn} day(s) over the section's coverage cap`
+          : `Leave approved for ${target?.name || 'employee'}`)
       : 'Leave rejected');
     setActive(null);
   };
@@ -4386,7 +4424,7 @@ const LeavesScreen = () => {
         {decided.length > 0 && (
           <>
             <div style={{ fontSize: 12, fontWeight: 600, color: T_.inkMuted, letterSpacing: 0.5, textTransform: 'uppercase', padding: '0 4px', marginBottom: 10 }}>
-              Decided today
+              Decided
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {decided.map(req => <LeaveCard key={req.id} req={req} onClick={() => {}} />)}
@@ -4428,9 +4466,13 @@ const LeavesScreen = () => {
                 <div style={{ fontSize: 13.5, color: T_.ink, lineHeight: 1.45 }}>{active.reason}</div>
               </div>
             </div>
-            <div style={{ fontSize: 11.5, color: T_.inkMuted, marginBottom: 14 }}>
-              Balance: 8 casual · 12 earned · 3 sick days remaining this year
-            </div>
+            {/* Real free-leave usage this month (no annual balance system exists —
+                the fabricated "8 casual · 12 earned · 3 sick" line was removed). */}
+            {leaveBank && (
+              <div style={{ fontSize: 11.5, color: T_.inkMuted, marginBottom: 14 }}>
+                Free leave this month: {leaveBank.used} of {leaveBank.bank} used
+              </div>
+            )}
             <div style={{ display: 'flex', gap: 10 }}>
               {canApprove ? (
                 <>

@@ -863,6 +863,7 @@ const NAV = [
     { id: 'daily',         label: 'Daily report',  area: 'attendance' },
     { id: 'leaves',        label: 'Leave requests',area: 'leaves' },
     { id: 'free_leave',    label: 'Monthly leave', area: 'leaves' },
+    { id: 'leave_roster',  label: 'Leave roster',  area: 'leaves' },
     { id: 'tasks',         label: 'Tasks',         area: 'tasks' },
     { id: 'announcements', label: 'Announcements', area: 'announcements' },
     { id: 'visitors',      label: 'Visitor log',   area: 'visitors' },
@@ -3134,11 +3135,58 @@ const LeavesPage = () => {
   // legacy placeholder so the column is never null.
   const deciderId = session?.employee_id || (role === 'owner' ? 'E000' : 'E001');
 
+  // A leave decision is never a bare status flip any more:
+  //   approve  → approve_leave()   marks attendance 'on_leave' for every
+  //              covered day and returns coverage warnings
+  //   reject /
+  //   re-open  → unapprove_leave() removes exactly the attendance rows
+  //              this approval wrote, then sets the status
+  // Both RPCs stamp decided_at; we still write decided_by ourselves for
+  // the audit trail (and clear it when a request goes back to pending).
+  const applyDecision = async (id, action) => {
+    if (action === 'approved') {
+      const { data, error } = await window.sb.rpc('approve_leave', { p_id: id });
+      if (error) return { error, warnings: [], days: 0 };
+      await window.sb.from('leave_requests')
+        .update({ decided_by: deciderId, decided_at: new Date().toISOString() })
+        .eq('id', id);
+      return {
+        error: null,
+        warnings: Array.isArray(data?.coverage_warnings) ? data.coverage_warnings : [],
+        days: data?.days_marked || 0,
+      };
+    }
+    const status = action === 'pending' ? 'pending' : 'rejected';
+    const { error } = await window.sb.rpc('unapprove_leave', { p_id: id, p_status: status });
+    if (error) return { error, warnings: [], days: 0 };
+    await window.sb.from('leave_requests')
+      .update(status === 'pending'
+        ? { decided_by: null, decided_at: null }
+        : { decided_by: deciderId, decided_at: new Date().toISOString() })
+      .eq('id', id);
+    return { error: null, warnings: [], days: 0 };
+  };
+
+  const fmtCoverageWarning = (w) => (w && typeof w === 'object')
+    ? `${w.day}: ${SECTION_META[w.section]?.label || w.section || '—'} ${w.off}/${w.cap} off`
+    : String(w);
+
   const decide = async (id, action) => {
     if (!can('leaves', 'edit')) return;
-    await window.sb.from('leave_requests')
-      .update({ status: action, decided_by: deciderId, decided_at: new Date().toISOString() })
-      .eq('id', id);
+    const res = await applyDecision(id, action);
+    if (res.error) {
+      toast(res.error.message || 'Could not update this leave request');
+      console.error(res.error);
+      return;
+    }
+    if (action === 'approved') {
+      toast(res.warnings.length
+        ? `Approved · ⚠ coverage: ${res.warnings.map(fmtCoverageWarning).join(' · ')}`
+        : `Approved · ${res.days} day${res.days === 1 ? '' : 's'} marked on leave`);
+    } else {
+      toast(action === 'pending' ? 'Re-opened · leave days cleared' : 'Rejected · leave days cleared');
+    }
+    fetchAll();
   };
   const del = async (id) => {
     if (!can('leaves', 'delete')) return;
@@ -3149,11 +3197,21 @@ const LeavesPage = () => {
     if (!can('leaves', 'edit')) return;
     const ids = Array.from(selected);
     if (!ids.length) return;
-    await window.sb.from('leave_requests')
-      .update({ status: action, decided_by: deciderId, decided_at: new Date().toISOString() })
-      .in('id', ids);
-    toast(`${ids.length} leave request${ids.length === 1 ? '' : 's'} ${action}`);
+    let ok = 0;
+    let failed = 0;
+    const warnings = [];
+    for (const id of ids) {
+      const res = await applyDecision(id, action);
+      if (res.error) { failed++; console.error(res.error); continue; }
+      ok++;
+      res.warnings.forEach(w => warnings.push(fmtCoverageWarning(w)));
+    }
+    let msg = `${ok} leave request${ok === 1 ? '' : 's'} ${action}`;
+    if (failed) msg += ` · ${failed} failed`;
+    if (warnings.length) msg += ` · ⚠ coverage: ${warnings.join(' · ')}`;
+    toast(msg);
     setSelected(new Set());
+    fetchAll();
   };
   const bulkDelete = async () => {
     if (!can('leaves', 'delete')) return;
@@ -4923,9 +4981,30 @@ const num = (v) => {
 };
 const round = (n) => Math.round(num(n));
 
-// Paid-leave bank: 4 days/month. Unused days are paid on top of salary.
-const PAID_LEAVE_BANK = 4;
-const derivedLdays = (leavesTaken) => Math.max(0, PAID_LEAVE_BANK - num(leavesTaken));
+// Paid-leave bank: comes from settings.free_leave_per_month (the same
+// key the Monthly-leave page uses), 4 days/month as the fallback default.
+// Unused days are paid on top of salary.
+const PAID_LEAVE_BANK_DEFAULT = 4;
+const derivedLdays = (leavesTaken, bank) =>
+  Math.max(0, (num(bank) || PAID_LEAVE_BANK_DEFAULT) - num(leavesTaken));
+
+// One live read of the paid-leave bank. Same fetch shape as
+// MonthlyLeavePage (`settings.free_leave_per_month`, stored as text).
+const useFreeLeaveBank = () => {
+  const [bank, setBank] = useState(PAID_LEAVE_BANK_DEFAULT);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      if (!window.sb) return;
+      const { data } = await window.sb.from('settings')
+        .select('value').eq('key', 'free_leave_per_month').maybeSingle();
+      const v = parseInt(data?.value, 10);
+      if (alive && Number.isFinite(v) && v >= 0) setBank(v);
+    })();
+    return () => { alive = false; };
+  }, []);
+  return bank;
+};
 
 // Compute { amount, net } for a new-joined payslip.
 const computeNewJoined = ({ salary, days, p_days, l_days, bonus, dues, credit, advance }) => {
@@ -4961,17 +5040,51 @@ const computeEsiPf = ({ salary, hra, wa, da, days, p_days, l_days, bonus, incent
 };
 
 // Count attendance rows into P.DAYS + L.DAYS for the selected month.
-// late still counts toward P.DAYS; on_leave eats into the 4-day bank.
-const attendanceToPayDays = (rows) => {
+// late still counts toward P.DAYS; leave days eat into the paid-leave bank.
+//
+// Leave days come from THREE sources, de-duplicated by day:
+//   1. attendance rows with status 'on_leave'
+//   2. free_leaves rows planned for the month
+//   3. days covered by an APPROVED leave_request (the leave_attendance
+//      ledger written by the approve_leave RPC)
+// A day with an actual punch (present / late) always WINS over every
+// leave source — if they turned up, it is not a leave day.
+//
+// opts: { bank, leaveDays } where leaveDays is a Set/array of ISO days
+// gathered from sources 2 + 3 for this employee, this month.
+const attendanceToPayDays = (rows, opts = {}) => {
+  const bank = opts.bank;
   const c = { present: 0, late: 0, on_leave: 0, absent: 0 };
-  (rows || []).forEach(r => { c[r.status] = (c[r.status] || 0) + 1; });
+  const punchDays = new Set();
+  const leaveDays = new Set();
+  (rows || []).forEach(r => {
+    c[r.status] = (c[r.status] || 0) + 1;
+    if (r.status === 'present' || r.status === 'late') punchDays.add(r.date);
+    if (r.status === 'on_leave') leaveDays.add(r.date);
+  });
+  (opts.leaveDays ? Array.from(opts.leaveDays) : []).forEach(d => { if (d) leaveDays.add(d); });
+  punchDays.forEach(d => leaveDays.delete(d));
+  const leavesTaken = leaveDays.size;
   return {
     p_days: c.present + c.late,
-    l_days: derivedLdays(c.on_leave),
+    l_days: derivedLdays(leavesTaken, bank),
     late_days: c.late,
-    leaves_taken: c.on_leave,
+    leaves_taken: leavesTaken,
     absent_days: c.absent,
   };
+};
+
+// Bucket free_leaves + leave_attendance rows into
+// { employee_id -> Set(ISO day) } for the month.
+const leaveDaysByEmployee = (freeLeaveRows, leaveAttRows) => {
+  const m = {};
+  const add = (empId, day) => {
+    if (!empId || !day) return;
+    (m[empId] = m[empId] || new Set()).add(day);
+  };
+  (freeLeaveRows || []).forEach(r => add(r.employee_id, r.leave_date));
+  (leaveAttRows  || []).forEach(r => add(r.employee_id, r.day));
+  return m;
 };
 
 const PayslipsPage = () => {
@@ -4988,6 +5101,7 @@ const PayslipsPage = () => {
   const [da, setDa] = useState(7313);
   const [loading, setLoading] = useState(true);
 
+  const bank = useFreeLeaveBank();
   const { rows: employees } = useEmployees();
 
   const [editing, setEditing] = useState(null);
@@ -5015,12 +5129,21 @@ const PayslipsPage = () => {
 
   const fetchAll = useCallback(async () => {
     if (!window.sb) return;
-    const [payRes, attRes, daRes] = await Promise.all([
+    const [payRes, attRes, daRes, flRes, laRes] = await Promise.all([
       window.sb.from('payslips').select('*').eq('month', month).order('employee_id'),
       window.sb.from('attendance')
         .select('employee_id, status, date')
         .gte('date', month).lte('date', monthEnd),
       window.sb.from('app_settings').select('value').eq('key', 'payroll.da').maybeSingle(),
+      // Planned free-leave days for the month…
+      window.sb.from('free_leaves')
+        .select('employee_id, leave_date')
+        .gte('leave_date', month).lte('leave_date', monthEnd),
+      // …and days covered by an APPROVED leave request (approve_leave
+      // writes this ledger; unapprove_leave clears it).
+      window.sb.from('leave_attendance')
+        .select('employee_id, day')
+        .gte('day', month).lte('day', monthEnd),
     ]);
     setRows(payRes.data || []);
     // Bucket attendance by employee, turn into { p_days, l_days, late_days, leaves_taken }.
@@ -5028,12 +5151,17 @@ const PayslipsPage = () => {
     (attRes.data || []).forEach(r => {
       (byEmp[r.employee_id] = byEmp[r.employee_id] || []).push(r);
     });
+    const extraLeave = leaveDaysByEmployee(flRes.data, laRes.data);
     const stats = {};
-    Object.keys(byEmp).forEach(id => { stats[id] = attendanceToPayDays(byEmp[id]); });
+    // Someone can have free/approved leave days but no attendance rows
+    // at all — walk the union of both key sets.
+    new Set([...Object.keys(byEmp), ...Object.keys(extraLeave)]).forEach(id => {
+      stats[id] = attendanceToPayDays(byEmp[id], { bank, leaveDays: extraLeave[id] });
+    });
     setAttendance(stats);
     if (daRes.data?.value?.amount != null) setDa(Number(daRes.data.value.amount) || 7313);
     setLoading(false);
-  }, [month, monthEnd]);
+  }, [month, monthEnd, bank]);
 
   useEffect(() => {
     if (!window.sb) return;
@@ -5074,17 +5202,48 @@ const PayslipsPage = () => {
 
   // Fetch active (unfinished) advances so we can auto-deduct the monthly
   // installment onto the payslip. The advance id is stashed on the draft
-  // so `save()` can bump months_deducted after the insert.
+  // so `save()` can write the advance_payments ledger row after the insert.
+  //
+  // Only DISBURSED advances are deducted — an approved-but-not-yet-paid-out
+  // advance must not eat into salary.
+  //
+  // Each row carries `_deduction`: the monthly installment CAPPED at
+  // (amount_approved − already collected), so the final instalment never
+  // overcharges (₹5,000 over 3 months totals exactly ₹5,000).
   const fetchActiveAdvances = async (employeeId) => {
     if (!window.sb || !employeeId) return [];
     const { data } = await window.sb.from('advances')
-      .select('id, monthly_deduction, months_total, months_deducted')
+      .select('id, monthly_deduction, months_total, months_deducted, amount_approved')
       .eq('employee_id', employeeId)
-      .eq('status', 'approved');
-    return (data || []).filter(a => a.months_deducted < a.months_total);
+      .eq('status', 'approved')
+      .not('disbursed_at', 'is', null);
+    const list = data || [];
+    if (!list.length) return [];
+    const { data: paid } = await window.sb.from('advance_payments')
+      .select('advance_id, amount')
+      .in('advance_id', list.map(a => a.id));
+    const collected = {};
+    (paid || []).forEach(p => {
+      collected[p.advance_id] = (collected[p.advance_id] || 0) + num(p.amount);
+    });
+    return list.map(a => {
+      const already   = collected[a.id] || 0;
+      const approved  = num(a.amount_approved);
+      // No approved amount on legacy rows → fall back to the month count.
+      const remaining = approved > 0
+        ? Math.max(0, approved - already)
+        : Math.max(0, (num(a.months_total) - num(a.months_deducted)) * num(a.monthly_deduction));
+      return {
+        ...a,
+        _collected: already,
+        _remaining: remaining,
+        _deduction: Math.min(round(a.monthly_deduction), round(remaining)),
+      };
+    }).filter(a => a._deduction > 0);
   };
+  const advDeduction = (a) => round(a?._deduction ?? a?.monthly_deduction);
   const sumAdvances = (advs) =>
-    (advs || []).reduce((s, a) => s + (Number(a.monthly_deduction) || 0), 0);
+    (advs || []).reduce((s, a) => s + advDeduction(a), 0);
 
   // Build the derived display values for a draft payslip.
   const recomputeDraft = (draft, employee, daValue) => {
@@ -5175,8 +5334,8 @@ const PayslipsPage = () => {
     if (num(draft.advance_amt) && Array.isArray(draft._advances)) {
       draft._advances.forEach(a => {
         deduct_items.push({
-          label: `Advance repayment (${a.months_deducted + 1}/${a.months_total})`,
-          amount: a.monthly_deduction || 0,
+          label: `Advance repayment (${num(a.months_deducted) + 1}/${a.months_total})`,
+          amount: advDeduction(a),
           advance_id: a.id,
         });
       });
@@ -5191,7 +5350,7 @@ const PayslipsPage = () => {
   // Compose a brand-new draft for the given employee.
   const makeDraftForEmployee = async (emp, overrides = {}) => {
     const advs = await fetchActiveAdvances(emp.id);
-    const stats = attendance[emp.id] || { p_days: daysInMonth, l_days: PAID_LEAVE_BANK };
+    const stats = attendance[emp.id] || { p_days: daysInMonth, l_days: bank };
     const draft = {
       id: null,
       _new: true,
@@ -5226,7 +5385,7 @@ const PayslipsPage = () => {
       setEditing({
         id: null, _new: true, employee_id: '', salary_type: 'new_joined',
         month, monthly_salary: 0, hra: 0, wa: 0,
-        days_in_month: daysInMonth, p_days: daysInMonth, l_days: PAID_LEAVE_BANK,
+        days_in_month: daysInMonth, p_days: daysInMonth, l_days: bank,
         bonus: 0, dues: 0, credit: 0, advance_amt: 0, diff_pct: 0,
         _advances: [], paid_at: null, bank_last4: '',
         amount: 0, gross: 0, deductions: 0, net: 0,
@@ -5283,16 +5442,21 @@ const PayslipsPage = () => {
     try {
       const payload = draftToPayload(editing);
       if (editing._new) {
-        const { error } = await window.sb.from('payslips').insert(payload);
+        const { data: created, error } = await window.sb.from('payslips')
+          .insert(payload).select('id').maybeSingle();
         if (error) {
           toast(error.message.includes('duplicate')
             ? 'Payslip already exists for this employee this month'
             : 'Could not save (see console)');
           console.error(error);
         } else {
-          await bumpAdvances(editing._advances);
-          toast(editing._advances?.length
-            ? `Payslip created · ${editing._advances.length} advance${editing._advances.length === 1 ? '' : 's'} updated`
+          // Only touch the advance ledger when something was actually
+          // deducted on this payslip.
+          const applied = num(editing.advance_amt) > 0
+            ? await bumpAdvances(editing._advances, created?.id, editing.month)
+            : 0;
+          toast(applied
+            ? `Payslip created · ${applied} advance${applied === 1 ? '' : 's'} updated`
             : 'Payslip created');
           close();
         }
@@ -5304,22 +5468,41 @@ const PayslipsPage = () => {
     } finally { setSaving(false); }
   };
 
-  // Bump months_deducted on every advance that rode along with the
-  // newly-created payslip; mark the advance 'completed' when it hits
-  // months_total.
-  const bumpAdvances = async (advs) => {
-    if (!advs || !advs.length) return;
-    const { data: fresh } = await window.sb.from('advances')
-      .select('id, months_total, months_deducted')
-      .in('id', advs.map(a => a.id));
-    await Promise.all((fresh || []).map(a => {
-      const next = (a.months_deducted || 0) + 1;
-      const done = next >= a.months_total;
-      return window.sb.from('advances').update({
-        months_deducted: next,
-        status: done ? 'completed' : 'approved',
-      }).eq('id', a.id);
+  // Record this payslip's instalment for every advance that rode along
+  // with it, in the advance_payments ledger.
+  //
+  // advances.months_deducted and advances.status are DERIVED by a DB
+  // trigger from these rows — the client must never write them.
+  //
+  // advance_payments is UNIQUE(advance_id, month), so a duplicate-key
+  // error just means this month's instalment is already on the ledger:
+  // treat it as already-applied, not as a failure. Returns how many
+  // ledger rows are now in place for this payslip.
+  const bumpAdvances = async (advs, payslipId, monthIso) => {
+    if (!advs || !advs.length) return 0;
+    if (!payslipId) {
+      console.error('bumpAdvances: no payslip id — advance ledger not written', advs);
+      return 0;
+    }
+    const rows = (advs || [])
+      .map(a => ({
+        advance_id: a.id,
+        payslip_id: payslipId,
+        month:      monthIso,
+        amount:     advDeduction(a),
+      }))
+      .filter(r => r.amount > 0);
+    if (!rows.length) return 0;
+    const results = await Promise.all(rows.map(async (r) => {
+      const { error } = await window.sb.from('advance_payments').insert(r);
+      if (!error) return true;
+      const dup = error.code === '23505'
+        || /duplicate key|already exists/i.test(error.message || '');
+      if (dup) return true;   // idempotent: this month is already recorded
+      console.error('advance_payments insert failed', error, r);
+      return false;
     }));
+    return results.filter(Boolean).length;
   };
 
   const del = async (row) => {
@@ -5356,7 +5539,7 @@ const PayslipsPage = () => {
     const kindLabel = kind === 'esi_pf' ? 'ESI / PF' : 'new-joined';
 
     let confirmMsg = `Generate ${missing.length} ${kindLabel} payslip${missing.length === 1 ? '' : 's'} for ${monthLabel}?\n\n` +
-      `P.DAYS and L.DAYS are auto-filled from attendance (${PAID_LEAVE_BANK}-day paid-leave bank). You can edit each row after.`;
+      `P.DAYS and L.DAYS are auto-filled from attendance (${bank}-day paid-leave bank). You can edit each row after.`;
 
     if (noAttendance.length) {
       const preview = noAttendance.slice(0, 8).map(e => `• ${e.name}`).join('\n');
@@ -5372,7 +5555,7 @@ const PayslipsPage = () => {
       for (const emp of missing) {
         const advs = await fetchActiveAdvances(emp.id);
         advsByEmp[emp.id] = advs;
-        const stats = attendance[emp.id] || { p_days: daysInMonth, l_days: PAID_LEAVE_BANK };
+        const stats = attendance[emp.id] || { p_days: daysInMonth, l_days: bank };
         const draft = recomputeDraft({
           employee_id: emp.id,
           month,
@@ -5388,16 +5571,23 @@ const PayslipsPage = () => {
         }, emp, da);
         payloads.push(draftToPayload(draft));
       }
-      const { error } = await window.sb.from('payslips').insert(payloads);
+      const { data: created, error } = await window.sb.from('payslips')
+        .insert(payloads).select('id, employee_id');
       if (error) {
         const msg = [error.message, error.details, error.hint].filter(Boolean).join(' — ');
         toast('Bulk generate failed: ' + (msg || 'unknown error'));
         console.error('Bulk generate error:', error, 'First payload:', payloads[0]);
         return;
       }
-      // Bump months_deducted for every advance touched.
-      const allAdvs = Object.values(advsByEmp).flat();
-      await bumpAdvances(allAdvs);
+      // Write the advance ledger row for every advance touched, against
+      // the payslip it was actually deducted on.
+      const payslipIdByEmp = {};
+      (created || []).forEach(p => { payslipIdByEmp[p.employee_id] = p.id; });
+      for (const empId of Object.keys(advsByEmp)) {
+        const advs = advsByEmp[empId];
+        if (!advs || !advs.length) continue;
+        await bumpAdvances(advs, payslipIdByEmp[empId], month);
+      }
       toast(`Generated ${payloads.length} payslip${payloads.length === 1 ? '' : 's'}`);
     } finally { setBulkBusy(false); }
   };
@@ -5725,6 +5915,7 @@ const PayslipsPage = () => {
             eligibleList={eligibleList}
             attendance={attendance}
             da={da}
+            bank={bank}
             daysInMonth={daysInMonth}
             onPickEmployee={pickEmployee}
             onPatch={patchDraft}
@@ -5746,7 +5937,7 @@ const PayslipsPage = () => {
 };
 
 // Renders the payslip edit form. Different body per salary_type.
-const PayslipEditor = ({ editing, emp, eligibleList, attendance, da, daysInMonth, onPickEmployee, onPatch }) => {
+const PayslipEditor = ({ editing, emp, eligibleList, attendance, da, bank, daysInMonth, onPickEmployee, onPatch }) => {
   const isEsi = editing.salary_type === 'esi_pf';
   const empStats = emp ? attendance[emp.id] : null;
 
@@ -5792,7 +5983,7 @@ const PayslipEditor = ({ editing, emp, eligibleList, attendance, da, daysInMonth
         }}>
           Attendance: <strong>{empStats.p_days}</strong> present-days ·{' '}
           <strong>{empStats.leaves_taken}</strong> leaves taken ·{' '}
-          <strong>{empStats.l_days}</strong> unused of {PAID_LEAVE_BANK}-day paid-leave bank
+          <strong>{empStats.l_days}</strong> unused of {num(bank) || PAID_LEAVE_BANK_DEFAULT}-day paid-leave bank
         </div>
       )}
 
@@ -6257,6 +6448,7 @@ const BonusPlannerPage = () => {
   const toast = useToast();
   const { can } = useContext(AppCtx);
   const { rows: employees } = useEmployees();
+  const bank = useFreeLeaveBank();
 
   const [month, setMonth] = useState(() => firstOfMonth(new Date()));
   const [attendance, setAttendance] = useState({});
@@ -6288,20 +6480,29 @@ const BonusPlannerPage = () => {
     // which silently truncates at 1000 rows as plans accumulate over months.
     const planRes = await window.sb.from('bonus_plans').select('*').eq('month', month).maybeSingle();
     const planRow = planRes.data || null;
-    const [rowsRes, attRes, payRes] = await Promise.all([
+    const [rowsRes, attRes, payRes, flRes, laRes] = await Promise.all([
       planRow
         ? window.sb.from('bonus_plan_rows').select('*').eq('plan_id', planRow.id)
         : Promise.resolve({ data: [] }),
       window.sb.from('attendance')
         .select('employee_id, status, date')
         .gte('date', month).lte('date', monthEnd),
-      window.sb.from('payslips').select('id, employee_id, bonus, amount, gross, deductions, net, salary_type, p_days, l_days, days_in_month, monthly_salary, hra, wa, dues, credit, advance_amt, diff_pct').eq('month', month),
+      window.sb.from('payslips').select('id, employee_id, bonus, amount, gross, deductions, net, salary_type, p_days, l_days, days_in_month, monthly_salary, hra, wa, dues, credit, advance_amt, diff_pct, earnings').eq('month', month),
+      window.sb.from('free_leaves')
+        .select('employee_id, leave_date')
+        .gte('leave_date', month).lte('leave_date', monthEnd),
+      window.sb.from('leave_attendance')
+        .select('employee_id, day')
+        .gte('day', month).lte('day', monthEnd),
     ]);
     // Bucket attendance by employee.
     const byEmp = {};
     (attRes.data || []).forEach(r => { (byEmp[r.employee_id] = byEmp[r.employee_id] || []).push(r); });
+    const extraLeave = leaveDaysByEmployee(flRes.data, laRes.data);
     const stats = {};
-    Object.keys(byEmp).forEach(id => { stats[id] = attendanceToPayDays(byEmp[id]); });
+    new Set([...Object.keys(byEmp), ...Object.keys(extraLeave)]).forEach(id => {
+      stats[id] = attendanceToPayDays(byEmp[id], { bank, leaveDays: extraLeave[id] });
+    });
     setAttendance(stats);
     // Bucket payslips by employee.
     const payByEmp = {};
@@ -6314,7 +6515,7 @@ const BonusPlannerPage = () => {
     (rowsRes.data || []).forEach(r => { seeded[r.employee_id] = Number(r.bonus_amount) || 0; });
     setBonuses(seeded);
     setLoading(false);
-  }, [month, monthEnd]);
+  }, [month, monthEnd, bank]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -6422,10 +6623,25 @@ const BonusPlannerPage = () => {
           newDed    = num(p.dues) + num(p.advance_amt);
           newNet    = c.net;
         }
+        // Keep the earnings JSON in step with the Bonus column, otherwise
+        // the mobile payslip breakdown stops summing to the gross.
+        const earnings = Array.isArray(p.earnings) ? p.earnings.map(e => ({ ...e })) : [];
+        const bIdx = earnings.findIndex(e => String(e?.label || '').trim().toLowerCase() === 'bonus');
+        if (bIdx >= 0) earnings[bIdx].amount = bonus;
+        else earnings.push({ label: 'Bonus', amount: bonus });
+        // gross / deductions / net are INTEGER columns.
         const { error } = await window.sb.from('payslips')
-          .update({ bonus, amount: newAmount, gross: newGross, deductions: newDed, net: newNet })
+          .update({
+            bonus,
+            amount:     newAmount,
+            gross:      round(newGross),
+            deductions: round(newDed),
+            net:        round(newNet),
+            earnings,
+          })
           .eq('id', p.id);
         if (!error) ok++;
+        else console.error('Bonus push failed for payslip', p.id, error);
       }
       // Stamp the plan as pushed.
       if (plan?.id) {
@@ -8120,10 +8336,13 @@ const AdvancesPage = () => {
   const [printing, setPrinting] = useState(false); // print preview on
 
   const [employees, setEmployees] = useState([]);
+  // advance_id -> ₹ collected so far, straight from the advance_payments
+  // ledger (the same rows the DB trigger derives months_deducted from).
+  const [collected, setCollected] = useState({});
 
   const fetchAll = useCallback(async () => {
     if (!window.sb) return;
-    const [advRes, empRes] = await Promise.all([
+    const [advRes, empRes, payRes] = await Promise.all([
       window.sb.from('advances')
         .select('*, employees!advances_employee_id_fkey(id, name, role, section_id, user_type, city), decider:employees!advances_decided_by_fkey(id, name), filer:employees!advances_filed_by_fkey(id, name)')
         .order('created_at', { ascending: false }),
@@ -8132,9 +8351,15 @@ const AdvancesPage = () => {
         .eq('is_active', true)
         .neq('user_type', 'owner')
         .order('name'),
+      window.sb.from('advance_payments').select('advance_id, amount, month'),
     ]);
     setRows((advRes.data || []).filter(r => r.employees));
     setEmployees(empRes.data || []);
+    const coll = {};
+    (payRes.data || []).forEach(p => {
+      coll[p.advance_id] = (coll[p.advance_id] || 0) + num(p.amount);
+    });
+    setCollected(coll);
     setLoading(false);
   }, []);
 
@@ -8143,6 +8368,7 @@ const AdvancesPage = () => {
     fetchAll();
     const ch = window.sb.channel('dash-advances')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'advances' }, () => fetchAll())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'advance_payments' }, () => fetchAll())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'employees' }, () => fetchAll())
       .subscribe();
     return () => { window.sb.removeChannel(ch); };
@@ -8158,21 +8384,20 @@ const AdvancesPage = () => {
   }, [rows, statusFilter, search]);
 
   const counts = useMemo(() => {
+    // Outstanding straight off the ledger: approved − collected.
     const outstanding = rows
       .filter(r => r.status === 'approved')
-      .reduce((s, r) => {
-        const remaining = Math.max(0, (r.months_total - r.months_deducted)) * (r.monthly_deduction || 0);
-        return s + remaining;
-      }, 0);
+      .reduce((s, r) => s + Math.max(0, num(r.amount_approved) - (collected[r.id] || 0)), 0);
     return {
       total:     rows.length,
       pending:   rows.filter(r => r.status === 'pending').length,
       approved:  rows.filter(r => r.status === 'approved').length,
       completed: rows.filter(r => r.status === 'completed').length,
       rejected:  rows.filter(r => r.status === 'rejected').length,
+      undisbursed: rows.filter(r => r.status === 'approved' && !r.disbursed_at).length,
       outstanding,
     };
-  }, [rows]);
+  }, [rows, collected]);
 
   const startFile = () => setFiling({
     employee_id: '',
@@ -8245,10 +8470,34 @@ const AdvancesPage = () => {
     toast('Cancelled');
   };
 
+  // Mark an approved advance as physically paid out. Nothing is deducted
+  // from a payslip until this is set (fetchActiveAdvances filters on it).
+  const markDisbursed = async (row) => {
+    if (!row || saving) return;
+    if (!can('advances', 'edit')) return;
+    if (row.disbursed_at) return;
+    if (!window.confirm(`Mark ${rupees(row.amount_approved)} as handed to ${row.employees?.name || row.employee_id}?\n\nRepayment deductions start from the next payslip.`)) return;
+    setSaving(true);
+    try {
+      const stamp = new Date().toISOString();
+      const { error } = await window.sb.from('advances')
+        .update({ disbursed_at: stamp, disbursed_by: session?.employee_id || null })
+        .eq('id', row.id);
+      if (error) { toast('Could not mark disbursed'); console.error(error); return; }
+      toast('Marked disbursed');
+      setDetail(d => (d && d.id === row.id) ? { ...d, disbursed_at: stamp } : d);
+    } finally { setSaving(false); }
+  };
+
+  // Repayment progress comes from the ledger, not from months_deducted
+  // (which the DB now derives from those same rows).
+  const collectedFor = (r) => collected[r.id] || 0;
   const formatRemaining = (r) => {
-    if (r.status !== 'approved') return '—';
-    const monthsLeft = Math.max(0, r.months_total - r.months_deducted);
-    return `${rupees(monthsLeft * (r.monthly_deduction || 0))} · ${monthsLeft}/${r.months_total} mo`;
+    if (r.status !== 'approved' && r.status !== 'completed') return '—';
+    const approved = num(r.amount_approved);
+    const paid     = collectedFor(r);
+    const left     = Math.max(0, approved - paid);
+    return `${rupees(paid)} / ${rupees(approved)} · ${rupees(left)} left`;
   };
 
   const employeesForPicker = employees;
@@ -8260,6 +8509,7 @@ const AdvancesPage = () => {
         <div className="stat present"><div className="k">Approved</div><div className="v">{counts.approved}</div></div>
         <div className="stat leave"><div className="k">Completed</div><div className="v">{counts.completed}</div></div>
         <div className="stat absent"><div className="k">Rejected</div><div className="v">{counts.rejected}</div></div>
+        <div className="stat late"><div className="k">Awaiting payout</div><div className="v">{counts.undisbursed}</div></div>
         <div className="stat"><div className="k">Outstanding</div><div className="v" style={{ fontSize: 18 }}>{rupees(counts.outstanding)}</div></div>
       </div>
 
@@ -8301,10 +8551,10 @@ const AdvancesPage = () => {
               <th style={{ width: 120 }}>Approved</th>
               <th style={{ width: 90 }}>Months</th>
               <th>Reason</th>
-              <th style={{ width: 170 }}>Outstanding</th>
+              <th style={{ width: 210 }}>Repaid</th>
               <th style={{ width: 120 }}>Filed by</th>
-              <th style={{ width: 100 }}>Status</th>
-              <th style={{ width: 130 }}>Actions</th>
+              <th style={{ width: 110 }}>Status</th>
+              <th style={{ width: 230 }}>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -8350,10 +8600,19 @@ const AdvancesPage = () => {
                 </td>
                 <td>
                   <span className={`status-pill ${ADV_STATUS_TONE[r.status]}`}>{r.status}</span>
+                  {(r.status === 'approved' || r.status === 'completed') && (
+                    <div style={{ fontSize: 10.5, marginTop: 3, color: r.disbursed_at ? '#0E7C3A' : '#B7791F', fontWeight: 600 }}>
+                      {r.disbursed_at ? '● disbursed' : '○ not paid out'}
+                    </div>
+                  )}
                 </td>
                 <td>
                   <button className="btn" style={{ height: 28, padding: '0 10px', marginRight: 6 }}
                     onClick={() => startDetail(r)}>Review</button>
+                  {r.status === 'approved' && !r.disbursed_at && can('advances', 'edit') && (
+                    <button className="btn primary" style={{ height: 28, padding: '0 10px', marginRight: 6 }}
+                      onClick={() => markDisbursed(r)} disabled={saving}>Mark disbursed</button>
+                  )}
                   {r.status === 'pending' && can('advances', 'edit') && (
                     <button className="btn danger" style={{ height: 28, padding: '0 10px' }}
                       onClick={() => cancel(r)}>Cancel</button>
@@ -8441,6 +8700,11 @@ const AdvancesPage = () => {
         footer={
           <>
             <button className="btn" onClick={() => setDetail(null)} disabled={saving}>Close</button>
+            {detail?.status === 'approved' && !detail?.disbursed_at && can('advances', 'edit') && (
+              <button className="btn primary" onClick={() => markDisbursed(detail)} disabled={saving}>
+                {saving ? 'Saving…' : 'Mark disbursed'}
+              </button>
+            )}
             {detail?.status === 'pending' && canDecide && (
               <>
                 <button className="btn danger" onClick={() => decide('rejected')} disabled={saving}>
@@ -8526,7 +8790,7 @@ const AdvancesPage = () => {
               </>
             )}
 
-            {detail.status === 'approved' && (
+            {(detail.status === 'approved' || detail.status === 'completed') && (
               <div style={{
                 background: 'var(--brandSoft)', borderRadius: 12, padding: 14, marginBottom: 10,
               }}>
@@ -8540,8 +8804,19 @@ const AdvancesPage = () => {
                 }}>
                   <DetailField label="Approved"    value={rupees(detail.amount_approved)} mono />
                   <DetailField label="Per month"   value={rupees(detail.monthly_deduction)} mono />
-                  <DetailField label="Remaining"   value={formatRemaining(detail)} mono />
+                  <DetailField label="Collected"   value={`${rupees(collectedFor(detail))} of ${rupees(detail.amount_approved)}`} mono />
+                  <DetailField label="Still to collect" value={rupees(Math.max(0, num(detail.amount_approved) - collectedFor(detail)))} mono />
+                  <DetailField label="Instalments" value={`${detail.months_deducted || 0} / ${detail.months_total}`} mono />
+                  <DetailField
+                    label="Disbursed"
+                    value={detail.disbursed_at ? fmtDateTime(detail.disbursed_at) : 'Not paid out yet'}
+                  />
                 </div>
+                {!detail.disbursed_at && (
+                  <div style={{ fontSize: 12, color: '#B7791F', marginTop: 8 }}>
+                    Nothing is deducted from payslips until this advance is marked disbursed.
+                  </div>
+                )}
               </div>
             )}
 
@@ -11032,7 +11307,16 @@ const MonthlyLeavePage = () => {
     if (existing.some(r => r.leave_date === d)) { toast('That date is already added'); return; }
     if (existing.length >= cap) { toast(`Max ${cap} free days per month`); return; }
     const { error } = await window.sb.from('free_leaves').insert({ employee_id: empId, leave_date: d });
-    if (error) { toast((error.message || '').toLowerCase().includes('limit') ? `Max ${cap} free days per month` : 'Could not add'); return; }
+    if (error) {
+      const full = [error.message, error.details, error.hint].filter(Boolean).join(' — ');
+      // The free_leave_coverage_guard trigger raises
+      // "Coverage cap: <section> already has N of M staff off on <day>".
+      // Show it verbatim — it tells HR exactly which day is over-booked.
+      const capIdx = full.indexOf('Coverage cap:');
+      if (capIdx >= 0) { toast(full.slice(capIdx)); return; }
+      toast(full.toLowerCase().includes('limit') ? `Max ${cap} free days per month` : 'Could not add');
+      return;
+    }
     load();
   };
   const removeDate = async (id) => {
@@ -11093,6 +11377,281 @@ const MonthlyLeavePage = () => {
          })}
        </div>
       }
+    </div>
+  );
+};
+
+// ──────────────────────────────────────────────────────────
+// Leave roster — month × section coverage grid. Each cell is the number
+// of people off that day in that section (planned free leave + approved
+// leave requests), read from the `leave_roster_days` view. Amber at the
+// section's cap, red over it. Click a cell to see who is off.
+// Owner / Admin / HR can also edit each section's max_off_per_day, which
+// is what the free_leave_coverage_guard trigger enforces on insert.
+// ──────────────────────────────────────────────────────────
+const LeaveRosterPage = () => {
+  const toast = useToast();
+  const { can, role } = useContext(AppCtx);
+  const canEdit = can('leaves', 'edit') && ['owner', 'admin', 'hr'].includes(role);
+  const sections = useLiveSections();
+
+  const [month, setMonth] = useState(() => fmtDateISO(new Date()).slice(0, 7)); // YYYY-MM
+  const [roster, setRoster] = useState([]);
+  const [rules, setRules] = useState({});      // section_id -> max_off_per_day
+  const [caps, setCaps] = useState({});        // draft values for the editor
+  const [loading, setLoading] = useState(true);
+  const [savingCaps, setSavingCaps] = useState(false);
+  const [cell, setCell] = useState(null);      // { day, section_id, loading, people }
+
+  const monthStart = month + '-01';
+  const monthEnd = useMemo(() => {
+    const d = new Date(month + '-01T00:00:00'); d.setMonth(d.getMonth() + 1); d.setDate(0);
+    return fmtDateISO(d);
+  }, [month]);
+
+  const days = useMemo(() => {
+    const total = new Date(monthEnd + 'T00:00:00').getDate();
+    return Array.from({ length: total }, (_, i) => ({
+      n: i + 1,
+      iso: `${month}-${String(i + 1).padStart(2, '0')}`,
+    }));
+  }, [month, monthEnd]);
+
+  const load = useCallback(async () => {
+    if (!window.sb) return;
+    setLoading(true);
+    const [rosterRes, ruleRes] = await Promise.all([
+      window.sb.from('leave_roster_days')
+        .select('day, section_id, free_leaves, approved_leaves, total_off, cap')
+        .gte('day', monthStart).lte('day', monthEnd),
+      window.sb.from('leave_coverage_rules').select('section_id, max_off_per_day'),
+    ]);
+    setRoster(rosterRes.data || []);
+    const r = {};
+    (ruleRes.data || []).forEach(x => { r[x.section_id] = x.max_off_per_day; });
+    setRules(r);
+    setCaps(Object.fromEntries(Object.entries(r).map(([k, v]) => [k, String(v)])));
+    setLoading(false);
+  }, [monthStart, monthEnd]);
+  useEffect(() => { load(); }, [load]);
+
+  // { section_id -> { day -> row } }
+  const grid = useMemo(() => {
+    const m = {};
+    (roster || []).forEach(r => {
+      if (!r.section_id) return;
+      (m[r.section_id] = m[r.section_id] || {})[r.day] = r;
+    });
+    return m;
+  }, [roster]);
+
+  const totals = useMemo(() => {
+    let over = 0, at = 0, off = 0;
+    (roster || []).forEach(r => {
+      off += Number(r.total_off) || 0;
+      const cap = r.cap == null ? null : Number(r.cap);
+      if (cap == null) return;
+      if (Number(r.total_off) > cap) over++;
+      else if (Number(r.total_off) === cap) at++;
+    });
+    return { over, at, off };
+  }, [roster]);
+
+  const openCell = async (day, sectionId) => {
+    setCell({ day, section_id: sectionId, loading: true, people: [] });
+    const [flRes, laRes, empRes] = await Promise.all([
+      window.sb.from('free_leaves').select('employee_id').eq('leave_date', day),
+      window.sb.from('leave_attendance').select('employee_id, leave_id').eq('day', day),
+      window.sb.from('employees').select('id, name, section_id').eq('section_id', sectionId),
+    ]);
+    const names = {};
+    (empRes.data || []).forEach(e => { names[e.id] = e.name || e.id; });
+    const people = [];
+    const seen = new Set();
+    const push = (empId, kind) => {
+      if (!names[empId] || seen.has(empId)) return;
+      seen.add(empId);
+      people.push({ id: empId, name: names[empId], kind });
+    };
+    (flRes.data || []).forEach(r => push(r.employee_id, 'Free leave'));
+    (laRes.data || []).forEach(r => push(r.employee_id, 'Approved leave'));
+    setCell({ day, section_id: sectionId, loading: false, people });
+  };
+
+  const saveCaps = async () => {
+    if (!canEdit || savingCaps) return;
+    setSavingCaps(true);
+    try {
+      const payload = [];
+      const removals = [];
+      sections.forEach(s => {
+        const raw = (caps[s.id] ?? '').toString().trim();
+        if (raw === '') { if (rules[s.id] != null) removals.push(s.id); return; }
+        const v = parseInt(raw, 10);
+        if (!Number.isFinite(v) || v < 0) return;
+        payload.push({ section_id: s.id, max_off_per_day: v, updated_at: new Date().toISOString() });
+      });
+      if (payload.length) {
+        const { error } = await window.sb.from('leave_coverage_rules')
+          .upsert(payload, { onConflict: 'section_id' });
+        if (error) { toast('Could not save coverage caps'); console.error(error); return; }
+      }
+      if (removals.length) {
+        const { error } = await window.sb.from('leave_coverage_rules')
+          .delete().in('section_id', removals);
+        if (error) { toast('Could not clear a cap'); console.error(error); return; }
+      }
+      toast(`Saved ${payload.length} coverage cap${payload.length === 1 ? '' : 's'}`);
+      load();
+    } finally { setSavingCaps(false); }
+  };
+
+  const cellStyle = (offCount, cap) => {
+    const base = {
+      textAlign: 'center', fontSize: 11.5, padding: '4px 0',
+      fontFamily: 'JetBrains Mono, Menlo, monospace',
+      borderRight: '1px solid var(--border)', cursor: offCount ? 'pointer' : 'default',
+    };
+    if (!offCount) return { ...base, color: 'var(--inkFaint, #b9b3ab)' };
+    if (cap != null && offCount > cap) {
+      return { ...base, background: 'rgba(192,57,43,0.16)', color: '#C0392B', fontWeight: 700 };
+    }
+    if (cap != null && offCount === cap) {
+      return { ...base, background: 'rgba(214,158,46,0.20)', color: '#B7791F', fontWeight: 700 };
+    }
+    return { ...base, color: 'var(--ink)' };
+  };
+
+  const fmtDay = (iso) => new Date(iso + 'T00:00:00')
+    .toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+
+  return (
+    <div>
+      <div className="stat-strip">
+        <div className="stat"><div className="k">Days off (month)</div><div className="v">{totals.off}</div></div>
+        <div className="stat late"><div className="k">Section-days at cap</div><div className="v">{totals.at}</div></div>
+        <div className="stat absent"><div className="k">Over cap</div><div className="v">{totals.over}</div></div>
+        <div className="stat"><div className="k">Sections</div><div className="v">{sections.length}</div></div>
+      </div>
+
+      <div className="toolbar" style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
+        <span style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Month</span>
+        <input type="month" value={month} onChange={e => setMonth(e.target.value)} />
+        <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--inkMuted)' }}>
+          {loading ? 'Loading…' : 'Amber = at the section cap · Red = over it · click a cell to see who'}
+        </span>
+      </div>
+
+      <div className="table-wrap" style={{ overflowX: 'auto' }}>
+        <table className="data" style={{ minWidth: 40 * days.length + 200 }}>
+          <thead>
+            <tr>
+              <th style={{ width: 190, position: 'sticky', left: 0, background: 'var(--surface)', zIndex: 1 }}>Section</th>
+              {days.map(d => (
+                <th key={d.iso} style={{ width: 34, textAlign: 'center', fontSize: 11 }}>{d.n}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {sections.length === 0 && (
+              <tr>
+                <td colSpan={days.length + 1} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                  {loading ? 'Loading…' : 'No sections configured.'}
+                </td>
+              </tr>
+            )}
+            {sections.map(s => {
+              const cap = rules[s.id] == null ? null : Number(rules[s.id]);
+              return (
+                <tr key={s.id}>
+                  <td className="name" style={{ position: 'sticky', left: 0, background: 'var(--surface)', zIndex: 1 }}>
+                    {s.label || s.id}
+                    <div style={{ fontSize: 11, color: 'var(--inkMuted)', fontWeight: 400, marginTop: 2 }}>
+                      {cap == null ? 'no cap set' : `max ${cap}/day`}
+                    </div>
+                  </td>
+                  {days.map(d => {
+                    const row = grid[s.id]?.[d.iso];
+                    const offCount = Number(row?.total_off) || 0;
+                    return (
+                      <td key={d.iso}
+                        style={cellStyle(offCount, cap)}
+                        title={offCount
+                          ? `${fmtDay(d.iso)} · ${offCount} off${cap == null ? '' : ` of max ${cap}`}`
+                          : fmtDay(d.iso)}
+                        onClick={() => { if (offCount) openCell(d.iso, s.id); }}>
+                        {offCount || '·'}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <div style={{
+        marginTop: 18, background: 'var(--surface)', border: '1px solid var(--border)',
+        borderRadius: 12, padding: '14px 16px',
+      }}>
+        <div style={{
+          fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase',
+          color: 'var(--inkMuted)', marginBottom: 10,
+        }}>Coverage caps · max people off per day</div>
+        <div style={{ fontSize: 12.5, color: 'var(--inkMuted)', marginBottom: 12 }}>
+          Leave a box empty for “no cap”. The cap blocks a new free-leave day once the section is full,
+          and flags an over-booked day when a leave request is approved.
+          {!canEdit && <span style={{ color: 'var(--warning)' }}> · Read-only (Owner/Admin/HR can edit).</span>}
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+          {sections.map(s => (
+            <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 12.5, minWidth: 120 }}>{s.label || s.id}</span>
+              <input type="number" min="0" max="99" disabled={!canEdit}
+                value={caps[s.id] ?? ''}
+                onChange={e => setCaps(c => ({ ...c, [s.id]: e.target.value }))}
+                style={{ width: 70, height: 32, fontSize: 12 }} />
+            </div>
+          ))}
+        </div>
+        {canEdit && (
+          <div style={{ marginTop: 12 }}>
+            <button className="btn primary" onClick={saveCaps} disabled={savingCaps}>
+              {savingCaps ? 'Saving…' : 'Save caps'}
+            </button>
+          </div>
+        )}
+      </div>
+
+      <Modal
+        open={!!cell}
+        title={cell ? `Off on ${fmtDay(cell.day)} · ${SECTION_META[cell.section_id]?.label || cell.section_id}` : ''}
+        onClose={() => setCell(null)}
+        footer={<button className="btn" onClick={() => setCell(null)}>Close</button>}
+      >
+        {cell && (cell.loading
+          ? <div style={{ padding: 12, color: 'var(--inkMuted)' }}>Loading…</div>
+          : cell.people.length === 0
+            ? <div style={{ padding: 12, color: 'var(--inkMuted)' }}>Nobody from this section is off that day.</div>
+            : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {cell.people.map(p => (
+                  <div key={p.id} style={{
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                    padding: '8px 12px', borderRadius: 10, background: 'var(--bg)',
+                    border: '1px solid var(--border)',
+                  }}>
+                    <div>
+                      <div style={{ fontSize: 13.5, fontWeight: 600 }}>{p.name}</div>
+                      <div style={{ fontSize: 11, color: 'var(--inkMuted)', fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{p.id}</div>
+                    </div>
+                    <span className={`status-pill ${p.kind === 'Free leave' ? 'leave' : 'present'}`}>{p.kind}</span>
+                  </div>
+                ))}
+              </div>
+            ))}
+      </Modal>
     </div>
   );
 };
@@ -11230,6 +11789,7 @@ const Page = ({ name }) => {
   if (name === 'attendance')    return <AttendancePage />;
   if (name === 'daily')         return <DailyReportPage />;
   if (name === 'free_leave')    return <MonthlyLeavePage />;
+  if (name === 'leave_roster')  return <LeaveRosterPage />;
   if (name === 'employees')     return <EmployeesPage />;
   if (name === 'leaves')        return <LeavesPage />;
   if (name === 'announcements') return <AnnouncementsPage />;
