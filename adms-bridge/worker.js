@@ -71,10 +71,12 @@ export default {
         'TransTimes=00:00;12:00',
         'TransInterval=1',
         'TransFlag=1100000000',
-        // IST is a half-hour zone. The firmware reads a bare hour count, so
-        // '5.5' became UTC+5 and every punch ran 30 min slow (4 Aug–25 Sep
-        // 2026, audit in seematti-intelligence docs). Send the +HH:MM form.
-        'TimeZone=+05:30',
+        // IST is a half-hour zone. The PUSH protocol reads TimeZone as an
+        // integer: |x| < 12 means hours, anything larger means MINUTES (that
+        // is how half- and quarter-hour zones are expressed). '5.5' was read
+        // as 5 and every punch ran 30 min slow (4 Aug–25 Sep 2026); '+05:30'
+        // did not take either. 330 = +5:30.
+        'TimeZone=330',
         'Realtime=1',
         'Encrypt=None',
       ].join('\n');
