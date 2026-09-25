@@ -71,7 +71,10 @@ export default {
         'TransTimes=00:00;12:00',
         'TransInterval=1',
         'TransFlag=1100000000',
-        'TimeZone=5.5',
+        // IST is a half-hour zone. The firmware reads a bare hour count, so
+        // '5.5' became UTC+5 and every punch ran 30 min slow (4 Aug–25 Sep
+        // 2026, audit in seematti-intelligence docs). Send the +HH:MM form.
+        'TimeZone=+05:30',
         'Realtime=1',
         'Encrypt=None',
       ].join('\n');
@@ -95,7 +98,7 @@ export default {
       let ok = 0;
       for (const p of punches) {
         try {
-          await rpc(env, 'adms_ingest', {
+          const r = await rpc(env, 'adms_ingest', {
             p_secret: env.ADMS_SECRET,
             p_sn: sn,
             p_user_id: p.user_id,
@@ -104,6 +107,9 @@ export default {
             p_verify: p.verify,
             p_raw: p.raw,
           });
+          // A punch that the DB refused ('error', 'error:*') is not
+          // landed — leave it unacked so the device re-sends it.
+          if (r && typeof r.outcome === 'string' && r.outcome.startsWith('error')) throw new Error(r.message || r.outcome);
           ok++;
         } catch (e) {
           // Leave the batch unacknowledged count intact; the device
