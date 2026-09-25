@@ -1,0 +1,19 @@
+-- ──────────────────────────────────────────────────────────────────────
+-- Quanto → app → machine staff flow + the guards — 25 Sep 2026
+-- ──────────────────────────────────────────────────────────────────────
+-- Applied live 25 Sep 2026 as migrations quanto_staff_sync_guards_2026_09_25
+-- and adms_push_echo_2026_09_25. The M1 job src/quanto_staff_sync.mjs
+-- (repo seematti-quanto-sync, cron seematti-staff-sync) writes employees;
+-- the trigger adms_employee_sync pushes to the machine.
+--
+--  • employees.quanto_employee_id (unique) keys the app row on Quanto's own
+--    employee.id — the SA/SS code is NOT a key: Quanto reuses codes.
+--  • employee_code is unique across the app (partial unique index).
+--  • adms_roster = what the machine holds (fed by every USER record the
+--    device uploads; a confirmed DATA DELETE removes the PIN).
+--  • adms_sync_employee refuses a PIN the machine holds under ANOTHER
+--    name and files it in adms_pin_conflicts instead of overwriting the
+--    record that owns the fingerprints.
+--  • Every push is followed by DATA QUERY USERINFO so the roster reflects it.
+--  • PIN rule accepts the trainee T-prefix (TSA/TSS), same person class.
+-- Full SQL: see the two migrations in Supabase (hixhbznbejqfnasvgyid).

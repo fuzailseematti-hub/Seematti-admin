@@ -49,10 +49,15 @@ with its outcome.
 
 ## Since 25 Sep 2026: the admin app is the master list
 
-- Every employee's machine PIN is their app id with punctuation removed
-  (`E-143` → `E143`). `adms_users` is filled automatically
-  (`adms_sync_employee`, trigger `adms_employee_sync`); nothing is mapped
-  by hand. Legacy PINs already linked keep working.
+- Every employee's machine PIN is their **SA/SS salesman code**
+  (`employees.employee_code`, the Quanto code, UNIQUE). `adms_users` is
+  filled automatically (`adms_sync_employee`, trigger `adms_employee_sync`);
+  nothing is mapped by hand. Staff are born in Quanto: the M1 cron
+  `seematti-staff-sync` creates/links app employees from Quanto's
+  `employee` table, and this trigger pushes them here.
+- Quanto REUSES codes. The app keys on `quanto_employee_id`, keeps
+  `adms_roster` (what the machine holds) and refuses to push a PIN the
+  machine already holds under another name (`adms_pin_conflicts`).
 - Every employee is pushed to the device as a user record through
   `adms_commands` (`DATA UPDATE USERINFO`). Faces and fingers are still
   enrolled AT the machine, under that PIN.
