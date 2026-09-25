@@ -110,3 +110,40 @@ Unchanged. They already work from `attendance` and `employees`. The open HR deci
 
 ## 9. Effort
 Phase 1 app work ≈ 3 builder-days (directory rules 1, Machine page 1, attendance_mark + badges 1), all inside `Seematti-admin`. Phase 3 clean-up ≈ half a day. HR enrolment is the long pole, not the code.
+
+---
+
+## 10. Decisions taken 25 Sep evening, and what was built the same night
+
+| # | Decision | Built |
+|---|---|---|
+| D1 | **Outpass from the machine.** | `adms_ingest` now reads the status key: **Break-Out (status 2) = going out on outpass; Break-In (3) or any scan while on outpass = back.** First scan of the shift is always the check-in whatever key was pressed; a scan within 30 min of arrival is ignored; otherwise the last scan is the check-out. HR corrections (missed punch, forgotten key) via `attendance_mark` in the app, source = manual, with who marked it. |
+| D2 | Before Diwali only if the gate is met by 6 Oct | unchanged |
+| D3 | Second machine: **same model, eSSL uFace302** (or eSSL's current successor in the same ADMS family if 302 is out of stock) at the second entrance. It registers itself the moment it is pointed at `adms.adms-bridge.workers.dev`; no code change. Faces must be enrolled on each machine until template copying is built. | procedure in §11 |
+| D4 | Everyone — salesmen, security, drivers, office — is created **in Quanto** with an SA/SS code. The app's "Add staff" is kept only as an emergency door and asks for the code. | sync + app |
+| D5 | Delete = **owner only** | DB policy `emp_delete` |
+| D6 | **Tablet decommissioned.** | Setting `kiosk_enabled`; the tablet's scan function refuses when it is `false`. ⚠️ See §12 before switching it off. |
+
+Also built tonight (DB, live): `attendance_apply` (one writer for machine and manual events), `attendance_timing_report` and `attendance_summary_report` (the 1M/6M staff-wise reports), views `v_machine_staff` and `v_machine_unknown_pins`, table `quanto_code_conflicts` (the M1 sync fills it: 11 codes today), `employees.code_source`. App surfaces: see §13 once the builders land.
+
+## 11. Machine setup for outpass (do this once on the uFace302; menu names as on the ZKTeco firmware 8.0.4.6)
+1. **Menu → Personalize → Punch State Options.** Set **Punch State Mode = Manual Mode** (staff choose a state before scanning; the device reverts to the default after the timeout). Set **Punch State Timeout** to 5–10 s and leave **Punch State Required** off (a plain scan still counts as in/out).
+2. **Menu → Personalize → Shortcut Key Mappings** (or the on-screen state buttons on the standby page): keep **Check-In**, **Check-Out**, **Break-Out**, **Break-In**. Hide Overtime-In/Out to avoid wrong taps.
+3. Verify the codes on the first live outpass: the punch must arrive with `status_code = 2` (Break-Out) and `3` (Break-In) in `adms_punches`. If the firmware uses different numbers, change the two constants in `adms_ingest` (the mapping is in one place). 
+4. Teach the habit: **going out on outpass = tap Break-Out then scan; coming back = scan (Break-In optional).** Leaving for the day = just scan.
+5. Duplicate-punch window on the device (Menu → System → Attendance → Duplicate Punch Period) should stay at 1 minute; our own 2-minute guard is on top.
+
+## 12. ⚠️ The tablet switch-off gate (D6)
+Tonight 76 of 165 staff are not usable on the machine: 33 have no code and 43 are on the machine without a face. If the tablet is switched off tomorrow, those 76 are absent in every report until enrolled. The switch is ready (`kiosk_enabled`); the recommendation is: HR enrols at the machine in batches over the next days, the Machine page shows the two lists shrinking, and the tablet is switched off the morning the lists read zero — then physically removed. The machine's own faults (the 30-min clock, unknown IDs) are now visible, so the tablet is not needed as a monitor.
+
+## 13. Reports the HR department gets (Reports & exports page)
+| Report | Range | What it answers |
+|---|---|---|
+| **Staff attendance & timing** (new) | this month · last month · 3 months · 6 months · custom; all staff or one person; by section | per person per day: in, out, late minutes, left early, outpasses and minutes, hours inside, source (machine/tablet/manual), who corrected it. CSV and XLSX. |
+| **Attendance summary per staff** (new) | same presets | one row per person: days, present, late, leave, absent, holidays, total late minutes, early leaves, outpasses, average in/out, hours inside, days with no check-out. CSV and XLSX. |
+| **Machine punch log** (new) | date range, optional person | every raw punch the machine sent, for disputes |
+| Attendance export | any range | the daily rows as before, source printed as Machine |
+| Payroll export · Leaves export · Employee directory | as before | unchanged |
+| Daily report · Previous-day report (email, 11:00 / 11:30) | daily | unchanged, now fed by the machine |
+
+Follow-ups worth adding later: a monthly PDF per section for supervisors, and the timing report as an email automation on the 1st of each month.
