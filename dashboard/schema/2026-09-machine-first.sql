@@ -342,3 +342,11 @@ create or replace view public.v_machine_unknown_pins as
 grant select on public.v_machine_unknown_pins to authenticated;
 
 -- settings the app reads live (kiosk_enabled, go-live) are already readable by authenticated.
+
+-- ── added the same night: the Machine page reads the sync state and resolves conflicts
+drop policy if exists sss_read on public.staff_sync_state;
+create policy sss_read on public.staff_sync_state for select to authenticated using (true);
+drop policy if exists adms_pin_conflicts_resolve on public.adms_pin_conflicts;
+create policy adms_pin_conflicts_resolve on public.adms_pin_conflicts for update to authenticated
+  using (app.is_hr_or_admin()) with check (app.is_hr_or_admin());
+grant update (resolved_at) on public.adms_pin_conflicts to authenticated;
