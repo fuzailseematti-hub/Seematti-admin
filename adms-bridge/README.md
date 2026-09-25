@@ -46,3 +46,22 @@ with its outcome.
   not by which status key staff press.
 - To block a lost/rogue device, set `enabled=false` on its
   `adms_devices` row.
+
+## Since 25 Sep 2026: the admin app is the master list
+
+- Every employee's machine PIN is their app id with punctuation removed
+  (`E-143` → `E143`). `adms_users` is filled automatically
+  (`adms_sync_employee`, trigger `adms_employee_sync`); nothing is mapped
+  by hand. Legacy PINs already linked keep working.
+- Every employee is pushed to the device as a user record through
+  `adms_commands` (`DATA UPDATE USERINFO`). Faces and fingers are still
+  enrolled AT the machine, under that PIN.
+- `TimeZone=+05:30` in the handshake. `5.5` was read as whole hours and
+  ran the device 30 minutes slow for seven weeks.
+- A punch within 30 min of a recorded check-in (tablet or machine) is the
+  same arrival, never a check-out — enforced in `adms_ingest` and
+  `kiosk_event`.
+- Switch: `settings.adms_go_live_at` (`2099-01-01 00:00:00` = off).
+- Redeploy: `npx wrangler login` (opens an OAuth page — approve it in the
+  owner's Chrome), then `npx wrangler deploy`. Secrets survive redeploys.
+- Schema: `dashboard/schema/2026-09-essl-app-primary.sql`.
