@@ -6895,7 +6895,7 @@ const AddStaffScreen = () => {
         employee_code: code,
         code_source:   'hr',
         name:          form.name.trim(),
-        role:          form.role.trim() || null,
+        role:          form.role.trim() || 'Staff',   // employees.role is NOT NULL
         section_id:    form.section_id || null,
         gender:        form.gender || null,
         phone:         form.phone.trim() || null,
