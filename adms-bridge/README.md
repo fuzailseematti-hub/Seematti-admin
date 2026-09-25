@@ -56,8 +56,11 @@ with its outcome.
 - Every employee is pushed to the device as a user record through
   `adms_commands` (`DATA UPDATE USERINFO`). Faces and fingers are still
   enrolled AT the machine, under that PIN.
-- `TimeZone=+05:30` in the handshake. `5.5` was read as whole hours and
-  ran the device 30 minutes slow for seven weeks.
+- `TimeZone=330` in the handshake (MINUTES: the protocol reads |x|<12 as
+  hours, anything larger as minutes). `5.5` was read as 5 and ran the
+  device 30 minutes slow for seven weeks. The clock is only re-synced on
+  the boot handshake — after changing it, queue `REBOOT`, not
+  `RELOAD OPTIONS`.
 - A punch within 30 min of a recorded check-in (tablet or machine) is the
   same arrival, never a check-out — enforced in `adms_ingest` and
   `kiosk_event`.
