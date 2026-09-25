@@ -222,15 +222,12 @@
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
-<!-- Supabase + face-api: load from jsDelivr with crossorigin so iOS
+<!-- Supabase: load from jsDelivr with crossorigin so iOS
      Safari surfaces real error messages, plus an onerror fallback to
      unpkg in case jsDelivr is blocked / slow on the user's network. -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"
         crossorigin="anonymous"
         onerror="this.onerror=null;var s=document.createElement('script');s.src='https://unpkg.com/@supabase/supabase-js@2';s.crossOrigin='anonymous';s.async=false;document.head.appendChild(s);"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"
-        crossorigin="anonymous"
-        onerror="this.onerror=null;var s=document.createElement('script');s.src='https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js';s.crossOrigin='anonymous';s.defer=true;document.head.appendChild(s);"></script>
 <script>
   // ──────────────────────────────────────────────────────────
   // Supabase client — publishable anon key, safe to ship.
@@ -265,117 +262,6 @@
       .map(b => b.toString(16).padStart(2, '0')).join('');
   };
 
-  // ──────────────────────────────────────────────────────────
-  // face-api.js lazy loader + helpers.
-  // Models loaded from jsDelivr (cached by the browser after first hit).
-  // ──────────────────────────────────────────────────────────
-  window.FACE_MODELS_URL =
-    'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@master/weights';
-  window.FACE_MODELS_URL_FALLBACK =
-    'https://raw.githubusercontent.com/justadudewhohacks/face-api.js/master/weights';
-
-  window.loadFaceModels = (() => {
-    let promise = null;
-    const loadAll = async (uri) => {
-      const { nets } = window.faceapi;
-      await Promise.all([
-        nets.tinyFaceDetector.loadFromUri(uri),
-        nets.faceLandmark68TinyNet.loadFromUri(uri),
-        nets.faceRecognitionNet.loadFromUri(uri),
-      ]);
-    };
-    return () => {
-      if (promise) return promise;
-      promise = (async () => {
-        // Wait for the face-api script to define the global if it hasn't yet.
-        for (let i = 0; i < 200 && !window.faceapi; i++) {
-          await new Promise(r => setTimeout(r, 25));
-        }
-        if (!window.faceapi) throw new Error('face-api.js did not load');
-        try {
-          await loadAll(window.FACE_MODELS_URL);
-        } catch (_) {
-          await loadAll(window.FACE_MODELS_URL_FALLBACK);
-        }
-      })();
-      // A failed download must NOT stay cached — clear it so the kiosk's
-      // heal loop (and any later caller) genuinely retries instead of
-      // replaying the same rejection until someone reloads the tablet.
-      promise.catch(() => { promise = null; });
-      return promise;
-    };
-  })();
-
-  // Detect the single largest face in a media element and return its
-  // 128-d descriptor. Kept for backward compatibility with enrollment.
-  window.computeFaceDescriptor = async (mediaEl) => {
-    const det = await window.faceapi
-      .detectSingleFace(mediaEl, new window.faceapi.TinyFaceDetectorOptions({
-        inputSize: 512, scoreThreshold: 0.5,
-      }))
-      .withFaceLandmarks(true)
-      .withFaceDescriptor();
-    return det ? Array.from(det.descriptor) : null;
-  };
-
-  // Full detection result (descriptor + bounding box + detection score)
-  // so the kiosk can enforce a minimum face size and skip blurry /
-  // far-away frames before running the match loop.
-  window.computeFaceDetection = async (mediaEl) => {
-    const det = await window.faceapi
-      .detectSingleFace(mediaEl, new window.faceapi.TinyFaceDetectorOptions({
-        inputSize: 512, scoreThreshold: 0.5,
-      }))
-      .withFaceLandmarks(true)
-      .withFaceDescriptor();
-    if (!det) return null;
-    return {
-      descriptor: Array.from(det.descriptor),
-      box: det.detection.box,
-      score: det.detection.score,
-    };
-  };
-
-  // Cheap presence check — detection only, NO landmarks/descriptor. Used by the
-  // kiosk loop to cheaply confirm a steady face before paying for the (heavy)
-  // descriptor + a server match. inputSize 416 (not 224) so faces further back
-  // — small in the frame — are still picked up quickly; the heavier descriptor
-  // step only runs once a face is steady, so this stays fast.
-  window.computeFacePresence = async (mediaEl) => {
-    const det = await window.faceapi
-      .detectSingleFace(mediaEl, new window.faceapi.TinyFaceDetectorOptions({
-        inputSize: 416, scoreThreshold: 0.45,
-      }));
-    return det ? { box: det.box, score: det.score } : null;
-  };
-
-  // Cosine similarity between two 128-d arrays. Kept for backwards compat.
-  window.cosineSim = (a, b) => {
-    let dot = 0, na = 0, nb = 0;
-    for (let i = 0; i < a.length; i++) {
-      dot += a[i] * b[i];
-      na  += a[i] * a[i];
-      nb  += b[i] * b[i];
-    }
-    return dot / (Math.sqrt(na) * Math.sqrt(nb));
-  };
-
-  // Euclidean distance between two 128-d face descriptors. This is the
-  // canonical metric face-api.js descriptors were trained against —
-  // cosine on un-normalized vectors is approximate and causes more
-  // misidentifications. Smaller distance = closer match.
-  window.euclideanDistance = (a, b) => {
-    let s = 0;
-    for (let i = 0; i < a.length; i++) {
-      const d = a[i] - b[i];
-      s += d * d;
-    }
-    return Math.sqrt(s);
-  };
-
-  // Map Euclidean distance to a 0..1 similarity score for UI display /
-  // settings UI back-compat. distance 0 -> sim 1, distance >= 1 -> 0.
-  window.distToSim = (d) => Math.max(0, Math.min(1, 1 - d));
 </script>
 </head>
 <body>
@@ -433,7 +319,6 @@
       if (typeof window.ReactDOM === 'undefined') missing.push('ReactDOM');
       if (typeof window.Babel === 'undefined')    missing.push('Babel');
       if (typeof window.supabase === 'undefined') missing.push('Supabase');
-      if (typeof window.faceapi === 'undefined')  missing.push('face-api');
       showRecoveryUI(missing.length ? 'missing: ' + missing.join(', ') : 'render-stalled');
     }, 8000);
   })();
@@ -2234,88 +2119,6 @@ const useLoginUsers = () => {
   return { users, loading };
 };
 
-// Kiosk PIN prompt used on the Login screen. PIN stored in settings.kiosk_pin.
-const KioskPinPrompt = ({ onClose, onSuccess }) => {
-  const T_ = window.TOKENS;
-  const [pin, setPin] = React.useState('');
-  const [err, setErr] = React.useState(false);
-  const [busy, setBusy] = React.useState(false);
-
-  const submit = async (e) => {
-    if (e) e.preventDefault();
-    if (busy || !window.sb) return;
-    setBusy(true); setErr(false);
-    try {
-      // Verify the PIN server-side via the kiosk RPC. This works even after
-      // the RLS lockdown (settings is no longer anon-readable). A non-error
-      // result means the PIN is correct; pass it back for the kiosk's RPCs.
-      const { error } = await window.sb.rpc('kiosk_meta', { p_pin: pin });
-      if (!error) onSuccess(pin);
-      else setErr(true);
-    } finally { setBusy(false); }
-  };
-
-  return (
-    <div onClick={onClose} style={{
-      position: 'absolute', inset: 0, background: 'rgba(11, 13, 14, 0.6)',
-      display: 'flex', alignItems: 'flex-end', zIndex: 200,
-    }}>
-      <form onSubmit={submit}
-        onClick={e => e.stopPropagation()}
-        style={{
-          width: '100%', background: T_.surface, borderRadius: '20px 20px 0 0',
-          padding: '22px 22px 28px', maxHeight: '80%', overflowY: 'auto',
-        }}>
-        <div style={{
-          fontFamily: 'Fraunces, Georgia, serif', fontSize: 22,
-          fontWeight: 500, color: T_.ink, letterSpacing: -0.4, marginBottom: 4,
-        }}>Open attendance kiosk</div>
-        <div style={{ fontSize: 12.5, color: T_.inkMuted, marginBottom: 20 }}>
-          Enter the kiosk PIN to launch face-scan attendance mode. The app will stay in kiosk mode until the PIN is entered again to exit.
-        </div>
-
-        <div style={{
-          fontSize: 11, fontWeight: 600, color: T_.inkMuted,
-          letterSpacing: 0.5, textTransform: 'uppercase', marginBottom: 6,
-        }}>Kiosk PIN</div>
-        <input type="password" inputMode="numeric" autoFocus
-          value={pin}
-          onChange={e => { setPin(e.target.value); setErr(false); }}
-          placeholder="0000"
-          style={{
-            width: '100%', padding: '14px 16px', borderRadius: 12,
-            background: T_.bg, border: `1px solid ${err ? T_.danger : T_.border}`,
-            fontSize: 18, fontFamily: 'JetBrains Mono, Menlo, monospace',
-            color: T_.ink, boxSizing: 'border-box', outline: 'none',
-            letterSpacing: 6, textAlign: 'center',
-          }} />
-        {err && (
-          <div style={{ fontSize: 12, color: T_.danger, marginTop: 8 }}>
-            Wrong PIN — try again
-          </div>
-        )}
-
-        <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
-          <button type="button" onClick={onClose} style={{
-            flex: 1, padding: 14, borderRadius: 12,
-            background: T_.surface, border: `1px solid ${T_.border}`,
-            color: T_.ink, fontSize: 13, fontWeight: 600,
-            fontFamily: 'inherit', cursor: 'pointer',
-          }}>Cancel</button>
-          <button type="submit" disabled={busy || !pin} style={{
-            flex: 1.2, padding: 14, borderRadius: 12,
-            background: '#0B0D0E', color: '#fff', border: 'none',
-            fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
-            cursor: (busy || !pin) ? 'not-allowed' : 'pointer',
-            opacity: (busy || !pin) ? 0.5 : 1,
-          }}>{busy ? 'Checking…' : 'Launch kiosk'}</button>
-        </div>
-      </form>
-    </div>
-  );
-};
-window.KioskPinPrompt = KioskPinPrompt;
-
 const LoginScreen = () => {
   const { nav, setUser, setUserId } = useApp();
   const T_ = window.TOKENS;
@@ -2324,7 +2127,6 @@ const LoginScreen = () => {
   const [pwd, setPwd]           = React.useState('');
   const [err, setErr]           = React.useState('');
   const [busy, setBusy]         = React.useState(false);
-  const [kioskPromptOpen, setKioskPromptOpen] = React.useState(false);
 
   const submit = async (e) => {
     if (e) e.preventDefault();
@@ -2482,66 +2284,11 @@ const LoginScreen = () => {
           </div>
         </form>
 
-        {/* Kiosk launch — separate from user logins. Always available. */}
-        <div style={{ marginTop: 22 }}>
-          <button onClick={() => setKioskPromptOpen(true)} style={{
-            width: '100%', padding: 14, borderRadius: 16,
-            background: '#0B0D0E', color: '#fff', border: 'none',
-            fontFamily: 'inherit', cursor: 'pointer', textAlign: 'left',
-            display: 'flex', alignItems: 'center', gap: 12,
-            position: 'relative', overflow: 'hidden',
-            boxShadow: '0 6px 20px -6px rgba(0, 0, 0, 0.25)',
-          }}>
-            <div style={{
-              position: 'absolute', inset: 0,
-              background: 'radial-gradient(ellipse at 85% 20%, rgba(232, 198, 90, 0.16) 0%, transparent 55%)',
-            }} />
-            <div style={{
-              width: 42, height: 42, borderRadius: 12,
-              background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.12)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              position: 'relative', flexShrink: 0,
-            }}>
-              <Icon name="user" size={20} color="#E8C65A" />
-              <div style={{
-                position: 'absolute', top: 6, right: 6, width: 6, height: 6,
-                borderRadius: '50%', background: '#5BC47E',
-              }} />
-            </div>
-            <div style={{ flex: 1, position: 'relative' }}>
-              <div style={{
-                fontSize: 10, letterSpacing: 1, textTransform: 'uppercase',
-                color: '#E8C65A', fontWeight: 700, marginBottom: 2,
-              }}>Face recognition</div>
-              <div style={{ fontSize: 14, fontWeight: 600 }}>Attendance kiosk mode</div>
-              <div style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.55)', marginTop: 2 }}>
-                PIN required · exits via PIN
-              </div>
-            </div>
-            <Icon name="chevron" size={16} color="rgba(255,255,255,0.5)" />
-          </button>
-        </div>
-
         <div style={{
           marginTop: 24, fontSize: 11.5, color: T_.inkFaint,
           textAlign: 'center', letterSpacing: 0.3,
         }}>SEEMAATTI · ADMIN · v0.2</div>
       </div>
-
-      {/* Kiosk PIN prompt */}
-      {kioskPromptOpen && (
-        <KioskPinPrompt
-          onClose={() => setKioskPromptOpen(false)}
-          onSuccess={(pin) => {
-            setKioskPromptOpen(false);
-            window.__kioskPin = pin;
-            try { localStorage.setItem('sundari-kiosk-pin', pin); } catch {}
-            setUser('kiosk');
-            setUserId(null);
-            nav.reset('kiosk');
-          }}
-        />
-      )}
 
     </div>
   );
@@ -3798,8 +3545,8 @@ const RosterRow = ({ row, last, sectionLabel, onOpen }) => {
 
 // ─────────────────────────────────────────────────────────────
 // Employee detail sheet — opens when a manager/HR/owner taps a
-// person in the Attendance roster. Shows basic details + face
-// enrollment status, with Edit and Update-face actions for admins.
+// person in the Attendance roster. Shows basic details + whether the
+// person is on the attendance machine, with an Edit action for HR.
 // ─────────────────────────────────────────────────────────────
 const EmployeeDetailSheet = ({ employeeId, onClose }) => {
   const { user, toast } = useApp();
@@ -3807,21 +3554,22 @@ const EmployeeDetailSheet = ({ employeeId, onClose }) => {
   const canEdit = user === 'owner' || user === 'admin' || user === 'hr';
 
   const [emp, setEmp] = React.useState(null);
-  const [faceCount, setFaceCount] = React.useState(0);
+  const [machine, setMachine] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
   const [editing, setEditing] = React.useState(false);
-  const [reEnroll, setReEnroll] = React.useState(false);
 
   const fetchAll = React.useCallback(async () => {
     if (!window.sb || !employeeId) return;
-    const [empRes, faceRes] = await Promise.all([
+    const [empRes, mRes] = await Promise.all([
       window.sb.from('employees')
-        .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city, gender')
+        .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city, gender, employee_code, code_source')
         .eq('id', employeeId).maybeSingle(),
-      window.sb.from('face_embeddings').select('pose').eq('employee_id', employeeId),
+      window.sb.from('v_machine_staff')
+        .select('id, employee_code, on_machine, last_punch, punches_30d')
+        .eq('id', employeeId).maybeSingle(),
     ]);
     setEmp(empRes.data || null);
-    setFaceCount((faceRes.data || []).length);
+    setMachine(mRes.error ? null : (mRes.data || null));
     setLoading(false);
   }, [employeeId]);
 
@@ -3829,29 +3577,11 @@ const EmployeeDetailSheet = ({ employeeId, onClose }) => {
     fetchAll();
     if (!window.sb) return;
     const ch = window.sb.channel(`detail-${employeeId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'face_embeddings', filter: `employee_id=eq.${employeeId}` },
-        () => fetchAll())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'employees', filter: `id=eq.${employeeId}` },
         () => fetchAll())
       .subscribe();
     return () => { window.sb.removeChannel(ch); };
   }, [fetchAll, employeeId]);
-
-  const clearFace = async () => {
-    if (!window.confirm(`Delete face data for ${emp.name}?`)) return;
-    await window.sb.from('face_embeddings').delete().eq('employee_id', employeeId);
-    toast('Face data cleared');
-  };
-
-  if (reEnroll && emp) {
-    return (
-      <MobileFaceReEnrollSheet
-        employee={emp}
-        onClose={() => setReEnroll(false)}
-        onDone={() => { setReEnroll(false); toast(`Face updated for ${emp.name}`); }}
-      />
-    );
-  }
 
   if (editing && emp) {
     return (
@@ -3902,6 +3632,7 @@ const EmployeeDetailSheet = ({ employeeId, onClose }) => {
               padding: 14, background: T_.bg, border: `1px solid ${T_.border}`, borderRadius: 12,
               marginBottom: 14,
             }}>
+              <MobileDetailField label="Employee code" value={emp.employee_code || '—'} mono />
               <MobileDetailField label="User type" value={(emp.user_type || 'staff').toUpperCase()} />
               <MobileDetailField label="Joined" value={emp.joined_date || '—'} />
               <MobileDetailField label="Phone" value={emp.phone || '—'} mono />
@@ -3909,56 +3640,33 @@ const EmployeeDetailSheet = ({ employeeId, onClose }) => {
               <MobileDetailField label="Section" value={SECTION_LABEL[emp.section_id] || '—'} />
             </div>
 
-            {/* Face enrollment card */}
-            <div style={{
-              padding: 14, borderRadius: 12,
-              background: faceCount >= 3 ? T_.brandSoft || T_.maroonSoft
-                : (faceCount > 0 ? T_.warningSoft : T_.surfaceAlt),
-              marginBottom: 16,
-            }}>
-              <div style={{
-                fontSize: 10.5, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase',
-                color: faceCount >= 3 ? T_.maroon : (faceCount > 0 ? T_.warning : T_.inkMuted),
-              }}>
-                Face enrollment
-              </div>
-              <div style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 6,
-              }}>
-                <div>
-                  <div style={{ fontSize: 15, fontWeight: 600, color: T_.ink }}>
-                    {faceCount >= 3 ? 'Enrolled' : faceCount > 0 ? 'Partial' : 'Not enrolled'}
-                  </div>
+            {/* Attendance machine card */}
+            {(() => {
+              const ms = machineStatusOf(emp, machine);
+              const bg = ms.tone === 'success' ? T_.successSoft : ms.tone === 'warning' ? T_.warningSoft : T_.dangerSoft;
+              const fg = ms.tone === 'success' ? T_.success : ms.tone === 'warning' ? T_.warning : T_.danger;
+              return (
+                <div style={{ padding: 14, borderRadius: 12, background: bg, marginBottom: 16 }}>
+                  <div style={{
+                    fontSize: 10.5, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase', color: fg,
+                  }}>Attendance machine</div>
+                  <div style={{ fontSize: 15, fontWeight: 600, color: T_.ink, marginTop: 6 }}>{ms.label}</div>
                   <div style={{ fontSize: 11.5, color: T_.inkMuted, marginTop: 2 }}>
-                    {faceCount} / 3 poses captured
+                    {ms.key === 'nocode' ? 'Give this person an SA/SS code (Edit details) and the machine will get them automatically.'
+                     : ms.key === 'notyet' ? 'The code is set; the machine has not received it yet. Check again in a few minutes.'
+                     : ms.key === 'noface' ? 'Enrol the face at the machine. The first punch will show here.'
+                     : machine && machine.last_punch ? `Last punch ${relTime(machine.last_punch)} · ${machine.punches_30d || 0} in 30 days` : ''}
                   </div>
                 </div>
-                {canEdit && (
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    <button onClick={() => setReEnroll(true)} style={{
-                      padding: '8px 12px', borderRadius: 10,
-                      background: T_.maroon, color: '#fff', border: 'none',
-                      fontSize: 12, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer',
-                    }}>{faceCount >= 3 ? 'Update face' : 'Enroll face'}</button>
-                    {faceCount > 0 && (
-                      <button onClick={clearFace} style={{
-                        padding: '8px 10px', borderRadius: 10,
-                        background: T_.surface, color: T_.danger,
-                        border: `1px solid ${T_.dangerSoft}`,
-                        fontSize: 12, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer',
-                      }}>Clear</button>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
+              );
+            })()}
 
             {!canEdit && (
               <div style={{
                 fontSize: 12, color: T_.inkMuted, textAlign: 'center',
                 padding: 10, background: T_.surfaceAlt, borderRadius: 10, marginBottom: 14,
               }}>
-                Only Owner / HR can edit details or update face data.
+                Only Owner / HR can edit details.
               </div>
             )}
 
@@ -4014,9 +3722,13 @@ const MobileEmployeeEditSheet = ({ employee, onClose, onSaved }) => {
     gender: employee.gender || '',
     is_active: !!employee.is_active,
     joined_date: employee.joined_date || '',
+    employee_code: employee.employee_code || '',
   });
   const [saving, setSaving] = React.useState(false);
   const [sections, setSections] = React.useState([]);
+  const [err, setErr] = React.useState('');
+  const codeUp = form.employee_code.trim().toUpperCase();
+  const codeOk = !codeUp || EMP_CODE_RE.test(codeUp);
 
   React.useEffect(() => {
     if (!window.sb) return;
@@ -4026,9 +3738,10 @@ const MobileEmployeeEditSheet = ({ employee, onClose, onSaved }) => {
 
   const save = async () => {
     if (!form.name.trim() || !form.role.trim() || saving) return;
-    setSaving(true);
+    if (!codeOk) { setErr('Code must look like SA455 or SS12 (an optional T in front for trainees)'); return; }
+    setSaving(true); setErr('');
     try {
-      await window.sb.from('employees').update({
+      const { error } = await window.sb.from('employees').update({
         name: form.name.trim(),
         role: form.role.trim(),
         section_id: form.section_id || null,
@@ -4037,7 +3750,15 @@ const MobileEmployeeEditSheet = ({ employee, onClose, onSaved }) => {
         gender: form.gender || null,
         is_active: !!form.is_active,
         joined_date: form.joined_date || null,
+        employee_code: codeUp || null,
       }).eq('id', employee.id);
+      if (error) {
+        const msg = (error.message || '').toLowerCase();
+        setErr(msg.includes('duplicate') || error.code === '23505'
+          ? 'This code already belongs to another employee'
+          : (error.message || 'Could not save — try again'));
+        return;
+      }
       onSaved();
     } finally { setSaving(false); }
   };
@@ -4064,6 +3785,22 @@ const MobileEmployeeEditSheet = ({ employee, onClose, onSaved }) => {
         <FieldLabel>Role / designation</FieldLabel>
         <input value={form.role} onChange={e => setForm(f => ({ ...f, role: e.target.value }))}
           placeholder="e.g. Sales Associate" style={enrollInputStyle(T_)} />
+        <div style={{ height: 12 }} />
+
+        <FieldLabel>Employee code (SA/SS — also the machine ID)</FieldLabel>
+        <input value={form.employee_code}
+          onChange={e => { setForm(f => ({ ...f, employee_code: e.target.value })); setErr(''); }}
+          placeholder="SA455" autoCapitalize="characters" spellCheck={false}
+          style={{
+            ...enrollInputStyle(T_), textTransform: 'uppercase',
+            fontFamily: 'JetBrains Mono, Menlo, monospace',
+            borderColor: codeOk ? T_.border : T_.danger,
+          }} />
+        {employee.code_source === 'quanto' && (
+          <div style={{ fontSize: 11.5, color: T_.inkMuted, marginTop: 6 }}>
+            This code came from Quanto. Change it only if Quanto has changed it.
+          </div>
+        )}
         <div style={{ height: 12 }} />
 
         <FieldLabel>Section</FieldLabel>
@@ -4111,6 +3848,13 @@ const MobileEmployeeEditSheet = ({ employee, onClose, onSaved }) => {
           <div style={{ fontSize: 13.5, color: T_.ink, fontWeight: 500 }}>Active</div>
         </label>
 
+        {err && (
+          <div style={{
+            marginTop: 12, padding: '10px 12px', borderRadius: 10,
+            background: T_.dangerSoft, color: T_.danger, fontSize: 12.5,
+          }}>{err}</div>
+        )}
+
         <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
           <button onClick={onClose} disabled={saving} style={{
             flex: 1, padding: 12, borderRadius: 12,
@@ -4125,177 +3869,6 @@ const MobileEmployeeEditSheet = ({ employee, onClose, onSaved }) => {
             cursor: saving ? 'not-allowed' : 'pointer',
             opacity: saving ? 0.6 : 1,
           }}>{saving ? 'Saving…' : 'Save'}</button>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// 3-pose webcam re-enrollment for an existing employee.
-const MobileFaceReEnrollSheet = ({ employee, onClose, onDone }) => {
-  const T_ = window.TOKENS;
-  const videoRef = React.useRef(null);
-  const [modelsReady, setModelsReady] = React.useState(false);
-  const [cameraErr, setCameraErr] = React.useState(null);
-  const [shots, setShots] = React.useState([null, null, null]);
-  const [step, setStep] = React.useState(0);
-  const [busy, setBusy] = React.useState(false);
-  const [hint, setHint] = React.useState('Loading face models…');
-  const [saving, setSaving] = React.useState(false);
-
-  const poses = [
-    { key: 'front', label: 'Look straight' },
-    { key: 'left',  label: 'Slight left' },
-    { key: 'right', label: 'Slight right' },
-  ];
-
-  React.useEffect(() => {
-    let stream = null, cancelled = false;
-    (async () => {
-      try {
-        await window.loadFaceModels();
-        if (cancelled) return;
-        setModelsReady(true);
-        setHint('Opening camera…');
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
-          audio: false,
-        });
-        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play().catch(() => {});
-        }
-        setHint('');
-      } catch (err) {
-        setCameraErr(err.name === 'NotAllowedError'
-          ? 'Camera permission denied'
-          : 'Could not open camera');
-      }
-    })();
-    return () => {
-      cancelled = true;
-      if (stream) stream.getTracks().forEach(t => t.stop());
-    };
-  }, []);
-
-  const capture = async () => {
-    if (!modelsReady || busy) return;
-    setBusy(true); setHint('Detecting face…');
-    try {
-      const desc = await window.computeFaceDescriptor(videoRef.current);
-      if (!desc) { setHint('No face detected — move closer'); return; }
-      setShots(s => s.map((x, i) => i === step ? desc : x));
-      setHint('');
-      if (step < 2) setStep(step + 1);
-    } finally { setBusy(false); }
-  };
-
-  const allCaptured = shots.every(s => s);
-  const save = async () => {
-    if (!allCaptured || saving) return;
-    setSaving(true);
-    try {
-      await window.sb.from('face_embeddings').delete().eq('employee_id', employee.id);
-      await window.sb.from('face_embeddings').insert(
-        shots.map((d, i) => ({ employee_id: employee.id, pose: poses[i].key, embedding: d }))
-      );
-      onDone();
-    } finally { setSaving(false); }
-  };
-
-  return (
-    <div onClick={onClose} style={{
-      position: 'absolute', inset: 0, background: 'rgba(11, 13, 14, 0.7)',
-      display: 'flex', alignItems: 'flex-end', zIndex: 170,
-    }}>
-      <div onClick={e => e.stopPropagation()} style={{
-        width: '100%', background: T_.surface, borderRadius: '20px 20px 0 0',
-        padding: 20, maxHeight: '90%', overflowY: 'auto',
-      }}>
-        <div style={{
-          fontFamily: 'Fraunces, Georgia, serif', fontSize: 20,
-          fontWeight: 500, color: T_.ink, letterSpacing: -0.3, marginBottom: 4,
-        }}>Update face · {employee.name}</div>
-        <div style={{ fontSize: 12.5, color: T_.inkMuted, marginBottom: 14 }}>
-          Step {Math.min(step + 1, 3)} of 3 — {poses[Math.min(step, 2)].label}
-        </div>
-
-        <div style={{
-          position: 'relative', width: '100%', aspectRatio: '3 / 4',
-          background: '#0B0D0E', borderRadius: 18, overflow: 'hidden',
-          border: `1px solid ${T_.border}`, marginBottom: 12,
-        }}>
-          <video ref={videoRef} autoPlay playsInline muted
-            style={{
-              position: 'absolute', inset: 0,
-              width: '100%', height: '100%', objectFit: 'cover',
-              transform: 'scaleX(-1)',
-              opacity: cameraErr ? 0 : 1,
-            }} />
-          <div style={{
-            position: 'absolute', top: '50%', left: '50%',
-            transform: 'translate(-50%, -50%)',
-            width: '60%', height: '70%', borderRadius: '50%',
-            border: '2px dashed rgba(255,255,255,0.45)',
-            pointerEvents: 'none',
-          }} />
-          {(hint || cameraErr) && (
-            <div style={{
-              position: 'absolute', left: 12, right: 12, bottom: 12,
-              background: 'rgba(11,13,14,0.7)', color: '#fff',
-              padding: '8px 12px', borderRadius: 10, fontSize: 12, textAlign: 'center',
-            }}>{cameraErr || hint}</div>
-          )}
-        </div>
-
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 14 }}>
-          {poses.map((p, i) => (
-            <div key={p.key} style={{
-              aspectRatio: '1', borderRadius: 10,
-              background: shots[i] ? T_.maroonSoft : T_.surfaceAlt,
-              border: `1px solid ${shots[i] ? T_.maroon : step === i ? T_.gold : T_.border}`,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexDirection: 'column', gap: 4,
-            }}>
-              <div style={{
-                fontSize: 10.5, fontWeight: 700, letterSpacing: 0.6, textTransform: 'uppercase',
-                color: shots[i] ? T_.maroon : T_.inkMuted,
-              }}>{p.key}</div>
-              <div style={{ fontSize: 11, color: shots[i] ? T_.maroon : T_.inkFaint }}>
-                {shots[i] ? '✓' : step === i ? 'Ready' : '—'}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={onClose} disabled={saving} style={{
-            flex: 1, padding: 12, borderRadius: 12,
-            background: T_.surface, border: `1px solid ${T_.border}`,
-            color: T_.ink, fontSize: 13, fontWeight: 600,
-            fontFamily: 'inherit', cursor: 'pointer',
-          }}>Cancel</button>
-          {!allCaptured ? (
-            <button onClick={capture} disabled={!modelsReady || busy || !!cameraErr}
-              style={{
-                flex: 1.2, padding: 12, borderRadius: 12,
-                background: T_.maroon, color: '#fff', border: 'none',
-                fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
-                cursor: (busy || !modelsReady || cameraErr) ? 'not-allowed' : 'pointer',
-                opacity: (busy || !modelsReady || cameraErr) ? 0.5 : 1,
-              }}>
-              {busy ? 'Detecting…' : !modelsReady ? 'Loading…' : `Capture ${poses[Math.min(step, 2)].key}`}
-            </button>
-          ) : (
-            <button onClick={save} disabled={saving} style={{
-              flex: 1.2, padding: 12, borderRadius: 12,
-              background: T_.success, color: '#fff', border: 'none',
-              fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
-              cursor: saving ? 'not-allowed' : 'pointer',
-              opacity: saving ? 0.6 : 1,
-            }}>{saving ? 'Saving…' : 'Save face data'}</button>
-          )}
         </div>
       </div>
     </div>
@@ -5690,8 +5263,8 @@ const HRHomeScreen = () => {
             icon="user" tone="info"
             title={`${hrStats.newJoinersWeek} new joiner${hrStats.newJoinersWeek === 1 ? '' : 's'} this week`}
             sub={hrStats.newJoinerName || 'No new joiners yet'}
-            action="Onboard"
-            onClick={() => nav.go('enroll')}
+            action="Machine"
+            onClick={() => nav.go('machineStatus')}
             last
           />
         </div>
@@ -5844,7 +5417,7 @@ const HRHomeScreen = () => {
           <HRWeekStat label="Leave granted"   value={hrApprovedThisWeek}    tone="info"
             onClick={() => nav.go('leaves')} />
           <HRWeekStat label="New joiners"     value={hrStats.newJoinersWeek} tone="brand"
-            onClick={() => nav.go('enroll')} />
+            onClick={() => nav.go('machineStatus')} />
         </div>
       </div>
     </div>
@@ -6602,10 +6175,10 @@ const HRToolsScreen = () => {
           />
           <HRTile
             icon="sparkle" tone="gold"
-            title="Enroll joiner"
+            title="Add staff"
             value="Add"
-            sub="Register face in 3 shots"
-            onClick={() => nav.go('enroll')}
+            sub="Non-Quanto: security, drivers, office"
+            onClick={() => nav.go('addStaff')}
           />
           <HRTile
             icon="suitcase" tone="brand"
@@ -6630,10 +6203,17 @@ const HRToolsScreen = () => {
           />
           <HRTile
             icon="clock" tone="success"
-            title="Kiosk scanner"
-            value="Open"
-            sub="Wall-mounted punch in/out"
-            onClick={() => nav.go('kiosk')}
+            title="Mark punch / outpass"
+            value="Fix"
+            sub="Missed a machine punch"
+            onClick={() => nav.go('markPunch')}
+          />
+          <HRTile
+            icon="settings" tone="neutral"
+            title="Attendance machine"
+            value="See"
+            sub="Who is not on it yet"
+            onClick={() => nav.go('machineStatus')}
           />
         </div>
       </div>
@@ -7245,1087 +6825,17 @@ const MarkRow = ({ person, sectionLabel, onSet, last }) => {
 window.MarkAttendanceScreen = MarkAttendanceScreen;
 
 
-// ========== components/screen-kiosk-scanner.jsx ==========
-// Face-recognition attendance kiosk — runs on a wall-mounted tablet at
-// the staff entrance. Portrait, bilingual, silent confirmation, auto
-// clock-in / clock-out based on whether the person is already clocked in today.
-//
-// Prototype note: camera feed is SIMULATED. A real build would use
-// face-api.js (on-device) for detection + embedding match against
-// enrolled staff. Here we rotate through a fake queue so HR can feel
-// the flow.
-
-const KioskScannerScreen = () => {
-  const { nav, setUser, setUserId } = useApp();
-
-  const [clockedIn, setClockedIn] = React.useState(new Set());
-  const [recent, setRecent]       = React.useState([]);
-  const [phase, setPhase]         = React.useState('idle'); // idle | detecting | matching | matched | unknown
-  const [current, setCurrent]     = React.useState(null);
-  const [showExitPrompt, setShowExitPrompt] = React.useState(false);
-
-  // Live runtime state
-  const videoRef   = React.useRef(null);
-  const [cameraReady, setCameraReady]   = React.useState(false);
-  const [modelsReady, setModelsReady]   = React.useState(false);
-  const [cameraErr, setCameraErr]       = React.useState(null);
-  const [facingMode, setFacingMode]     = React.useState('user'); // 'user' | 'environment'
-  const [totalStaff, setTotalStaff]     = React.useState(0);
-  const [enrolled, setEnrolled]         = React.useState(0);
-  // Kiosk PIN captured at entry — gates the kiosk_* RPCs. Matching and punching
-  // happen server-side now, so the client never downloads face embeddings.
-  const pin = window.__kioskPin || '';
-
-  // Cooldown so the same face doesn't re-trigger instantly.
-  // Per-employee cooldown so the same face staying in frame doesn't
-  // re-trigger clock in/out. Other faces can still match in parallel.
-  const MATCH_COOLDOWN_MS = 30000;
-  const lastMatchMap = React.useRef({}); // { employeeId: timestamp }
-
-  // Reliability-first matching knobs. The comment block above the
-  // match loop below explains each one; defaults chosen to bias
-  // STRONGLY towards "try again" when there's any doubt.
-  const MIN_FACE_PX    = 60;   // absolute floor; effective gate scales with frame width (see loop)
-  const MIN_MARGIN     = 0.08; // best must be this far ahead of 2nd-best (similarity units)
-  const CONFIRM_FRAMES = 2;    // same top candidate must agree on N frames in a row
-
-  // Idle dim: if no face has been seen for a while we dim the preview
-  // to save the tablet's power. The detection loop keeps ticking so a
-  // face walking in front of the camera still wakes us instantly.
-  const IDLE_DIM_MS = 15000;
-  const lastFaceSeenAtRef = React.useRef(Date.now());
-  const [faceSeen, setFaceSeen] = React.useState(true);
-  React.useEffect(() => {
-    const handle = setInterval(() => {
-      const seen = Date.now() - lastFaceSeenAtRef.current < IDLE_DIM_MS;
-      setFaceSeen(prev => prev === seen ? prev : seen);
-    }, 1000);
-    return () => clearInterval(handle);
-  }, []);
-
-  const [now, setNow] = React.useState(new Date());
-  React.useEffect(() => {
-    const t = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(t);
-  }, []);
-
-  const [pulse, setPulse] = React.useState(0);
-  React.useEffect(() => {
-    const t = setInterval(() => setPulse(p => (p + 1) % 100), 40);
-    return () => clearInterval(t);
-  }, []);
-
-  // ── Kiosk health: heartbeat + nightly self-refresh ─────────────────
-  // Heartbeat: ping the server every minute so the dashboard can show
-  // "kiosk last seen X min ago" and flag a frozen tablet within minutes.
-  // (2026-07-18: the tablet froze at 09:30 and the missing check-outs
-  // went unnoticed until closing.)
-  // Nightly refresh: reload the page once per day at/after 04:00 IST so
-  // the browser starts fresh daily instead of degrading over weeks of
-  // continuous camera + face-detection work. If the tablet sleeps
-  // through the night, the pending refresh fires on first wake instead.
-  // Never fires mid-scan, and only after 1h uptime so it can't loop.
-  React.useEffect(() => {
-    if (!pin) return;
-    let deviceId;
-    try {
-      deviceId = localStorage.getItem('kiosk-device-id');
-      if (!deviceId) {
-        deviceId = 'kiosk-' + Math.random().toString(36).slice(2, 10);
-        localStorage.setItem('kiosk-device-id', deviceId);
-      }
-    } catch (_) { deviceId = 'kiosk-nostorage'; }
-    const loadedAt = new Date(performance.timeOrigin || Date.now()).toISOString();
-    const beat = async () => {
-      if (!window.sb || navigator.onLine === false) return;
-      try {
-        await window.sb.rpc('kiosk_heartbeat', {
-          p_pin: pin,
-          p_device_id: deviceId,
-          p_loaded_at: loadedAt,
-          p_ua: (navigator.userAgent || '').slice(0, 300),
-        });
-      } catch (_) { /* transient network — next beat retries */ }
-    };
-    const nightlyRefresh = () => {
-      try {
-        const istHour = Number(new Date().toLocaleString('en-GB', {
-          timeZone: 'Asia/Kolkata', hour: '2-digit', hour12: false,
-        }));
-        const istDate = window.todayISO ? window.todayISO() : null;
-        const uptimeMs = Date.now() - (performance.timeOrigin || Date.now());
-        if (istDate && istHour >= 4
-            && localStorage.getItem('kiosk-nightly-refresh') !== istDate
-            && uptimeMs > 60 * 60 * 1000
-            && !window.__kioskBusy) {
-          localStorage.setItem('kiosk-nightly-refresh', istDate);
-          location.reload();
-        }
-      } catch (_) { /* storage unavailable — skip, heartbeat still works */ }
-    };
-    beat();
-    const hb = setInterval(beat, 60 * 1000);
-    const nr = setInterval(nightlyRefresh, 60 * 1000);
-    return () => { clearInterval(hb); clearInterval(nr); };
-  }, [pin]);
-
-  // Camera (re)acquisition. `camNonce` is bumped to force a fresh open after the
-  // Android OS kills the stream on screen-sleep / app-background. `acquiringRef`
-  // guards the self-heal check below so it doesn't fire while we're mid-open.
-  const [camNonce, setCamNonce] = React.useState(0);
-  const acquiringRef = React.useRef(false);
-
-  // Detector health. The camera heal loop above only notices DEAD TRACKS —
-  // it cannot see a dead face-detector (e.g. the WebGL/TF backend lost its
-  // context after hours of inference: tracks stay "live", the detector just
-  // throws forever, and the idle dim makes it look like a frozen black
-  // screen). Every successful detector pass stamps detOkAtRef; a watchdog
-  // in the matching loop escalates when it goes stale: re-acquire the
-  // camera first, then (after repeated strikes) a guarded page reload —
-  // the only reliable cure for a dead WebGL context.
-  const detOkAtRef = React.useRef(Date.now());
-  const watchdogStrikesRef = React.useRef(0);
-  const [detStalled, setDetStalled] = React.useState(false);
-
-  // Load face-api models + open the webcam. Re-runs on camera flip and whenever
-  // camNonce is bumped (a self-heal re-acquire).
-  React.useEffect(() => {
-    let stream = null;
-    let cancelled = false;
-    acquiringRef.current = true;
-    setCameraReady(false);
-    setCameraErr(null);
-    (async () => {
-      try {
-        await window.loadFaceModels();
-        if (cancelled) return;
-        setModelsReady(true);
-        // Try the requested facing mode; fall back to any camera so the
-        // kiosk still works on devices with a single camera.
-        try {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: { ideal: facingMode }, width: { ideal: 1280 }, height: { ideal: 720 } },
-            audio: false,
-          });
-        } catch (e) {
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: { width: { ideal: 1280 }, height: { ideal: 720 } },
-            audio: false,
-          });
-        }
-        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
-        // Android stops camera tracks when the screen sleeps or another app
-        // grabs the camera. When that happens, re-acquire instead of freezing.
-        stream.getTracks().forEach(t => {
-          t.onended = () => { if (!cancelled) setCamNonce(n => n + 1); };
-        });
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play().catch(() => {});
-        }
-        setCameraReady(true);
-      } catch (err) {
-        console.error(err);
-        setCameraErr(err.name === 'NotAllowedError'
-          ? 'Camera permission denied — enable it in Settings.'
-          : 'Could not open camera.');
-      } finally {
-        acquiringRef.current = false;
-      }
-    })();
-    return () => {
-      cancelled = true;
-      acquiringRef.current = false;
-      if (stream) stream.getTracks().forEach(t => t.stop());
-    };
-  }, [facingMode, camNonce]);
-
-  // Self-heal: when the tablet wakes or the app returns to the foreground, the
-  // camera tracks are usually dead. Re-acquire them (and resume a paused video)
-  // so the kiosk recovers on its own — no manual reload. Also polled every few
-  // seconds so it recovers even if no visibility event fires.
-  React.useEffect(() => {
-    const heal = () => {
-      if (acquiringRef.current || document.visibilityState !== 'visible') return;
-      const v = videoRef.current;
-      if (!v) return; // element not mounted yet — nothing to re-acquire onto
-      const s = v.srcObject;
-      const live = s && typeof s.getVideoTracks === 'function'
-        && s.getVideoTracks().some(t => t.readyState === 'live');
-      if (!live) { setCamNonce(n => n + 1); return; }
-      if (v.paused) v.play().catch(() => {});
-    };
-    const onVis = () => { if (document.visibilityState === 'visible') heal(); };
-    document.addEventListener('visibilitychange', onVis);
-    const id = setInterval(heal, 4000);
-    return () => { document.removeEventListener('visibilitychange', onVis); clearInterval(id); };
-  }, []);
-
-  // Pull today's clocked-in set and recent scans from the DB on mount
-  // and keep them fresh via the realtime subscription.
-  React.useEffect(() => {
-    if (!window.sb) return;
-    const today = todayISO();
-    const fetchLive = async () => {
-      const { data } = await window.sb
-        .from('attendance')
-        .select('employee_id, status, punch_in_time, punch_out_time, updated_at, employees(name, section_id)')
-        .eq('date', today)
-        .in('status', ['present','late'])
-        .order('updated_at', { ascending: false });
-      const rows = data || [];
-      const inSet = new Set(rows.filter(r => !r.punch_out_time).map(r => r.employee_id));
-      setClockedIn(inSet);
-      setRecent(rows.slice(0, 6).map(r => ({
-        id:      r.employee_id,
-        name:    r.employees?.name || r.employee_id,
-        section: SECTION_LABEL[r.employees?.section_id] || r.employees?.section_id || '—',
-        dir:     r.punch_out_time ? 'out' : 'in',
-        time:    fmtTime(r.punch_out_time || r.punch_in_time) || '',
-      })));
-    };
-    fetchLive();
-    const channel = window.sb
-      .channel('kiosk-live')
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'attendance' },
-        () => { fetchLive(); })
-      .subscribe();
-    return () => { window.sb.removeChannel(channel); };
-  }, []);
-
-  // Tally + who's clocked in today, from the PIN-gated kiosk_meta RPC. Polled
-  // (no realtime channel) since the kiosk no longer has direct table access.
-  React.useEffect(() => {
-    if (!window.sb || !pin) return;
-    let cancelled = false;
-    const fetchMeta = async () => {
-      const { data, error } = await window.sb.rpc('kiosk_meta', { p_pin: pin });
-      if (cancelled || error || !data) return;
-      setTotalStaff(data.total_staff || 0);
-      setEnrolled(data.enrolled || 0);
-      setClockedIn(new Set(data.clocked_in || []));
-    };
-    fetchMeta();
-    const id = setInterval(fetchMeta, 60000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [pin]);
-
-  // The server decides check-in vs check-out (8 AM rule, shift day, latest-out)
-  // and returns it. Direction + late/present are authoritative from here.
-  // Persist the chosen kiosk action (check_in / check_out / outpass_out /
-  // outpass_in). The server validates it against the live state.
-  const [saveError, setSaveError] = React.useState(false);
-  const persistEvent = async (emp, action) => {
-    if (!window.sb || !pin) return null;
-    const { data, error } = await window.sb.rpc('kiosk_event', {
-      p_pin: pin, p_employee_id: emp.id, p_action: action,
-    });
-    if (error) { console.error('kiosk_event failed', error); return null; }
-    return data; // { action, time, state, actions, status, shift_date }
-  };
-
-  // Show the big name card with the state-aware buttons. Nothing is written
-  // until the person taps an action, so a wrong recognition is harmless.
-  const showMatchUI = React.useCallback((emp) => {
-    setSaveError(false);
-    setCurrent(emp);
-    setPhase('matched');
-  }, []);
-
-  const actionBusyRef = React.useRef(false);
-  const ACTION_DIR = { check_in: 'in', outpass_in: 'in', outpass_out: 'out', check_out: 'out' };
-
-  const chooseAction = async (action) => {
-    if (!current || phase !== 'matched' || actionBusyRef.current) return;
-    actionBusyRef.current = true;
-    setSaveError(false);
-    const emp = current;
-    // Try to save; retry once for a transient network blip on the kiosk's wifi.
-    let res = await persistEvent(emp, action);
-    if (!res) res = await persistEvent(emp, action);
-    if (!res) {
-      // CRITICAL: the save failed. Never pretend it worked — show an error so
-      // the employee scans again, otherwise they'd walk away thinking they
-      // checked in while nothing was recorded.
-      actionBusyRef.current = false;
-      setSaveError(true);
-      return;
-    }
-    const done = res.action || action;
-    const dir = ACTION_DIR[done] || 'in';
-    setRecent(r => [{ ...emp, dir, time: res.time || '', action: done }, ...r].slice(0, 6));
-    setClockedIn(s => {
-      const ns = new Set(s);
-      if (dir === 'in') ns.add(emp.id); else ns.delete(emp.id);
-      return ns;
-    });
-    setPhase('idle');
-    setCurrent(null);
-    actionBusyRef.current = false;
-  };
-
-  const tryAgainMatch = () => {
-    if (!current) return;
-    // Drop the per-employee cooldown so the same face can match again
-    // right away — useful when the wrong person was recognised.
-    delete lastMatchMap.current[current.id];
-    pendingMatchRef.current = null;
-    setSaveError(false);
-    setCurrent(null);
-    setPhase('idle');
-  };
-
-  // Auto-dismiss the match card if nobody taps an action within 15s, so it
-  // never gets stuck on someone who walked away mid-choice.
-  React.useEffect(() => {
-    if (phase !== 'matched') return;
-    const t = setTimeout(() => { setSaveError(false); setCurrent(null); setPhase('idle'); }, 15000);
-    return () => clearTimeout(t);
-  }, [phase]);
-
-  // Tell the auto-updater (bottom of file) when a scan/choice is in progress so
-  // it never reloads the tablet mid-interaction.
-  React.useEffect(() => { window.__kioskBusy = (phase !== 'idle'); }, [phase]);
-
-  const pendingMatchRef = React.useRef(null); // legacy ref (reset by tryAgain)
-  // Steady-face counter for the cheap presence pass: only after a large face is
-  // steadily in frame do we pay for the descriptor + a server match.
-  const steadyRef = React.useRef(0);
-
-  // Matching loop. Each tick runs a CHEAP presence check (face box only, no
-  // descriptor). Once a large face is steady, compute the descriptor ONCE and
-  // do ONE PIN-gated kiosk_match — the server enforces threshold + margin, so a
-  // single confident match is reliable. This keeps recognition fast while
-  // embeddings never leave the server.
-  React.useEffect(() => {
-    if (!modelsReady || !cameraReady || phase !== 'idle' || !pin) return;
-    const STEADY_FRAMES = 2;
-    let cancelled = false;
-    let inFlight = false;
-    const tick = async () => {
-      if (cancelled) return;
-      let delay = 140;
-      try {
-        const v = videoRef.current;
-        if (v && v.readyState >= 2 && v.videoWidth > 0 && !inFlight) {
-          const pres = await window.computeFacePresence(v);
-          if (cancelled) return;
-          // Detector produced a result (face or not) — pipeline is alive.
-          detOkAtRef.current = Date.now();
-          watchdogStrikesRef.current = 0;
-          setDetStalled(s => s ? false : s);
-          // Gate on face size as a FRACTION of the frame so it behaves the same
-          // whether the camera gives 720p or falls back to 480p. ~5.5% of width
-          // (with a 60px floor) lets staff stand comfortably back and still read.
-          const minFaceW = Math.max(MIN_FACE_PX, (v.videoWidth || 1280) * 0.055);
-          if (pres && (pres.box?.width || 0) >= minFaceW) {
-            lastFaceSeenAtRef.current = Date.now();
-            steadyRef.current += 1;
-            if (steadyRef.current >= STEADY_FRAMES) {
-              inFlight = true;
-              const det = await window.computeFaceDetection(v); // descriptor (heavy), once
-              if (det && !cancelled) {
-                const { data, error } = await window.sb.rpc('kiosk_match', {
-                  p_pin: pin, p_descriptor: det.descriptor,
-                });
-                const m = (!error && data && data.length) ? data[0] : null;
-                if (m && m.matched && !cancelled) {
-                  const nowT  = Date.now();
-                  const lastAt = lastMatchMap.current[m.employee_id] || 0;
-                  if (nowT - lastAt > MATCH_COOLDOWN_MS) {
-                    lastMatchMap.current[m.employee_id] = nowT;
-                    inFlight = false;
-                    steadyRef.current = 0;
-                    showMatchUI({
-                      id: m.employee_id,
-                      name: m.name,
-                      role: m.role,
-                      section: SECTION_LABEL[m.section_id] || '',
-                      confidence: m.similarity,
-                      state: m.state,
-                      actions: Array.isArray(m.actions) ? m.actions : [],
-                    });
-                    return;
-                  }
-                }
-              }
-              inFlight = false;
-              steadyRef.current = 0; // re-steady before the next attempt
-              delay = 350;           // brief backoff after a match attempt
-            }
-          } else {
-            steadyRef.current = 0;
-          }
-        }
-      } catch (_) { inFlight = false; steadyRef.current = 0; }
-      if (!cancelled) setTimeout(tick, delay);
-    };
-    const handle = setTimeout(tick, 250);
-    // Watchdog: the loop is supposed to produce a detector pass every few
-    // hundred ms. 20s with none means the pipeline is dead even though the
-    // camera tracks look live. Strike 1-2: re-acquire the camera. Strike 3+:
-    // guarded reload (never mid-scan, at most once per 10 minutes).
-    detOkAtRef.current = Date.now();
-    const watchdog = setInterval(() => {
-      if (cancelled) return;
-      if (Date.now() - detOkAtRef.current < 20000) return;
-      detOkAtRef.current = Date.now(); // pace the next escalation
-      watchdogStrikesRef.current += 1;
-      setDetStalled(true);
-      if (watchdogStrikesRef.current >= 3) {
-        try {
-          const last = Number(localStorage.getItem('kiosk-watchdog-reload') || 0);
-          if (!window.__kioskBusy && Date.now() - last > 10 * 60 * 1000) {
-            localStorage.setItem('kiosk-watchdog-reload', String(Date.now()));
-            location.reload();
-            return;
-          }
-        } catch (_) { /* storage unavailable — fall through to re-acquire */ }
-      }
-      setCamNonce(n => n + 1);
-    }, 5000);
-    return () => {
-      cancelled = true;
-      clearTimeout(handle);
-      clearInterval(watchdog);
-      steadyRef.current = 0;
-    };
-  }, [modelsReady, cameraReady, phase, pin, showMatchUI]);
-
-  const hh = now.getHours() % 12 || 12;
-  const mm = String(now.getMinutes()).padStart(2, '0');
-  const ampm = now.getHours() >= 12 ? 'PM' : 'AM';
-
-  const dateLabel = now.toLocaleDateString('en-GB', { weekday: 'short', day: '2-digit', month: 'short' });
-  const matched = phase === 'matched' && current;
-
-  return (
-    <div style={{
-      position: 'absolute', inset: 0, overflow: 'hidden',
-      background: '#0B0D0E', color: '#fff',
-      display: 'flex', flexDirection: 'column',
-    }}>
-      {/* Top bar */}
-      <div style={{
-        padding: 'var(--screen-top-sm) 20px 14px', display: 'flex',
-        alignItems: 'flex-start', justifyContent: 'space-between', gap: 12,
-      }}>
-        <div>
-          <div style={{
-            fontSize: 10, letterSpacing: 1.2, textTransform: 'uppercase',
-            color: 'rgba(255,255,255,0.4)', fontWeight: 600,
-          }}>Seemaatti · Staff Entrance</div>
-          <div style={{
-            fontFamily: 'Fraunces, Georgia, serif',
-            fontSize: 22, fontWeight: 500, marginTop: 2, letterSpacing: -0.4,
-          }}>Attendance Kiosk</div>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <div style={{ textAlign: 'right' }}>
-            <div style={{
-              fontFamily: 'Fraunces, Georgia, serif',
-              fontSize: 26, fontWeight: 500, letterSpacing: -0.6, lineHeight: 1,
-              fontFeatureSettings: '"tnum"',
-            }}>{hh}:{mm}</div>
-            <div style={{
-              fontSize: 10, color: 'rgba(255,255,255,0.45)',
-              letterSpacing: 0.6, marginTop: 4,
-            }}>{ampm} · {dateLabel}</div>
-          </div>
-          {/* Flip camera — small icon button, only before a match */}
-          {!matched && (
-            <button
-              onClick={() => setFacingMode(m => m === 'user' ? 'environment' : 'user')}
-              aria-label="Flip camera"
-              title="Flip camera"
-              style={{
-                background: 'rgba(255,255,255,0.08)',
-                border: '1px solid rgba(255,255,255,0.15)', borderRadius: 10,
-                width: 38, height: 38, padding: 0,
-                color: 'rgba(255,255,255,0.85)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                cursor: 'pointer', flex: 'none',
-              }}
-            >
-              <Icon name="arrowRight" size={16} />
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* Camera frame */}
-      <div style={{ flex: 1, padding: '0 20px', position: 'relative', minHeight: 0 }}>
-        <KioskCameraFrame phase={phase} current={current} pulse={pulse}
-          videoRef={videoRef} cameraErr={cameraErr} facingMode={facingMode}
-          faceSeen={faceSeen} stalled={detStalled}
-          enrolledCount={enrolled} />
-      </div>
-
-      {/* Instruction label — only when NOT matched */}
-      {!matched && (
-        <div style={{ padding: '14px 20px 6px', textAlign: 'center', minHeight: 64 }}>
-          {phase === 'idle' && (
-            <>
-              <div style={{
-                fontFamily: 'Fraunces, Georgia, serif',
-                fontSize: 22, fontWeight: 500, letterSpacing: -0.3, lineHeight: 1.2,
-              }}>Stand here &amp; look at the camera</div>
-              <div style={{ fontSize: 15, color: 'rgba(255,255,255,0.6)', marginTop: 6 }}>
-                கேமராவை நேராக பாருங்கள்
-              </div>
-            </>
-          )}
-          {phase === 'detecting' && (
-            <>
-              <div style={{
-                fontFamily: 'Fraunces, Georgia, serif',
-                fontSize: 20, fontWeight: 500, letterSpacing: -0.3, color: '#E8C65A',
-              }}>Face detected…</div>
-              <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.5)', marginTop: 6 }}>
-                முகம் கண்டறியப்பட்டது…
-              </div>
-            </>
-          )}
-          {phase === 'matching' && (
-            <>
-              <div style={{
-                fontFamily: 'Fraunces, Georgia, serif',
-                fontSize: 20, fontWeight: 500, letterSpacing: -0.3, color: '#E8C65A',
-              }}>Matching…</div>
-              <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.5)', marginTop: 6 }}>
-                அடையாளம் காண்கிறது…
-              </div>
-            </>
-          )}
-        </div>
-      )}
-
-      {/* Tally strip — only when NOT matched */}
-      {!matched && (
-        <div style={{
-          margin: '6px 20px 0', padding: '10px 14px',
-          background: 'rgba(255,255,255,0.05)', borderRadius: 12,
-          border: '1px solid rgba(255,255,255,0.08)',
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        }}>
-          <div>
-            <div style={{
-              fontSize: 9.5, letterSpacing: 1, textTransform: 'uppercase',
-              color: 'rgba(255,255,255,0.4)', fontWeight: 600,
-            }}>Today's check-ins</div>
-            <div style={{
-              fontFamily: 'Fraunces, Georgia, serif',
-              fontSize: 20, fontWeight: 500, marginTop: 2, letterSpacing: -0.4,
-              fontFeatureSettings: '"tnum"',
-            }}>
-              {clockedIn.size}<span style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)' }}> / {totalStaff || '—'}</span>
-            </div>
-          </div>
-          <div style={{ display: 'flex', gap: 6 }}>
-            {recent.slice(0, 4).map((r, i) => (
-              <div key={i} title={`${r.name} · clocked ${r.dir} at ${r.time}`}
-                style={{
-                  width: 28, height: 28, borderRadius: '50%',
-                  background: r.dir === 'in' ? 'rgba(14, 124, 58, 0.3)' : 'rgba(232, 198, 90, 0.25)',
-                  border: `1.5px solid ${r.dir === 'in' ? '#0E7C3A' : '#E8C65A'}`,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: 10, fontWeight: 700, color: '#fff',
-                }}>
-                {r.name.split(' ').map(s => s[0]).slice(0, 2).join('')}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Footer — only when NOT matched. Just the Exit button, centered. */}
-      {!matched && (
-        <div style={{
-          padding: '12px 20px 24px', display: 'flex',
-          alignItems: 'center', justifyContent: 'center',
-        }}>
-          <button onClick={() => setShowExitPrompt(true)} style={{
-            background: 'none', border: '1px solid rgba(255,255,255,0.15)',
-            borderRadius: 10, padding: '10px 16px',
-            color: 'rgba(255,255,255,0.6)', fontSize: 12, fontWeight: 600,
-            fontFamily: 'inherit', cursor: 'pointer',
-            display: 'flex', alignItems: 'center', gap: 6,
-          }}>
-            <Icon name="close" size={14} /> Exit kiosk
-          </button>
-        </div>
-      )}
-
-      {/* Matched state — full-screen takeover so nothing can overlap.
-          Buttons depend on the person's current state (from the server):
-          needs check-in, inside (check out / outpass), or on outpass (return). */}
-      {matched && (() => {
-        const acts = current.actions || [];
-        const twoChoice = acts.includes('check_out') && acts.includes('outpass_out');
-        const onlyAction = acts.length === 1 ? acts[0] : null;
-        const headLabel =
-          onlyAction === 'check_in'   ? 'Check in · உள்நுழைய' :
-          onlyAction === 'outpass_in' ? 'Returning from outpass · திரும்பி வருகை' :
-          onlyAction === 'check_out'  ? 'Check out · வெளியேற' :
-                                        'Choose · தேர்வு செய்க';
-        return (
-        <div style={{
-          position: 'absolute', inset: 0,
-          background: 'linear-gradient(180deg, rgba(11,13,14,0.97) 0%, rgba(11,13,14,0.99) 100%)',
-          backdropFilter: 'blur(10px)',
-          display: 'flex', flexDirection: 'column',
-          padding: 'calc(var(--screen-top-sm) + 12px) 22px 28px',
-          animation: 'kioskMatchIn 260ms ease-out',
-          zIndex: 20, overflow: 'hidden',
-        }}>
-          {/* Recognized badge (neutral — the action is chosen below) */}
-          <div style={{ display: 'flex', justifyContent: 'center', marginTop: 18 }}>
-            <div style={{
-              width: 104, height: 104, borderRadius: '50%',
-              background: 'rgba(232,198,90,0.16)', border: '3px solid #E8C65A',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              boxShadow: '0 0 46px rgba(232,198,90,0.4)',
-            }}>
-              <Icon name="check" size={52} color="#F2DD93" />
-            </div>
-          </div>
-
-          {/* Name block */}
-          <div style={{ textAlign: 'center', marginTop: 22 }}>
-            <div style={{
-              fontSize: 11, letterSpacing: 1.4, textTransform: 'uppercase',
-              color: '#E8C65A', fontWeight: 700,
-            }}>
-              {headLabel}
-            </div>
-            <div style={{
-              fontFamily: 'Fraunces, Georgia, serif',
-              fontSize: 32, fontWeight: 500, letterSpacing: -0.6, lineHeight: 1.1,
-              marginTop: 12,
-            }}>{current.name}</div>
-            <div style={{ fontSize: 15, color: 'rgba(255,255,255,0.65)', marginTop: 10 }}>
-              {[current.role, current.section && `${current.section} Section`, `${hh}:${mm}`]
-                .filter(Boolean).join(' · ')}
-            </div>
-          </div>
-
-          <div style={{ flex: 1 }} />
-
-          {/* Action buttons — state-aware. On a save failure show a clear
-              error instead of fake success, so the person scans again. */}
-          {saveError ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, alignItems: 'stretch' }}>
-              <div style={{
-                background: 'rgba(192,57,43,0.18)', border: '2px solid #C0392B',
-                borderRadius: 16, padding: '16px 18px', textAlign: 'center',
-              }}>
-                <div style={{ color: '#F0857A', fontWeight: 700, fontSize: 17 }}>⚠ Not saved — scan again</div>
-                <div style={{ color: 'rgba(255,255,255,0.7)', fontWeight: 600, fontSize: 13, marginTop: 4 }}>சேமிக்கப்படவில்லை — மீண்டும் ஸ்கேன் செய்யவும்</div>
-              </div>
-              <KioskActionBtn full color="#0E7C3A" icon="check" label="Scan again" sub="மீண்டும்"
-                onClick={tryAgainMatch} />
-            </div>
-          ) : twoChoice ? (
-            <div style={{ display: 'flex', gap: 12 }}>
-              <KioskActionBtn color="#C0392B" icon="close" label="Check out" sub="வெளியேற"
-                onClick={() => chooseAction('check_out')} />
-              <KioskActionBtn color="#C97A1A" icon="arrowRight" label="Outpass" sub="வெளியே செல்ல"
-                onClick={() => chooseAction('outpass_out')} />
-            </div>
-          ) : onlyAction === 'outpass_in' ? (
-            <KioskActionBtn full color="#0E7C3A" icon="arrowLeft" label="Back from outpass" sub="திரும்பி வந்தேன்"
-              onClick={() => chooseAction('outpass_in')} />
-          ) : onlyAction === 'check_out' ? (
-            <KioskActionBtn full color="#C0392B" icon="close" label="Check out" sub="வெளியேற"
-              onClick={() => chooseAction('check_out')} />
-          ) : (
-            <KioskActionBtn full color="#0E7C3A" icon="check" label="Check in" sub="உள்நுழைய"
-              onClick={() => chooseAction('check_in')} />
-          )}
-
-          {/* Not me — small link-style button */}
-          <button onClick={tryAgainMatch} style={{
-            background: 'none', border: 'none',
-            padding: '16px 14px',
-            color: 'rgba(255,255,255,0.6)', fontSize: 14, fontWeight: 600,
-            cursor: 'pointer', fontFamily: 'inherit',
-            width: '100%', textAlign: 'center', marginTop: 6,
-          }}>
-            Not me — try again · மீண்டும் முயற்சிக்க
-          </button>
-        </div>
-        );
-      })()}
-
-      {/* Exit PIN prompt */}
-      {showExitPrompt && (
-        <KioskPinPrompt
-          onClose={() => setShowExitPrompt(false)}
-          onSuccess={() => {
-            setShowExitPrompt(false);
-            window.__kioskPin = null;
-            try { localStorage.removeItem('sundari-kiosk-pin'); } catch {}
-            setUser(null);
-            setUserId(null);
-            nav.reset('login');
-          }}
-        />
-      )}
-    </div>
-  );
-};
-
-// Big, tap-friendly kiosk action button. `full` makes it span the row.
-const KioskActionBtn = ({ color, icon, label, sub, onClick, full = false }) => (
-  <button onClick={onClick} style={{
-    flex: 1, width: full ? '100%' : undefined,
-    background: color, border: 'none', borderRadius: 20,
-    padding: '22px 16px', color: '#fff', fontFamily: 'inherit', cursor: 'pointer',
-    display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 6,
-    boxShadow: `0 16px 36px -16px ${color}`,
-  }}>
-    <Icon name={icon} size={26} color="#fff" />
-    <span style={{ fontSize: 20, fontWeight: 700, letterSpacing: 0.3 }}>{label}</span>
-    {sub && <span style={{ fontSize: 12, fontWeight: 600, opacity: 0.85 }}>{sub}</span>}
-  </button>
-);
-
-const KioskCameraFrame = ({ phase, current, pulse, videoRef, cameraErr, enrolledCount, facingMode = 'user', faceSeen = true, stalled = false }) => {
-  const ringColor =
-    phase === 'matched' ? '#0E7C3A' :
-    phase === 'detecting' || phase === 'matching' ? '#E8C65A' :
-    'rgba(255,255,255,0.18)';
-
-  return (
-    <div style={{
-      position: 'relative', width: '100%', aspectRatio: '3 / 4',
-      borderRadius: 24, overflow: 'hidden',
-      background: `
-        radial-gradient(ellipse at 50% 40%, #1d2226 0%, #0B0D0E 70%),
-        repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(255,255,255,0.015) 3px, rgba(255,255,255,0.015) 4px)
-      `,
-      border: `2px solid ${ringColor}`,
-      boxShadow: phase === 'matched'
-        ? '0 0 60px rgba(14, 124, 58, 0.35), inset 0 0 80px rgba(14, 124, 58, 0.1)'
-        : phase !== 'idle'
-        ? '0 0 40px rgba(232, 198, 90, 0.25), inset 0 0 60px rgba(232, 198, 90, 0.08)'
-        : 'inset 0 0 60px rgba(0,0,0,0.5)',
-      transition: 'box-shadow 300ms, border-color 300ms',
-    }}>
-      {/* Live webcam feed — mirror the preview for the front camera so
-          it looks natural; leave the back camera un-flipped. */}
-      {videoRef && (
-        <video ref={videoRef} autoPlay playsInline muted
-          style={{
-            position: 'absolute', inset: 0,
-            width: '100%', height: '100%', objectFit: 'cover',
-            transform: facingMode === 'user' ? 'scaleX(-1)' : 'none',
-            // Never idle-dim while the pipeline is unhealthy — a failure
-            // must look like a message, not a frozen black screen.
-            opacity: phase === 'matched' ? 0.2 : ((faceSeen || stalled || cameraErr) ? 0.85 : 0.18),
-            transition: 'opacity 400ms',
-          }} />
-      )}
-      {/* Idle-dim overlay — shown when nobody is standing in front of the
-          camera. Detection keeps ticking so the first face wakes us up. */}
-      {phase === 'idle' && !faceSeen && !cameraErr && !stalled && (
-        <div style={{
-          position: 'absolute', inset: 0,
-          display: 'flex', flexDirection: 'column',
-          alignItems: 'center', justifyContent: 'center',
-          gap: 8, color: 'rgba(255,255,255,0.55)',
-          pointerEvents: 'none',
-        }}>
-          <div style={{
-            fontFamily: 'Fraunces, Georgia, serif',
-            fontSize: 22, fontWeight: 500, letterSpacing: -0.3,
-          }}>Step in front of the camera</div>
-          <div style={{ fontSize: 12.5 }}>கேமரா முன்பு நில்லுங்கள்</div>
-        </div>
-      )}
-      {/* Camera error badge */}
-      {cameraErr && (
-        <div style={{
-          position: 'absolute', left: 16, right: 16, top: 16,
-          padding: '10px 12px', borderRadius: 10,
-          background: 'rgba(179, 38, 30, 0.2)', border: '1px solid rgba(179, 38, 30, 0.4)',
-          color: '#ffd9d3', fontSize: 11.5, textAlign: 'center',
-        }}>{cameraErr}</div>
-      )}
-      {/* Watchdog badge — detector died and is being rebuilt */}
-      {!cameraErr && stalled && (
-        <div style={{
-          position: 'absolute', left: 16, right: 16, top: 16,
-          padding: '10px 12px', borderRadius: 10,
-          background: 'rgba(232, 198, 90, 0.15)', border: '1px solid rgba(232, 198, 90, 0.4)',
-          color: '#E8C65A', fontSize: 11.5, textAlign: 'center',
-        }}>Restarting camera… · கேமரா மறுதொடக்கம்…</div>
-      )}
-      {/* Enrolled count badge */}
-      {!cameraErr && phase === 'idle' && (
-        <div style={{
-          position: 'absolute', left: 12, top: 12,
-          padding: '3px 8px', borderRadius: 999,
-          background: 'rgba(11, 13, 14, 0.55)', color: 'rgba(255,255,255,0.7)',
-          fontSize: 9.5, fontWeight: 700, letterSpacing: 0.4, textTransform: 'uppercase',
-          backdropFilter: 'blur(6px)',
-        }}>
-          {enrolledCount ? `${enrolledCount} enrolled` : 'No faces enrolled'}
-        </div>
-      )}
-      <div style={{
-        position: 'absolute', inset: 0,
-        background: 'radial-gradient(circle at 50% 45%, rgba(255,255,255,0.04) 0%, transparent 50%)',
-      }} />
-
-      {phase !== 'idle' && (
-        <div style={{
-          position: 'absolute', top: '50%', left: '50%',
-          transform: 'translate(-50%, -50%)',
-          opacity: phase === 'matched' ? 0 : 0.35,
-          transition: 'opacity 300ms',
-        }}>
-          <svg width="180" height="220" viewBox="0 0 180 220" fill="none">
-            <ellipse cx="90" cy="85" rx="45" ry="55" stroke="#fff" strokeWidth="1.5" strokeDasharray="4 4" opacity="0.6" />
-            <path d="M35 190 Q90 150 145 190 L145 220 L35 220 Z" stroke="#fff" strokeWidth="1.5" strokeDasharray="4 4" opacity="0.5" fill="none" />
-          </svg>
-        </div>
-      )}
-
-      {[0, 1, 2, 3].map(c => {
-        const pos = [
-          { top: 16, left: 16, rot: 0 },
-          { top: 16, right: 16, rot: 90 },
-          { bottom: 16, right: 16, rot: 180 },
-          { bottom: 16, left: 16, rot: 270 },
-        ][c];
-        return (
-          <div key={c} style={{ position: 'absolute', ...pos, transform: `rotate(${pos.rot}deg)` }}>
-            <svg width="28" height="28" viewBox="0 0 28 28">
-              <path d="M2 14V4a2 2 0 0 1 2-2h10" stroke={ringColor}
-                strokeWidth="2" fill="none" strokeLinecap="round" />
-            </svg>
-          </div>
-        );
-      })}
-
-      {(phase === 'detecting' || phase === 'matching') && (
-        <div style={{
-          position: 'absolute', top: '22%', left: '28%',
-          width: '44%', height: '42%',
-          border: '1.5px solid #E8C65A', borderRadius: 6,
-          boxShadow: '0 0 20px rgba(232, 198, 90, 0.4)',
-        }}>
-          <div style={{
-            position: 'absolute', left: 0, right: 0,
-            top: `${Math.sin(pulse / 8) * 45 + 50}%`,
-            height: 2,
-            background: 'linear-gradient(90deg, transparent, #E8C65A, transparent)',
-            boxShadow: '0 0 8px #E8C65A',
-          }} />
-          <div style={{
-            position: 'absolute', top: -18, left: 0,
-            fontSize: 9, letterSpacing: 1, color: '#E8C65A',
-            fontWeight: 700, fontFamily: 'monospace',
-          }}>FACE · {(pulse * 7 % 100).toString().padStart(2,'0')}%</div>
-        </div>
-      )}
-
-      {phase === 'idle' && (
-        <div style={{
-          position: 'absolute', top: '50%', left: '50%',
-          transform: 'translate(-50%, -50%)', textAlign: 'center',
-        }}>
-          <div style={{
-            width: 84, height: 84, borderRadius: '50%',
-            border: '2px solid rgba(255,255,255,0.2)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            position: 'relative',
-            boxShadow: `0 0 ${20 + Math.sin(pulse / 8) * 10}px rgba(255,255,255,0.08)`,
-          }}>
-            <Icon name="user" size={36} color="rgba(255,255,255,0.3)" />
-            <div style={{
-              position: 'absolute', inset: -6, borderRadius: '50%',
-              border: '1px solid rgba(255,255,255,0.08)',
-              transform: `scale(${1 + Math.sin(pulse / 10) * 0.05})`,
-            }} />
-          </div>
-        </div>
-      )}
-
-      {phase === 'matched' && current && (
-        <div style={{
-          position: 'absolute', inset: 0,
-          background: 'radial-gradient(ellipse at 50% 45%, rgba(14, 124, 58, 0.18) 0%, transparent 70%)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          animation: 'kioskMatchIn 260ms ease-out',
-        }}>
-          <div style={{
-            width: 90, height: 90, borderRadius: '50%',
-            background: 'rgba(14, 124, 58, 0.2)', border: '2px solid #0E7C3A',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            boxShadow: '0 0 30px rgba(14, 124, 58, 0.4)',
-          }}>
-            <Icon name="check" size={44} color="#5BC47E" />
-          </div>
-        </div>
-      )}
-
-      <style>{`
-        @keyframes kioskMatchIn {
-          from { opacity: 0; transform: scale(0.9); }
-          to { opacity: 1; transform: scale(1); }
-        }
-      `}</style>
-    </div>
-  );
-};
-
-window.KioskScannerScreen = KioskScannerScreen;
-
-
-// ========== components/screen-enroll-joiner.jsx ==========
-// Enrollment wizard — HR registers a new employee's face in 3 shots.
-// Simulated capture in the prototype.
-
-const EnrollJoinerScreen = () => {
-  const { nav, toast } = useApp();
-  const T_ = window.TOKENS;
-
-  const [step, setStep] = React.useState(0);
-  const [details, setDetails] = React.useState({
-    name: '', empId: '', section: 'cotton', role: '', gender: '',
-  });
-  // Each shot is null | number[128] (the face descriptor).
-  const [shots, setShots] = React.useState([null, null, null]);
-  const [capturing, setCapturing] = React.useState(false);
-  const [saving, setSaving] = React.useState(false);
-
-  const shotConfig = [
-    { key: 'front', label: 'Look straight at the camera', ta: 'நேராக பாருங்கள்' },
-    { key: 'left',  label: 'Turn head slightly left',     ta: 'இடதுபுறம் திரும்புங்கள்' },
-    { key: 'right', label: 'Turn head slightly right',    ta: 'வலதுபுறம் திரும்புங்கள்' },
-  ];
-
-  // Called by the capture step once it's produced a real 128-d descriptor.
-  const handleCaptured = (descriptor) => {
-    const shotIdx = step - 1;
-    setShots(s => s.map((x, i) => i === shotIdx ? descriptor : x));
-    if (step < 3) setStep(step + 1);
-    else setStep(4);
-  };
-
-  const finish = async () => {
-    if (saving) return;
-    if (!window.sb) { toast('Offline — cannot save'); return; }
-    if (shots.some(s => !s)) { toast('Capture all 3 photos first'); return; }
-
-    setSaving(true);
-    try {
-      const manualId = (details.empId || '').trim().toUpperCase();
-      const randomId = () => `E${String(Math.floor(Math.random() * 900) + 400).padStart(3, '0')}`;
-
-      // Insert the employee. When the ID is auto-generated, retry on a
-      // primary-key collision (two enrollments can pick the same random id)
-      // with a fresh id before giving up. A manually-typed id is never
-      // auto-changed — a duplicate there is surfaced as an error.
-      let empId = manualId || randomId();
-      let empErr = null;
-      for (let attempt = 0; attempt < 5; attempt++) {
-        const res = await window.sb.from('employees').insert({
-          id:          empId,
-          name:        details.name.trim(),
-          role:        details.role.trim(),
-          section_id:  details.section,
-          gender:      details.gender || null,
-          user_type:   'staff',
-          joined_date: todayISO(),
-        });
-        empErr = res.error;
-        if (!empErr) break;
-        const dup = (empErr.message || '').toLowerCase().includes('duplicate');
-        if (dup && !manualId) { empId = randomId(); continue; }
-        break;
-      }
-      if (empErr) {
-        toast((empErr.message || '').toLowerCase().includes('duplicate')
-          ? 'Employee ID already exists'
-          : 'Could not save — try again');
-        setSaving(false);
-        return;
-      }
-
-      // Save 3 face embeddings (front/left/right). If this fails, roll back
-      // the employee row we just created so we don't leave an enrolled-but-
-      // faceless record that can never sign in.
-      const poses = ['front', 'left', 'right'];
-      const { error: faceErr } = await window.sb.from('face_embeddings').insert(
-        shots.map((desc, i) => ({
-          employee_id: empId,
-          pose:        poses[i],
-          embedding:   desc,
-        }))
-      );
-      if (faceErr) {
-        await window.sb.from('employees').delete().eq('id', empId);
-        toast('Face enrollment failed — please try again');
-        setSaving(false);
-        return;
-      }
-
-      toast(`${details.name} enrolled · Face saved`);
-      setTimeout(() => nav.back(), 700);
-    } finally { setSaving(false); }
-  };
-
-  return (
-    <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 40 }}>
-      <ScreenHeader
-        back
-        title="Enroll new joiner"
-        subtitle={step < 4 ? `Step ${Math.min(step + 1, 4)} of 4` : 'Review & save'}
-      />
-
-      <div style={{ padding: '0 16px' }}>
-        <div style={{ display: 'flex', gap: 6, marginBottom: 18 }}>
-          {[0, 1, 2, 3].map(i => (
-            <div key={i} style={{
-              flex: 1, height: 4, borderRadius: 2,
-              background: step > i ? T_.maroon : step === i ? T_.gold : T_.border,
-              transition: 'background 200ms',
-            }} />
-          ))}
-        </div>
-
-        {step === 0 && (
-          <EnrollDetailsStep details={details} setDetails={setDetails} onNext={() => setStep(1)} />
-        )}
-
-        {step >= 1 && step <= 3 && (
-          <EnrollCaptureStep
-            shotIdx={step - 1}
-            shotConfig={shotConfig[step - 1]}
-            captured={!!shots[step - 1]}
-            onCaptured={handleCaptured}
-            onRetake={() => setShots(s => s.map((x, i) => i === step - 1 ? null : x))}
-            allShots={shots}
-          />
-        )}
-
-        {step === 4 && (
-          <EnrollReviewStep
-            details={details} shots={shots}
-            onEdit={() => setStep(0)}
-            onFinish={finish}
-            saving={saving}
-          />
-        )}
-      </div>
-    </div>
-  );
-};
-
+// ========== components/machine-first.jsx ==========
+// Attendance comes from the eSSL biometric machine at the showroom (25 Sep
+// 2026). Salesmen are created in Quanto and arrive in `employees` with their
+// SA/SS code; a DB trigger pushes them to the machine; HR enrols the face AT
+// the machine. The app is for reports, leave, advances, payroll and small HR
+// corrections — the three screens below are those corrections.
+
+const EMP_CODE_RE = /^T?S[AS][0-9]+$/;
+window.EMP_CODE_RE = EMP_CODE_RE;
+
+// Shared input style (was the enrolment wizard's; every edit form uses it).
 const enrollInputStyle = (T_) => ({
   width: '100%', padding: '12px 14px',
   background: T_.surface, border: `1px solid ${T_.border}`,
@@ -8333,373 +6843,511 @@ const enrollInputStyle = (T_) => ({
   fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box',
 });
 
-const EnrollField = ({ label, children }) => {
-  const T_ = window.TOKENS;
-  return (
-    <div style={{ marginBottom: 14 }}>
-      <div style={{
-        fontSize: 11, color: T_.inkMuted, fontWeight: 600,
-        letterSpacing: 0.3, textTransform: 'uppercase', marginBottom: 6,
-      }}>{label}</div>
-      {children}
-    </div>
-  );
+// One-line machine status for an employee, from a v_machine_staff row.
+//   emp: the employees row (needs employee_code); m: the view row or null.
+const machineStatusOf = (emp, m) => {
+  const code = (m && m.employee_code) || (emp && emp.employee_code);
+  if (!code) return { key: 'nocode', label: 'No code', tone: 'danger' };
+  if (!m || !m.on_machine) return { key: 'notyet', label: 'Not on machine yet', tone: 'warning' };
+  if (!m.last_punch) return { key: 'noface', label: 'On machine — face not enrolled yet', tone: 'warning' };
+  return { key: 'ok', label: '✓ Enrolled on machine', tone: 'success' };
 };
+window.machineStatusOf = machineStatusOf;
 
-const EnrollDetailsStep = ({ details, setDetails, onNext }) => {
+// Current wall-clock in the store's timezone as HH:MM (24h).
+const nowHHMM_IST = () =>
+  new Date().toLocaleTimeString('en-GB', {
+    timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+
+// ─────────────────────────────────────────────────────────────
+// Add non-Quanto staff — security, drivers, office staff. Salesmen never
+// come through here; Quanto creates them and they sync in automatically.
+// ─────────────────────────────────────────────────────────────
+const AddStaffScreen = () => {
+  const { nav, toast } = useApp();
   const T_ = window.TOKENS;
-  const canProceed = details.name.trim() && details.empId.trim() && details.role.trim();
-  return (
-    <div>
-      <div style={{
-        fontFamily: 'Fraunces, Georgia, serif', fontSize: 20,
-        fontWeight: 500, color: T_.ink, letterSpacing: -0.3, marginBottom: 4,
-      }}>Who are you enrolling?</div>
-      <div style={{ fontSize: 12.5, color: T_.inkMuted, marginBottom: 22 }}>
-        Basic details first — we'll capture the face in the next 3 steps.
-      </div>
+  const [form, setForm] = React.useState({
+    name: '', code: '', role: '', section_id: '', gender: '', phone: '',
+  });
+  const [sections, setSections] = React.useState([]);
+  const [saving, setSaving] = React.useState(false);
+  const [err, setErr] = React.useState('');
 
-      <EnrollField label="Full name">
-        <input value={details.name} onChange={e => setDetails(d => ({ ...d, name: e.target.value }))}
-          placeholder="e.g. Divya Parvathy" style={enrollInputStyle(T_)} />
-      </EnrollField>
-
-      <EnrollField label="Employee ID">
-        <input value={details.empId} onChange={e => setDetails(d => ({ ...d, empId: e.target.value }))}
-          placeholder="e.g. EMP-2113" style={enrollInputStyle(T_)} />
-      </EnrollField>
-
-      <EnrollField label="Section">
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 }}>
-          {[
-            { id: 'fancy',  label: 'Fancy' },
-            { id: 'cotton', label: 'Cotton' },
-            { id: 'silk',   label: 'Silk' },
-            { id: 'dhoti',  label: 'Dhoti' },
-          ].map(s => {
-            const active = details.section === s.id;
-            return (
-              <button key={s.id} onClick={() => setDetails(d => ({ ...d, section: s.id }))}
-                style={{
-                  padding: '10px 4px', borderRadius: 10,
-                  background: active ? T_.maroonSoft : T_.surface,
-                  border: `1px solid ${active ? T_.maroon : T_.border}`,
-                  color: active ? T_.maroon : T_.inkSoft,
-                  fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
-                }}>{s.label}</button>
-            );
-          })}
-        </div>
-      </EnrollField>
-
-      <EnrollField label="Role">
-        <input value={details.role} onChange={e => setDetails(d => ({ ...d, role: e.target.value }))}
-          placeholder="e.g. Sales Associate" style={enrollInputStyle(T_)} />
-      </EnrollField>
-
-      <EnrollField label="Gender (sets late cutoff — ladies 9:30, men 10:00; Sun 10:30 all)">
-        <div style={{ display: 'flex', gap: 8 }}>
-          {[{ id: 'male', label: 'Male' }, { id: 'female', label: 'Female' }].map(g => {
-            const active = details.gender === g.id;
-            return (
-              <button key={g.id} onClick={() => setDetails(d => ({ ...d, gender: active ? '' : g.id }))}
-                style={{
-                  flex: 1, padding: '12px', borderRadius: 12,
-                  background: active ? 'rgba(139,35,35,0.08)' : T_.surface,
-                  border: `1px solid ${active ? T_.maroon : T_.border}`,
-                  color: active ? T_.maroon : T_.inkSoft,
-                  fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
-                }}>{g.label}</button>
-            );
-          })}
-        </div>
-      </EnrollField>
-
-      <button onClick={onNext} disabled={!canProceed} style={{
-        width: '100%', marginTop: 20, padding: '14px',
-        background: canProceed ? T_.maroon : T_.border, color: '#fff',
-        border: 'none', borderRadius: 14, fontSize: 14, fontWeight: 600,
-        cursor: canProceed ? 'pointer' : 'default', fontFamily: 'inherit',
-        boxShadow: canProceed ? '0 6px 16px -6px rgba(139, 35, 35, 0.45)' : 'none',
-      }}>
-        Continue to face capture
-      </button>
-    </div>
-  );
-};
-
-const EnrollCaptureStep = ({ shotIdx, shotConfig, captured, onCaptured, onRetake, allShots }) => {
-  const T_ = window.TOKENS;
-  const videoRef  = React.useRef(null);
-  const [modelsReady, setModelsReady] = React.useState(false);
-  const [cameraErr, setCameraErr]     = React.useState(null);
-  const [busy, setBusy]               = React.useState(false);
-  const [flash, setFlash]             = React.useState(false);
-  const [hint, setHint]               = React.useState('');
-
-  // Load models + open webcam once (front camera preferred on phones).
   React.useEffect(() => {
-    let streamRef = null;
-    let cancelled = false;
-    (async () => {
-      try {
-        setHint('Loading face models…');
-        await window.loadFaceModels();
-        if (cancelled) return;
-        setModelsReady(true);
-        setHint('Opening camera…');
-        streamRef = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
-          audio: false,
-        });
-        if (cancelled) { streamRef.getTracks().forEach(t => t.stop()); return; }
-        if (videoRef.current) {
-          videoRef.current.srcObject = streamRef;
-          await videoRef.current.play().catch(() => {});
-        }
-        setHint('');
-      } catch (err) {
-        console.error(err);
-        setCameraErr(
-          err.name === 'NotAllowedError'
-            ? 'Camera permission denied. Enable it in Safari settings and retry.'
-            : 'Could not open the camera on this device.'
-        );
-      }
-    })();
-    return () => {
-      cancelled = true;
-      if (streamRef) streamRef.getTracks().forEach(t => t.stop());
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (!window.sb) return;
+    window.sb.from('sections').select('id, name').order('sort_order')
+      .then(({ data }) => setSections(data || []));
   }, []);
 
-  const doCapture = async () => {
-    if (!modelsReady || busy) return;
-    setBusy(true);
-    setHint('Detecting face…');
+  const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+  const code = form.code.trim().toUpperCase();
+  const codeOk = EMP_CODE_RE.test(code);
+  const canSave = form.name.trim() && codeOk && !saving;
+
+  const save = async () => {
+    if (!canSave) return;
+    if (!window.sb) { toast('Offline — cannot save'); return; }
+    setSaving(true); setErr('');
     try {
-      const desc = await window.computeFaceDescriptor(videoRef.current);
-      if (!desc) {
-        setHint('No face detected — move closer to the camera');
-        setBusy(false);
+      const { error } = await window.sb.from('employees').insert({
+        id:            code,
+        employee_code: code,
+        code_source:   'hr',
+        name:          form.name.trim(),
+        role:          form.role.trim() || 'Staff',   // employees.role is NOT NULL
+        section_id:    form.section_id || null,
+        gender:        form.gender || null,
+        phone:         form.phone.trim() || null,
+        user_type:     'staff',
+        joined_date:   todayISO(),
+        is_active:     true,
+      });
+      if (error) {
+        const msg = (error.message || '').toLowerCase();
+        setErr(msg.includes('duplicate') || error.code === '23505'
+          ? 'This code already belongs to another employee'
+          : (error.message || 'Could not save — try again'));
         return;
       }
-      setFlash(true);
-      setTimeout(() => setFlash(false), 350);
-      setHint('');
-      onCaptured(desc);
-    } catch (err) {
-      console.error(err);
-      setHint('Capture failed — try again');
-    } finally { setBusy(false); }
+      toast(`${form.name.trim()} added`);
+      setTimeout(() => nav.back(), 500);
+    } finally { setSaving(false); }
   };
 
   return (
-    <div>
-      <div style={{
-        fontFamily: 'Fraunces, Georgia, serif', fontSize: 20,
-        fontWeight: 500, color: T_.ink, letterSpacing: -0.3, marginBottom: 4,
-      }}>Photo {shotIdx + 1} of 3</div>
-      <div style={{ fontSize: 13, color: T_.inkMuted, marginBottom: 16 }}>
-        {shotConfig.label} · <span style={{ color: T_.inkSoft }}>{shotConfig.ta}</span>
-      </div>
-
-      <div style={{
-        position: 'relative', width: '100%', aspectRatio: '3 / 4',
-        background: '#0B0D0E', borderRadius: 18, overflow: 'hidden',
-        border: `1px solid ${T_.border}`,
-      }}>
-        {/* Live webcam feed (mirrored so the preview feels natural on a phone) */}
-        <video ref={videoRef} autoPlay playsInline muted
-          style={{
-            position: 'absolute', inset: 0,
-            width: '100%', height: '100%', objectFit: 'cover',
-            transform: 'scaleX(-1)',
-            opacity: captured ? 0.4 : 1,
-            transition: 'opacity 200ms',
-          }}
-        />
-
-        {/* Oval framing guide */}
+    <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 120 }}>
+      <ScreenHeader back title="Add non-Quanto staff" subtitle="Security · drivers · office" />
+      <div style={{ padding: '0 16px' }}>
         <div style={{
-          position: 'absolute', top: '50%', left: '50%',
-          transform: 'translate(-50%, -50%)',
-          width: '60%', height: '70%', borderRadius: '50%',
-          border: `2px dashed ${captured ? '#5BC47E' : 'rgba(255,255,255,0.45)'}`,
-          transition: 'border-color 200ms',
-          pointerEvents: 'none',
-        }} />
-
-        {flash && (
-          <div style={{
-            position: 'absolute', inset: 0, background: 'rgba(255,255,255,0.55)',
-            animation: 'flash 400ms',
-          }} />
-        )}
-
-        {captured && (
-          <div style={{
-            position: 'absolute', top: 12, right: 12,
-            width: 32, height: 32, borderRadius: '50%',
-            background: 'rgba(14, 124, 58, 0.35)', border: '1.5px solid #5BC47E',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}>
-            <Icon name="check" size={16} color="#5BC47E" />
-          </div>
-        )}
-
-        {(hint || cameraErr) && (
-          <div style={{
-            position: 'absolute', left: 12, bottom: 12, right: 12,
-            background: 'rgba(11, 13, 14, 0.7)', color: '#fff',
-            padding: '8px 12px', borderRadius: 10, fontSize: 12,
-            backdropFilter: 'blur(6px)', textAlign: 'center',
-          }}>
-            {cameraErr || hint}
-          </div>
-        )}
-
-        <style>{`
-          @keyframes flash { 0% { opacity: 0 } 20% { opacity: 1 } 100% { opacity: 0 } }
-        `}</style>
-      </div>
-
-      <div style={{ display: 'flex', gap: 8, marginTop: 12, marginBottom: 16 }}>
-        {['front', 'left', 'right'].map((k, i) => (
-          <div key={k} style={{
-            flex: 1, aspectRatio: '1', borderRadius: 10,
-            background: allShots[i] ? '#0B0D0E' : T_.surfaceAlt,
-            border: `1px solid ${allShots[i] ? T_.success : T_.border}`,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            position: 'relative',
-          }}>
-            {allShots[i] ? (
-              <>
-                <svg width="28" height="36" viewBox="0 0 28 36" fill="none">
-                  <ellipse cx="14" cy="14" rx="8" ry="10" stroke="rgba(255,255,255,0.6)" strokeWidth="1.2" />
-                </svg>
-                <div style={{
-                  position: 'absolute', bottom: 4, right: 4,
-                  width: 14, height: 14, borderRadius: '50%',
-                  background: T_.success, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                }}>
-                  <Icon name="check" size={9} color="#fff" />
-                </div>
-              </>
-            ) : (
-              <div style={{ fontSize: 10, color: T_.inkFaint, fontWeight: 600 }}>
-                {k.toUpperCase()}
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-
-      {captured ? (
-        <button onClick={onRetake} style={{
-          width: '100%', padding: '12px', background: T_.surface,
-          border: `1px solid ${T_.border}`, borderRadius: 14,
-          fontSize: 13, fontWeight: 600, color: T_.ink, fontFamily: 'inherit',
-          cursor: 'pointer',
-        }}>Retake this photo</button>
-      ) : (
-        <button onClick={doCapture} disabled={busy || !modelsReady || !!cameraErr} style={{
-          width: '100%', padding: '14px',
-          background: T_.maroon, color: '#fff', border: 'none',
-          borderRadius: 14, fontSize: 14, fontWeight: 600,
-          cursor: 'pointer', fontFamily: 'inherit',
-          boxShadow: '0 6px 16px -6px rgba(139, 35, 35, 0.45)',
-          opacity: (busy || !modelsReady || !!cameraErr) ? 0.5 : 1,
+          padding: '12px 14px', borderRadius: 12, marginBottom: 16,
+          background: T_.infoSoft, color: T_.ink, fontSize: 12.5, lineHeight: 1.5,
         }}>
-          {busy ? 'Detecting…' : (!modelsReady ? 'Loading models…' : 'Capture photo')}
-        </button>
-      )}
+          Salesmen are created in Quanto and appear here automatically within 30 minutes. Add here only security, drivers and office staff.
+        </div>
+
+        <FieldLabel>Name</FieldLabel>
+        <input value={form.name} onChange={set('name')} placeholder="Full name"
+          style={enrollInputStyle(T_)} />
+        <div style={{ height: 12 }} />
+
+        <FieldLabel>Employee code (required)</FieldLabel>
+        <input value={form.code} onChange={set('code')} placeholder="SA455"
+          autoCapitalize="characters" spellCheck={false}
+          style={{
+            ...enrollInputStyle(T_), textTransform: 'uppercase',
+            fontFamily: 'JetBrains Mono, Menlo, monospace',
+            borderColor: form.code && !codeOk ? T_.danger : T_.border,
+          }} />
+        <div style={{ fontSize: 11.5, color: form.code && !codeOk ? T_.danger : T_.inkMuted, marginTop: 6 }}>
+          {form.code && !codeOk
+            ? 'Code must look like SA455 or SS12 (an optional T in front for trainees)'
+            : 'This becomes the person’s ID on the attendance machine too.'}
+        </div>
+        <div style={{ height: 12 }} />
+
+        <FieldLabel>Role / designation</FieldLabel>
+        <input value={form.role} onChange={set('role')} placeholder="e.g. Security, Driver"
+          style={enrollInputStyle(T_)} />
+        <div style={{ height: 12 }} />
+
+        <FieldLabel>Section</FieldLabel>
+        <select value={form.section_id} onChange={set('section_id')}
+          style={{ ...enrollInputStyle(T_), cursor: 'pointer' }}>
+          <option value="">— none —</option>
+          {sections.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+        <div style={{ height: 12 }} />
+
+        <FieldLabel>Gender (sets late cutoff — ladies 9:30, men 10:00; Sun 10:30 all)</FieldLabel>
+        <select value={form.gender} onChange={set('gender')}
+          style={{ ...enrollInputStyle(T_), cursor: 'pointer' }}>
+          <option value="">— not set —</option>
+          <option value="male">Male</option>
+          <option value="female">Female</option>
+        </select>
+        <div style={{ height: 12 }} />
+
+        <FieldLabel>Phone</FieldLabel>
+        <input value={form.phone} onChange={set('phone')} placeholder="+91 …" inputMode="tel"
+          style={enrollInputStyle(T_)} />
+
+        {err && (
+          <div style={{
+            marginTop: 14, padding: '10px 12px', borderRadius: 10,
+            background: T_.dangerSoft, color: T_.danger, fontSize: 12.5,
+          }}>{err}</div>
+        )}
+
+        <div style={{ display: 'flex', gap: 8, marginTop: 18 }}>
+          <button onClick={() => nav.back()} disabled={saving} style={{
+            flex: 1, padding: 12, borderRadius: 12,
+            background: T_.surface, border: `1px solid ${T_.border}`,
+            color: T_.ink, fontSize: 13, fontWeight: 600,
+            fontFamily: 'inherit', cursor: 'pointer',
+          }}>Cancel</button>
+          <button onClick={save} disabled={!canSave} style={{
+            flex: 1.2, padding: 12, borderRadius: 12,
+            background: T_.maroon, color: '#fff', border: 'none',
+            fontSize: 13, fontWeight: 600, fontFamily: 'inherit',
+            cursor: canSave ? 'pointer' : 'not-allowed',
+            opacity: canSave ? 1 : 0.5,
+          }}>{saving ? 'Saving…' : 'Add staff'}</button>
+        </div>
+      </div>
     </div>
   );
 };
+window.AddStaffScreen = AddStaffScreen;
 
-const EnrollReviewStep = ({ details, shots, onEdit, onFinish, saving }) => {
+// ─────────────────────────────────────────────────────────────
+// Mark punch / outpass — an HR correction for a missed machine punch.
+// Calls attendance_mark(); the server decides what is allowed and returns
+// a plain-English message when it is not.
+// ─────────────────────────────────────────────────────────────
+const PUNCH_ACTIONS = [
+  { key: 'check_in',    label: 'Check in',    ta: 'உள்நுழைவு' },
+  { key: 'check_out',   label: 'Check out',   ta: 'வெளியேறு' },
+  { key: 'outpass_out', label: 'Outpass out', ta: 'வெளியே' },
+  { key: 'outpass_in',  label: 'Outpass in',  ta: 'திரும்பி' },
+];
+
+const MarkPunchScreen = () => {
+  const { nav, toast, lang } = useApp();
   const T_ = window.TOKENS;
+  const [emps, setEmps] = React.useState([]);
+  const [loading, setLoading] = React.useState(true);
+  const [q, setQ] = React.useState('');
+  const [picked, setPicked] = React.useState(null);
+  const [action, setAction] = React.useState('check_in');
+  const [date, setDate] = React.useState(todayISO());
+  const [time, setTime] = React.useState(nowHHMM_IST());
+  const [note, setNote] = React.useState('');
+  const [busy, setBusy] = React.useState(false);
+  const [result, setResult] = React.useState(null);   // { ok, text, sub }
+
+  React.useEffect(() => {
+    if (!window.sb) { setLoading(false); return; }
+    window.sb.from('employees')
+      .select('id, name, role, section_id, employee_code')
+      .eq('is_active', true).order('name')
+      .then(({ data }) => { setEmps(data || []); setLoading(false); });
+  }, []);
+
+  const needle = q.trim().toLowerCase();
+  const shown = needle
+    ? emps.filter(e =>
+        (e.name || '').toLowerCase().includes(needle)
+        || (e.employee_code || '').toLowerCase().includes(needle)
+        || (e.id || '').toLowerCase().includes(needle))
+    : emps;
+
+  const submit = async () => {
+    if (!picked || busy) return;
+    if (!window.sb) { toast('Offline — cannot save'); return; }
+    if (!date || !time) { toast('Pick a date and time'); return; }
+    setBusy(true); setResult(null);
+    try {
+      const { data, error } = await window.sb.rpc('attendance_mark', {
+        p_employee_id: picked.id,
+        p_action:      action,
+        p_at:          `${date} ${time}:00`,
+        p_note:        note.trim() || null,
+      });
+      if (error) {
+        setResult({ ok: false, text: error.message || 'Could not mark', sub: null });
+        return;
+      }
+      const act = PUNCH_ACTIONS.find(a => a.key === (data && data.action)) || null;
+      setResult({
+        ok: true,
+        text: `${act ? act.label : (data && data.action) || action} · ${(data && data.time) || time}`,
+        sub: [
+          data && data.shift_date ? `Shift ${data.shift_date}` : null,
+          data && data.status ? `Status ${data.status}` : null,
+          data && data.note === 'already_in' ? 'Was already checked in — kept the earlier time' : null,
+        ].filter(Boolean).join(' · ') || null,
+      });
+      setNote('');
+    } finally { setBusy(false); }
+  };
+
+  const personRow = (e, active) => (
+    <button key={e.id} onClick={() => { setPicked(e); setResult(null); }} style={{
+      width: '100%', display: 'flex', alignItems: 'center', gap: 12,
+      padding: '10px 12px', border: 'none', textAlign: 'left',
+      background: active ? T_.maroonSoft : 'transparent',
+      borderBottom: `1px solid ${T_.borderSoft}`, cursor: 'pointer', fontFamily: 'inherit',
+    }}>
+      <Avatar name={e.name} size={34} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13.5, fontWeight: 600, color: T_.ink }}>{e.name}</div>
+        <div style={{ fontSize: 11.5, color: T_.inkMuted, marginTop: 1 }}>
+          <span style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{e.employee_code || e.id}</span>
+          {e.section_id && ` · ${SECTION_LABEL[e.section_id] || e.section_id}`}
+        </div>
+      </div>
+      {active && <Icon name="check" size={16} color={T_.maroon} />}
+    </button>
+  );
+
   return (
-    <div>
-      <div style={{
-        fontFamily: 'Fraunces, Georgia, serif', fontSize: 22,
-        fontWeight: 500, color: T_.ink, letterSpacing: -0.4, marginBottom: 4,
-      }}>Ready to enrol</div>
-      <div style={{ fontSize: 13, color: T_.inkMuted, marginBottom: 20 }}>
-        Review before saving. Face embeddings will be generated on-device.
-      </div>
+    <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 120 }}>
+      <ScreenHeader back title="Mark punch / outpass" subtitle="For a missed machine punch" />
+      <div style={{ padding: '0 16px' }}>
 
-      <div style={{
-        background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 16,
-        padding: 16, marginBottom: 12,
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
-          <Avatar name={details.name || 'New'} size={44} />
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 15, fontWeight: 600, color: T_.ink }}>
-              {details.name || 'Unnamed'}
-            </div>
-            <div style={{ fontSize: 12, color: T_.inkMuted, marginTop: 2 }}>
-              {details.empId} · {details.role} · {details.section[0].toUpperCase() + details.section.slice(1)} Section
-            </div>
+        {/* 1. Who */}
+        <FieldLabel>Employee</FieldLabel>
+        {picked ? (
+          <div style={{ background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 12, overflow: 'hidden' }}>
+            {personRow(picked, true)}
+            <button onClick={() => { setPicked(null); setResult(null); }} style={{
+              width: '100%', padding: 10, border: 'none', background: 'transparent',
+              color: T_.maroon, fontSize: 12.5, fontWeight: 600, fontFamily: 'inherit', cursor: 'pointer',
+            }}>Change person</button>
           </div>
-          <button onClick={onEdit} style={{
-            background: 'none', border: 'none', color: T_.maroon,
-            fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
-          }}>Edit</button>
-        </div>
-
-        <div style={{ display: 'flex', gap: 6 }}>
-          {shots.map((s, i) => (
-            <div key={i} style={{
-              flex: 1, aspectRatio: '1', background: '#0B0D0E', borderRadius: 10,
-              border: `1px solid ${T_.border}`, position: 'relative',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
+        ) : (
+          <>
+            <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search name or code"
+              style={enrollInputStyle(T_)} />
+            <div style={{
+              marginTop: 8, background: T_.surface, border: `1px solid ${T_.border}`,
+              borderRadius: 12, overflow: 'hidden', maxHeight: 300, overflowY: 'auto',
             }}>
-              <svg width="28" height="36" viewBox="0 0 28 36" fill="none">
-                <ellipse cx="14" cy="14" rx="8" ry="10" stroke="rgba(255,255,255,0.5)" strokeWidth="1.2" />
-              </svg>
-              <div style={{
-                position: 'absolute', bottom: 4, right: 4,
-                width: 14, height: 14, borderRadius: '50%',
-                background: T_.success, display: 'flex', alignItems: 'center', justifyContent: 'center',
-              }}>
-                <Icon name="check" size={9} color="#fff" />
-              </div>
+              {loading ? (
+                <div style={{ padding: 16, textAlign: 'center', color: T_.inkMuted, fontSize: 13 }}>Loading…</div>
+              ) : shown.length === 0 ? (
+                <div style={{ padding: 16, textAlign: 'center', color: T_.inkMuted, fontSize: 13 }}>No one matches</div>
+              ) : shown.slice(0, 60).map(e => personRow(e, false))}
             </div>
-          ))}
+          </>
+        )}
+        <div style={{ height: 16 }} />
+
+        {/* 2. What */}
+        <FieldLabel>Action</FieldLabel>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
+          {PUNCH_ACTIONS.map(a => {
+            const on = action === a.key;
+            return (
+              <button key={a.key} onClick={() => { setAction(a.key); setResult(null); }} style={{
+                padding: '12px 10px', borderRadius: 12, textAlign: 'left',
+                background: on ? T_.maroon : T_.surface,
+                border: `1px solid ${on ? T_.maroon : T_.border}`,
+                color: on ? '#fff' : T_.ink, fontFamily: 'inherit', cursor: 'pointer',
+              }}>
+                <div style={{ fontSize: 13.5, fontWeight: 600 }}>{a.label}</div>
+                <div style={{ fontSize: 11, opacity: 0.75, marginTop: 2 }}>{a.ta}</div>
+              </button>
+            );
+          })}
         </div>
-      </div>
+        <div style={{ height: 16 }} />
 
-      <div style={{
-        background: T_.surfaceAlt, borderRadius: 12, padding: '10px 14px',
-        fontSize: 11.5, color: T_.inkMuted, marginBottom: 16,
-        display: 'flex', gap: 8, alignItems: 'flex-start',
-      }}>
-        <Icon name="sparkle" size={14} color={T_.inkSoft} />
-        <span>
-          <strong style={{ color: T_.inkSoft }}>On-device processing.</strong> Face data stays on
-          the tablet &amp; your server. No photos are sent to third parties.
-        </span>
-      </div>
+        {/* 3. When */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <div>
+            <FieldLabel>Date</FieldLabel>
+            <input type="date" value={date} max={todayISO()}
+              onChange={e => { setDate(e.target.value); setResult(null); }}
+              style={enrollInputStyle(T_)} />
+          </div>
+          <div>
+            <FieldLabel>Time</FieldLabel>
+            <input type="time" value={time}
+              onChange={e => { setTime(e.target.value); setResult(null); }}
+              style={{ ...enrollInputStyle(T_), fontFamily: 'JetBrains Mono, Menlo, monospace' }} />
+          </div>
+        </div>
+        <div style={{ height: 16 }} />
 
-      <button onClick={onFinish} disabled={saving} style={{
-        width: '100%', padding: '14px',
-        background: T_.maroon, color: '#fff', border: 'none',
-        borderRadius: 14, fontSize: 14, fontWeight: 600,
-        cursor: saving ? 'not-allowed' : 'pointer', fontFamily: 'inherit',
-        boxShadow: '0 6px 16px -6px rgba(139, 35, 35, 0.45)',
-        opacity: saving ? 0.6 : 1,
-      }}>
-        {saving ? 'Saving…' : 'Save & enrol'}
-      </button>
+        {/* 4. Why */}
+        <FieldLabel>Note (optional)</FieldLabel>
+        <input value={note} onChange={e => setNote(e.target.value)}
+          placeholder="e.g. machine did not read the finger" style={enrollInputStyle(T_)} />
+
+        {result && (
+          <div style={{
+            marginTop: 14, padding: '12px 14px', borderRadius: 12,
+            background: result.ok ? T_.successSoft : T_.dangerSoft,
+            color: result.ok ? T_.success : T_.danger,
+          }}>
+            <div style={{ fontSize: 14, fontWeight: 600 }}>{result.ok ? 'Marked' : 'Not marked'}</div>
+            <div style={{ fontSize: 13, marginTop: 2, color: T_.ink }}>{result.text}</div>
+            {result.sub && <div style={{ fontSize: 11.5, marginTop: 2, color: T_.inkMuted }}>{result.sub}</div>}
+          </div>
+        )}
+
+        <button onClick={submit} disabled={!picked || busy} style={{
+          width: '100%', marginTop: 18, padding: 14, borderRadius: 12,
+          background: T_.maroon, color: '#fff', border: 'none',
+          fontSize: 14, fontWeight: 600, fontFamily: 'inherit',
+          cursor: (!picked || busy) ? 'not-allowed' : 'pointer',
+          opacity: (!picked || busy) ? 0.5 : 1,
+        }}>{busy ? 'Saving…' : 'Save punch'}</button>
+      </div>
     </div>
   );
 };
+window.MarkPunchScreen = MarkPunchScreen;
 
-window.EnrollJoinerScreen = EnrollJoinerScreen;
+// ─────────────────────────────────────────────────────────────
+// Attendance machine — read-only health of the eSSL machine + who is
+// missing from it. Reads adms_devices, v_machine_staff, v_machine_unknown_pins.
+// ─────────────────────────────────────────────────────────────
+const MachineStatusScreen = () => {
+  const T_ = window.TOKENS;
+  const [devices, setDevices] = React.useState(null);   // null = not readable
+  const [staff, setStaff] = React.useState([]);
+  const [unknown, setUnknown] = React.useState([]);
+  const [loading, setLoading] = React.useState(true);
+  const [failed, setFailed] = React.useState('');
+  const [tick, setTick] = React.useState(0);
+
+  const load = React.useCallback(async () => {
+    if (!window.sb) { setLoading(false); return; }
+    const [d, s, u] = await Promise.all([
+      window.sb.from('adms_devices').select('sn, name, enabled, last_seen').order('name'),
+      window.sb.from('v_machine_staff')
+        .select('id, name, employee_code, section_id, is_active, code_source, on_machine, last_punch, punches_30d')
+        .eq('is_active', true).order('name'),
+      window.sb.from('v_machine_unknown_pins').select('pin, device_name, punches_30d, last_punch').order('last_punch', { ascending: false }),
+    ]);
+    setDevices(d.error ? null : (d.data || []));
+    setStaff(s.error ? [] : (s.data || []));
+    setUnknown(u.error ? [] : (u.data || []));
+    setFailed(s.error ? (s.error.message || 'Could not read machine status') : '');
+    setLoading(false);
+  }, []);
+
+  React.useEffect(() => { load(); }, [load, tick]);
+
+  const groups = React.useMemo(() => {
+    const g = { nocode: [], notyet: [], noface: [], ok: [] };
+    staff.forEach(m => { g[machineStatusOf(m, m).key].push(m); });
+    return g;
+  }, [staff]);
+
+  const card = (children, style) => (
+    <div style={{
+      background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 14,
+      overflow: 'hidden', marginBottom: 14, ...style,
+    }}>{children}</div>
+  );
+  const heading = (text, count, tone) => (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      padding: '12px 14px', borderBottom: `1px solid ${T_.borderSoft}`,
+    }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: T_.ink }}>{text}</div>
+      <Pill tone={count ? tone : 'neutral'} size="sm">{count}</Pill>
+    </div>
+  );
+  const personLine = (m, sub) => (
+    <div key={m.id} style={{
+      display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px',
+      borderBottom: `1px solid ${T_.borderSoft}`,
+    }}>
+      <Avatar name={m.name} size={30} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: T_.ink }}>{m.name}</div>
+        <div style={{ fontSize: 11, color: T_.inkMuted, marginTop: 1 }}>
+          <span style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{m.employee_code || m.id}</span>
+          {m.section_id && ` · ${SECTION_LABEL[m.section_id] || m.section_id}`}
+          {sub && ` · ${sub}`}
+        </div>
+      </div>
+    </div>
+  );
+  const empty = (text) => (
+    <div style={{ padding: 14, fontSize: 12.5, color: T_.inkMuted, textAlign: 'center' }}>{text}</div>
+  );
+
+  return (
+    <div style={{ background: T_.bg, minHeight: '100%', paddingBottom: 120 }}>
+      <ScreenHeader back title="Attendance machine" subtitle="Read-only · eSSL at the showroom"
+        trailing={
+          <button onClick={() => setTick(t => t + 1)} style={{
+            padding: '8px 12px', borderRadius: 10, background: T_.surface,
+            border: `1px solid ${T_.border}`, color: T_.ink, fontSize: 12, fontWeight: 600,
+            fontFamily: 'inherit', cursor: 'pointer',
+          }}>Refresh</button>
+        } />
+      <div style={{ padding: '0 16px' }}>
+        {loading && <div style={{ padding: 30, textAlign: 'center', color: T_.inkMuted }}>Loading…</div>}
+        {!loading && failed && (
+          <div style={{ padding: '10px 12px', borderRadius: 10, background: T_.dangerSoft, color: T_.danger, fontSize: 12.5, marginBottom: 14 }}>
+            {failed}
+          </div>
+        )}
+
+        {!loading && card(
+          <>
+            {heading('Machine', devices ? devices.length : 0, 'info')}
+            {devices === null ? empty('Device list not visible to this login') :
+             devices.length === 0 ? empty('No machine has reported yet') :
+             devices.map(d => {
+               const stale = !d.last_seen || (Date.now() - new Date(d.last_seen).getTime()) > 15 * 60 * 1000;
+               return (
+                 <div key={d.sn} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', borderBottom: `1px solid ${T_.borderSoft}` }}>
+                   <div style={{ width: 8, height: 8, borderRadius: '50%', background: !d.enabled ? T_.inkFaint : stale ? T_.danger : T_.success, flexShrink: 0 }} />
+                   <div style={{ flex: 1, minWidth: 0 }}>
+                     <div style={{ fontSize: 13, fontWeight: 600, color: T_.ink }}>{d.name || d.sn}</div>
+                     <div style={{ fontSize: 11, color: T_.inkMuted, marginTop: 1 }}>
+                       {!d.enabled ? 'Disabled' : d.last_seen ? `Last seen ${relTime(d.last_seen)}` : 'Never seen'}
+                       <span style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}> · {d.sn}</span>
+                     </div>
+                   </div>
+                 </div>
+               );
+             })}
+          </>
+        )}
+
+        {!loading && card(<>
+          {heading('No code', groups.nocode.length, 'danger')}
+          {groups.nocode.length === 0 ? empty('Everyone active has a code') :
+           groups.nocode.map(m => personLine(m, 'give this person a code'))}
+        </>)}
+
+        {!loading && card(<>
+          {heading('Not on machine', groups.notyet.length, 'warning')}
+          {groups.notyet.length === 0 ? empty('Everyone with a code is on the machine') :
+           groups.notyet.map(m => personLine(m, m.code_source === 'quanto' ? 'from Quanto · sync pending' : null))}
+        </>)}
+
+        {!loading && card(<>
+          {heading('On machine but no punches yet', groups.noface.length, 'warning')}
+          {groups.noface.length === 0 ? empty('No one waiting for a first punch') :
+           groups.noface.map(m => personLine(m, 'enrol the face at the machine'))}
+        </>)}
+
+        {!loading && card(<>
+          {heading('Unknown machine IDs punching', unknown.length, 'danger')}
+          {unknown.length === 0 ? empty('Every punch in 30 days matched a person') :
+           unknown.map(u => (
+             <div key={`${u.device_name}-${u.pin}`} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 14px', borderBottom: `1px solid ${T_.borderSoft}` }}>
+               <div style={{ flex: 1, minWidth: 0 }}>
+                 <div style={{ fontSize: 13, fontWeight: 600, color: T_.ink, fontFamily: 'JetBrains Mono, Menlo, monospace' }}>ID {u.pin}</div>
+                 <div style={{ fontSize: 11, color: T_.inkMuted, marginTop: 1 }}>
+                   {u.device_name || 'machine'} · {u.punches_30d} punch{u.punches_30d === 1 ? '' : 'es'} in 30 days
+                   {u.last_punch && ` · last ${relTime(u.last_punch)}`}
+                 </div>
+               </div>
+             </div>
+           ))}
+        </>)}
+
+        {!loading && (
+          <div style={{ fontSize: 11.5, color: T_.inkMuted, textAlign: 'center', padding: '4px 10px' }}>
+            {groups.ok.length} enrolled on the machine · faces are enrolled AT the machine, not in this app
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+window.MachineStatusScreen = MachineStatusScreen;
 
 
 // ─────────────────────────────────────────────────────────────
@@ -8849,32 +7497,6 @@ const SettingsScreen = () => {
     } finally { setPwdBusy(false); }
   };
 
-  // ── Kiosk PIN change (Owner + Admin) ─────────────────
-  const [pinOpen, setPinOpen] = React.useState(false);
-  const [curPin, setCurPin]   = React.useState('');
-  const [newPin, setNewPin]   = React.useState('');
-  const [pinBusy, setPinBusy] = React.useState(false);
-
-  const changeKioskPin = async (e) => {
-    e.preventDefault();
-    if (pinBusy) return;
-    if (!newPin || newPin.length < 4) { toast('PIN must be ≥ 4 digits'); return; }
-    setPinBusy(true);
-    try {
-      const { data: row } = await window.sb.from('settings')
-        .select('value').eq('key', 'kiosk_pin').maybeSingle();
-      const existing = row?.value || '0000';
-      if ((curPin || '0000') !== existing) {
-        toast('Current PIN is wrong'); return;
-      }
-      const { error } = await window.sb.from('settings')
-        .upsert({ key: 'kiosk_pin', value: newPin }, { onConflict: 'key' });
-      if (error) { toast('Could not save PIN'); console.error(error); return; }
-      setCurPin(''); setNewPin(''); setPinOpen(false);
-      toast('Kiosk PIN updated');
-    } finally { setPinBusy(false); }
-  };
-
   const sectionTitle = (text) => (
     <div style={{
       fontSize: 11, letterSpacing: 0.9, textTransform: 'uppercase',
@@ -8992,17 +7614,6 @@ const SettingsScreen = () => {
         </div>
       </div>
 
-      {/* Admin controls (Owner + Admin only) */}
-      {isAdmin && (
-        <div style={{ padding: '28px 16px 0' }}>
-          {sectionTitle(lang === 'ta' ? 'நிர்வாகம்' : 'Admin controls')}
-          <div style={{ background: T_.surface, borderRadius: 14, border: `1px solid ${T_.border}`, overflow: 'hidden' }}>
-            {row({ key: 'pin', icon: 'clock', label: 'Kiosk exit PIN',
-                   sub: 'PIN required to leave kiosk mode',
-                   onClick: () => setPinOpen(true), last: true })}
-          </div>
-        </div>
-      )}
 
       {/* Owner-only dev panel */}
       <SettingsPreviewSwitcher />
@@ -9058,37 +7669,6 @@ const SettingsScreen = () => {
           </form>
         </div>
       )}
-
-      {/* Kiosk PIN sheet */}
-      {pinOpen && (
-        <div onClick={() => setPinOpen(false)} style={{
-          position: 'absolute', inset: 0, background: 'rgba(11,13,14,0.55)',
-          display: 'flex', alignItems: 'flex-end', zIndex: 200,
-        }}>
-          <form onSubmit={changeKioskPin} onClick={e => e.stopPropagation()} style={{
-            width: '100%', background: T_.surface,
-            borderRadius: '20px 20px 0 0', padding: '22px 22px 28px',
-          }}>
-            <h3 style={{ margin: '0 0 6px' }}>Change kiosk PIN</h3>
-            <div style={{ fontSize: 12, color: T_.inkMuted, marginBottom: 12 }}>
-              This PIN unlocks exit from kiosk mode. Digits only.
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <input type="password" inputMode="numeric" placeholder="Current PIN (blank = 0000)"
-                value={curPin} onChange={e => setCurPin(e.target.value)}
-                style={{ padding: '14px 16px', borderRadius: 12, border: `1px solid ${T_.border}`, fontSize: 16, fontFamily: 'inherit', color: T_.ink, boxSizing: 'border-box' }} />
-              <input type="password" inputMode="numeric" placeholder="New PIN"
-                value={newPin} onChange={e => setNewPin(e.target.value)}
-                style={{ padding: '14px 16px', borderRadius: 12, border: `1px solid ${T_.border}`, fontSize: 16, fontFamily: 'inherit', color: T_.ink, boxSizing: 'border-box' }} />
-              <button type="submit" disabled={pinBusy} style={{
-                padding: 14, borderRadius: 12, background: T_.maroon, color: '#fff',
-                border: 'none', fontFamily: 'inherit', fontSize: 14, fontWeight: 600,
-                cursor: pinBusy ? 'not-allowed' : 'pointer',
-              }}>{pinBusy ? 'Saving…' : 'Update PIN'}</button>
-            </div>
-          </form>
-        </div>
-      )}
     </div>
   );
 };
@@ -9105,13 +7685,21 @@ const ProfileScreen = () => {
   const [emp, setEmp]         = React.useState(null);
   const [loading, setLoading] = React.useState(true);
 
+  const [machine, setMachine] = React.useState(null);
+
   React.useEffect(() => {
     if (!window.sb || !userId) { setLoading(false); return; }
     (async () => {
-      const { data } = await window.sb.from('employees')
-        .select('id, name, role, section_id, user_type, phone, city, employee_code, company, joined_date, tmb_account_no, esi_no, epf_no, uan_no')
-        .eq('id', userId).maybeSingle();
+      const [{ data }, m] = await Promise.all([
+        window.sb.from('employees')
+          .select('id, name, role, section_id, user_type, phone, city, employee_code, company, joined_date, tmb_account_no, esi_no, epf_no, uan_no')
+          .eq('id', userId).maybeSingle(),
+        window.sb.from('v_machine_staff')
+          .select('id, employee_code, on_machine, last_punch, punches_30d')
+          .eq('id', userId).maybeSingle(),
+      ]);
       setEmp(data || null);
+      setMachine(m.error ? null : (m.data || null));
       setLoading(false);
     })();
   }, [userId]);
@@ -9174,6 +7762,7 @@ const ProfileScreen = () => {
             <div style={{ background: T_.surface, border: `1px solid ${T_.border}`, borderRadius: 14, overflow: 'hidden' }}>
               {field('Employee ID',    emp.id, true)}
               {field('Employee code',  emp.employee_code, true)}
+              {field('Attendance machine', machineStatusOf(emp, machine).label)}
               {field('Company',        emp.company)}
               {field('User type',      emp.user_type)}
               {field('Phone',          emp.phone, true)}
@@ -10538,21 +9127,6 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     // cached role/id in localStorage. Restore the session from it.
     (async () => {
       if (!window.sb) { setStack(['login']); return; }
-      // Kiosk mode has no login session — restore it (and its PIN) from a
-      // DEDICATED localStorage key so a reload / remount / Android tab-discard
-      // never drops the tablet to the login screen. This key is independent of
-      // the churning app-state save below, so it can't be clobbered by the
-      // null-state written on the first render. (Falls back to the legacy
-      // location and migrates it, for tablets updating from an older build.)
-      let savedPin = null;
-      try { savedPin = localStorage.getItem('sundari-kiosk-pin'); } catch {}
-      if (!savedPin && saved.kioskPin) savedPin = saved.kioskPin;
-      if (savedPin) {
-        window.__kioskPin = savedPin;
-        try { localStorage.setItem('sundari-kiosk-pin', savedPin); } catch {}
-        setUser('kiosk'); setUserId(null); setStack(['kiosk']);
-        return;
-      }
       const { data: { session } } = await window.sb.auth.getSession();
       if (session?.user) {
         const { data } = await window.sb
@@ -10574,9 +9148,6 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     })();
   }, []);
   useEffect(() => {
-    // NOTE: the kiosk PIN is persisted separately (sundari-kiosk-pin) on enter/
-    // exit so it survives this churning save, which runs with null state on the
-    // first render after a reload.
     localStorage.setItem('sundari-state', JSON.stringify({ user, userId, stack, tab, lang }));
   }, [user, userId, stack, tab, lang]);
 
@@ -10673,15 +9244,6 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
 
   const current = stack[stack.length - 1];
 
-  // Kiosk mode is sticky — if the 'kiosk' user ever lands on anything
-  // other than the kiosk screen, force them back. Only the exit PIN
-  // clears user=null which returns to login.
-  useEffect(() => {
-    if (user === 'kiosk' && current !== 'kiosk') {
-      setStack(['kiosk']);
-    }
-  }, [user, current]);
-
   // Resolve all components from window at render-time
   const AppCtx = W('AppCtx');
   const IOSDevice = W('IOSDevice');
@@ -10703,8 +9265,9 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     hrHome:          makeScreen('HRHomeScreen'),
     hrTools:         makeScreen('HRToolsScreen'),
     markAttendance:  makeScreen('MarkAttendanceScreen'),
-    kiosk:           makeScreen('KioskScannerScreen'),
-    enroll:          makeScreen('EnrollJoinerScreen'),
+    addStaff:        makeScreen('AddStaffScreen'),
+    markPunch:       makeScreen('MarkPunchScreen'),
+    machineStatus:   makeScreen('MachineStatusScreen'),
     staffHome:       makeScreen('StaffHomeScreen'),
     attendance:      makeScreen('AttendanceScreen'),
     leaves:          makeScreen('LeavesScreen'),
@@ -10736,8 +9299,9 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
     hrHome:         '11 HR Home',
     hrTools:        '11b HR Tools',
     markAttendance: '12 Mark Attendance',
-    kiosk:          '13 Kiosk Scanner',
-    enroll:         '14 Enroll Joiner',
+    addStaff:       '13 Add Staff',
+    markPunch:      '14 Mark Punch',
+    machineStatus:  '14b Attendance Machine',
     settings:       '15 Settings',
     profile:        '15b Profile',
     checklist:      '16 Checklist',
@@ -10805,7 +9369,7 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
   }, [current]);
 
   const showTabBar = current !== 'login' && current !== 'applyLeave'
-    && current !== 'kiosk' && current !== 'enroll' && user && user !== 'kiosk';
+    && user;
 
   return (
     <AppCtx.Provider value={{
@@ -10836,7 +9400,7 @@ function AppInner({ tick, tweakDensity, tweakLayout, tweakLang }) {
               </button>
             ))}
             <div className="role" style={{marginTop: 4}}>HR flow</div>
-            {['hrHome', 'hrTools', 'markAttendance', 'kiosk', 'enroll'].map(s => (
+            {['hrHome', 'hrTools', 'markAttendance', 'markPunch', 'machineStatus', 'addStaff'].map(s => (
               <button key={s}
                 className={current === s ? 'active' : ''}
                 onClick={() => { setUser('hr'); setStack([s]); setTab('home'); }}>
@@ -10885,7 +9449,7 @@ const REQUIRED = [
   'LoginScreen','OwnerHomeScreen','StaffHomeScreen','AttendanceScreen',
   'LeavesScreen','ApplyLeaveScreen','TasksScreen','PayslipScreen',
   'AnnouncementsScreen','VisitorsScreen','HRHomeScreen','HRToolsScreen','MarkAttendanceScreen',
-  'KioskScannerScreen','EnrollJoinerScreen','SettingsScreen','ProfileScreen','ChecklistScreen','ManagerHomeScreen','AdvancesScreen','SectionsStatusScreen','CCHomeScreen',
+  'AddStaffScreen','MarkPunchScreen','MachineStatusScreen','SettingsScreen','ProfileScreen','ChecklistScreen','ManagerHomeScreen','AdvancesScreen','SectionsStatusScreen','CCHomeScreen',
   'AppCtx','IOSDevice','TabBar','Toast','TOKENS','MOCK',
 ];
 const mountWhenReady = async (attempts = 0) => {
@@ -10910,29 +9474,6 @@ const mountWhenReady = async (attempts = 0) => {
   }
 };
 mountWhenReady();
-
-// ──────────────────────────────────────────────────────────
-// Kiosk auto-update: the kiosk runs unattended for days, so without this it
-// keeps running old code (e.g. before a bug fix) until someone manually
-// refreshes the tablet. Snapshot the deployed index.html after load; if it
-// later changes, a new version is out — reload automatically, but only while
-// the kiosk is IDLE (never mid-scan), so no one's check-in is interrupted.
-(function kioskAutoUpdate() {
-  let baseline = null;
-  const check = async () => {
-    if (navigator.onLine === false) return;
-    try {
-      const res = await fetch('index.html?_=' + Date.now(), { cache: 'no-store' });
-      if (!res.ok) return;
-      const html = await res.text();
-      if (baseline === null) { baseline = html; return; }
-      if (html !== baseline && !window.__kioskBusy) location.reload();
-    } catch (_) { /* offline / transient — ignore */ }
-  };
-  setTimeout(check, 5000);
-  setInterval(check, 10 * 60 * 1000);
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') check(); });
-})();
 
 </script>
 
