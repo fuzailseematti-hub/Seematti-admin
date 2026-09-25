@@ -625,7 +625,7 @@
      ────────────────────────────────────────────────────────────── -->
 <script>
   (function () {
-    var FAILSAFE_VERSION = 'v2026-04-27-cc-pwa';
+    var FAILSAFE_VERSION = 'v2026-09-25-machine';
     function showRecoveryUI(reason) {
       var root = document.getElementById('root');
       if (!root) return;
@@ -866,7 +866,7 @@ const NAV = [
     { id: 'tasks',         label: 'Tasks',         area: 'tasks' },
     { id: 'announcements', label: 'Announcements', area: 'announcements' },
     { id: 'visitors',      label: 'Visitor log',   area: 'visitors' },
-    { id: 'kiosk',         label: 'Kiosk & face',  area: 'attendance' },
+    { id: 'machine',       label: 'Attendance machine', area: 'attendance' },
   ]},
   { section: 'People', items: [
     { id: 'employees',   label: 'Employees',   area: 'employees' },
@@ -965,7 +965,7 @@ const App = ({ session, setSession, onSignOut }) => {
               <h1>{visiblePage.label}</h1>
             </div>
             <div style={{ fontSize: 10, color: 'var(--inkFaint)', letterSpacing: 0.3, marginLeft: 'auto', alignSelf: 'flex-end' }}>
-              v2026-04-27-cc-pwa
+              v2026-09-25-machine
             </div>
           </div>
           <div className="content">
@@ -1310,48 +1310,51 @@ const SectionDropdown = ({ value, onChange, sectionsList, allLabel = 'All sectio
   );
 };
 
-// ── Kiosk health (heartbeat monitor) ──────────────────────────────
-// The kiosk tablet calls the kiosk_heartbeat RPC every minute. If the
-// newest ping is older than KIOSK_STALE_MIN during store hours, the
-// tablet is frozen/offline and scans are silently being lost — surface
-// it loudly instead of finding out at closing time (2026-07-18 outage).
-const KIOSK_STALE_MIN = 5;
-const kioskStoreHoursNow = () => {
+// ── Attendance machine health ─────────────────────────────────────
+// The eSSL machine polls the bridge every few seconds and adms_heartbeat
+// stamps adms_devices.last_seen. If every enabled device has been silent
+// for MACHINE_STALE_MIN during store hours, punches are not reaching the
+// app — say so on the attendance pages instead of finding out at payroll.
+const MACHINE_STALE_MIN = 20;
+const storeHoursNow = () => {
   const h = Number(new Date().toLocaleString('en-GB', {
     timeZone: 'Asia/Kolkata', hour: '2-digit', hour12: false,
   }));
   return h >= 8 && h < 23;
 };
-const useKioskHealth = () => {
-  const [beats, setBeats] = useState([]);
+const ageMinutes = (iso) => iso == null ? null
+  : Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+const fmtAgo = (mins) =>
+  mins == null ? 'never'
+  : mins < 1 ? 'just now'
+  : mins < 60 ? `${mins} min ago`
+  : mins < 48 * 60 ? `${Math.floor(mins / 60)}h ${mins % 60}m ago`
+  : `${Math.floor(mins / 1440)} days ago`;
+const useMachineDevices = () => {
+  const [devices, setDevices] = useState([]);
   const [tick, setTick] = useState(0);        // re-render so ages stay fresh
   useEffect(() => {
     if (!window.sb) return;
     let stop = false;
-    const fetchBeats = async () => {
-      const { data } = await window.sb.from('kiosk_heartbeats')
-        .select('device_id, last_seen, loaded_at, ua')
-        .order('last_seen', { ascending: false });
-      if (!stop) { setBeats(data || []); setTick(t => t + 1); }
+    const fetchDevices = async () => {
+      const { data } = await window.sb.from('adms_devices')
+        .select('sn, name, enabled, last_seen')
+        .order('last_seen', { ascending: false, nullsFirst: false });
+      if (!stop) { setDevices(data || []); setTick(t => t + 1); }
     };
-    fetchBeats();
-    const iv = setInterval(fetchBeats, 30000);
+    fetchDevices();
+    const iv = setInterval(fetchDevices, 30000);
     return () => { stop = true; clearInterval(iv); };
   }, []);
-  const ageMin = (iso) => Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
-  // Ignore devices silent for over a week (retired/replaced tablets).
-  const recent = beats.filter(b => ageMin(b.last_seen) < 7 * 24 * 60);
-  const newest = recent[0] || null;
-  const stale = !!newest && ageMin(newest.last_seen) >= KIOSK_STALE_MIN;
-  return { beats: recent, newest, stale, ageMin, tick };
+  const enabled = devices.filter(d => d.enabled !== false);
+  const newest = enabled.find(d => d.last_seen) || null;
+  const newestAge = newest ? ageMinutes(newest.last_seen) : null;
+  const stale = !!newest && newestAge >= MACHINE_STALE_MIN;
+  return { devices, enabled, newest, newestAge, stale, tick };
 };
-const fmtKioskAge = (mins) =>
-  mins < 1 ? 'just now'
-  : mins < 60 ? `${mins} min ago`
-  : `${Math.floor(mins / 60)}h ${mins % 60}m ago`;
-const KioskHealthBanner = () => {
-  const { newest, stale, ageMin } = useKioskHealth();
-  if (!newest || !stale || !kioskStoreHoursNow()) return null;
+const MachineHealthBanner = () => {
+  const { newest, newestAge, stale } = useMachineDevices();
+  if (!newest || !stale || !storeHoursNow()) return null;
   return (
     <div style={{
       background: 'var(--dangerSoft)', border: '1px solid var(--danger)',
@@ -1361,10 +1364,140 @@ const KioskHealthBanner = () => {
     }}>
       <span aria-hidden="true">⚠</span>
       <span>
-        Kiosk not responding — last seen {fmtKioskAge(ageMin(newest.last_seen))}.
-        Scans are not being recorded; check or restart the tablet.
+        Attendance machine not responding — last seen {fmtAgo(newestAge)}.
+        Punches are not reaching the app; check the machine's power and network.
       </span>
     </div>
+  );
+};
+
+// Where an attendance row came from. 'essl' is the machine; 'kiosk' is the
+// retired tablet (history keeps it); 'manual' is an HR correction from the
+// console; 'self' is a staff self-mark from the phone app.
+const SOURCE_LABEL = { essl: 'Machine', kiosk: 'Tablet', manual: 'Manual', self: 'Self' };
+const SOURCE_TONE  = { essl: 'present', kiosk: 'unmarked', manual: 'late', self: 'leave' };
+const sourceLabel = (src) => (src ? (SOURCE_LABEL[src] || src) : '');
+const SourceBadge = ({ source }) => source ? (
+  <span className={`status-pill ${SOURCE_TONE[source] || 'unmarked'}`}
+    style={{ fontSize: 9.5, padding: '1px 6px' }} title={`Source: ${source}`}>
+    {sourceLabel(source)}
+  </span>
+) : null;
+
+// ── Mark punch / outpass (HR correction) ───────────────────────────
+// Calls attendance_mark(): the database decides the shift day, late/
+// present and the event log, exactly as it does for the machine, and
+// writes source='manual' + marked_by. Its error text is shown as-is —
+// the DB explains why a mark is refused.
+const MARK_ACTIONS = [
+  { id: 'check_in',    label: 'Check in' },
+  { id: 'check_out',   label: 'Check out' },
+  { id: 'outpass_out', label: 'Outpass out' },
+  { id: 'outpass_in',  label: 'Outpass in' },
+];
+const nowHHMM = () => new Date().toLocaleTimeString('en-GB', {
+  timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false,
+});
+const MarkPunchModal = ({ open, employees, defaultDate, onClose, onDone }) => {
+  const toast = useToast();
+  const [empId, setEmpId]   = useState('');
+  const [action, setAction] = useState('check_in');
+  const [date, setDate]     = useState(defaultDate || todayISO());
+  const [time, setTime]     = useState(nowHHMM());
+  const [note, setNote]     = useState('');
+  const [busy, setBusy]     = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setEmpId(''); setAction('check_in');
+    setDate(defaultDate || todayISO()); setTime(nowHHMM()); setNote('');
+  }, [open, defaultDate]);
+
+  const submit = async () => {
+    if (busy) return;
+    if (!empId) { toast('Pick an employee'); return; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { toast('Pick a date'); return; }
+    if (!/^\d{2}:\d{2}$/.test(time)) { toast('Time must be HH:MM'); return; }
+    setBusy(true);
+    try {
+      const { data, error } = await window.sb.rpc('attendance_mark', {
+        p_employee_id: empId,
+        p_action: action,
+        p_at: `${date} ${time}:00`,
+        p_note: note.trim() || null,
+      });
+      if (error) { toast(error.message || 'Could not record'); return; }
+      const lbl = MARK_ACTIONS.find(a => a.id === action)?.label || action;
+      toast(`${lbl} recorded at ${data?.time || time}${data?.status ? ` · ${data.status}` : ''}`);
+      onDone && onDone();
+      onClose();
+    } catch (e) {
+      console.error(e);
+      toast(e?.message || 'Could not record');
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <Modal
+      open={open}
+      title="Mark punch / outpass"
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="btn primary" onClick={submit} disabled={busy}>
+            {busy ? 'Recording…' : 'Record'}
+          </button>
+        </>
+      }
+    >
+      <div style={{ fontSize: 12.5, color: 'var(--inkMuted)', marginBottom: 12 }}>
+        For a missed scan or an outpass the machine did not see. Recorded as <strong>Manual</strong> under your name.
+      </div>
+      <div className="field-row">
+        <div>
+          <label>Employee</label>
+          <EmployeePicker
+            employees={employees}
+            value={empId}
+            onChange={setEmpId}
+            autoFocus
+            placeholder="Search by name, code or ID…" />
+        </div>
+      </div>
+      <div className="field-row">
+        <div>
+          <label>Action</label>
+          <div className="seg">
+            {MARK_ACTIONS.map(a => (
+              <button key={a.id} type="button"
+                className={action === a.id ? 'active' : ''}
+                onClick={() => setAction(a.id)}>
+                {a.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        <div>
+          <label>Date</label>
+          <input type="date" value={date} onChange={e => setDate(e.target.value)} />
+        </div>
+        <div>
+          <label>Time (24h)</label>
+          <input type="time" value={time} onChange={e => setTime(e.target.value)}
+            style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }} />
+        </div>
+      </div>
+      <div className="field-row">
+        <div>
+          <label>Note (optional)</label>
+          <input value={note} onChange={e => setNote(e.target.value)}
+            placeholder="e.g. forgot to scan, came via the back gate" />
+        </div>
+      </div>
+    </Modal>
   );
 };
 
@@ -1378,6 +1511,7 @@ const AttendancePage = () => {
   const [statusFilter, setStatusFilter] = useState('all');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState(new Set());
+  const [markOpen, setMarkOpen] = useState(false);
 
   const { rows: employees, loading: empLoading } = useEmployees();
   const { byId, loading: attLoading } = useAttendanceForDate(date);
@@ -1469,7 +1603,7 @@ const AttendancePage = () => {
 
   return (
     <div>
-      <KioskHealthBanner />
+      <MachineHealthBanner />
       {/* Stat strip */}
       <div className="stat-strip">
         <div className="stat"><div className="k">Staff</div><div className="v">{totals.total}</div></div>
@@ -1517,7 +1651,20 @@ const AttendancePage = () => {
           {dateObj.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
           {attLoading ? ' · loading…' : ''}
         </div>
+        {can('attendance', 'edit') && (
+          <button className="btn primary" onClick={() => setMarkOpen(true)}
+            title="Record a missed check-in / check-out or an outpass by hand">
+            Mark punch / outpass
+          </button>
+        )}
       </div>
+
+      <MarkPunchModal
+        open={markOpen}
+        employees={staff}
+        defaultDate={date}
+        onClose={() => setMarkOpen(false)}
+        onDone={() => { /* the realtime channel refreshes the rows */ }} />
 
       {/* Bulk action bar */}
       {selected.size > 0 && can('attendance', 'edit') && (
@@ -1595,7 +1742,7 @@ const AttendancePage = () => {
                 </td>
                 <td className="muted">{fmtTime(r.inTime) || '—'}</td>
                 <td className="muted">{fmtTime(r.outTime) || '—'}</td>
-                <td className="muted">{r.source || '—'}</td>
+                <td className="muted">{r.source ? <SourceBadge source={r.source} /> : '—'}</td>
                 {can('attendance', 'delete') && (
                   <td>
                     {r.status && (
@@ -1621,9 +1768,27 @@ const AttendancePage = () => {
 const TYPE_LABEL = { owner: 'Owner', admin: 'Admin', hr: 'HR', staff: 'Staff', cc: 'Customer Care' };
 const TYPE_TONE  = { owner: 'brand', admin: 'brand', hr: 'info', staff: 'gold', cc: 'info' };
 
+// Staff codes are Quanto's SA/SS salesman codes (optionally T-prefixed for
+// trainees). The DB enforces the same shape + uniqueness; this is the
+// friendly check before the round-trip.
+const STAFF_CODE_RE = /^T?S[AS][0-9]+$/;
+const isCodeUniqueError = (error) =>
+  !!error && (error.code === '23505' || /duplicate/i.test(error.message || ''))
+  && /employee_code|code/i.test(error.message || error.details || '');
+
+// One-line machine standing for a person, from v_machine_staff.
+const machineCell = (m) => {
+  if (!m || !m.pin) return <span className="status-pill unmarked" title="No SA/SS code, so no machine ID">— No code</span>;
+  if (m.on_machine && Number(m.punches_30d) > 0)
+    return <span className="status-pill present" title={`${m.punches_30d} punches in 30 days`}>✓ Enrolled</span>;
+  if (m.on_machine)
+    return <span className="status-pill late" title="User exists on the machine but has never punched — enrol their face/finger at the machine">⚠ On machine, no punches yet</span>;
+  return <span className="status-pill absent" title="Has a code but the machine has no user for it">✗ Not on machine</span>;
+};
+
 const EmployeesPage = () => {
   const toast = useToast();
-  const { can } = useContext(AppCtx);
+  const { can, role } = useContext(AppCtx);
   const sectionsList = useLiveSections();
 
   const [search, setSearch] = useState('');
@@ -1638,6 +1803,7 @@ const EmployeesPage = () => {
 
   const [all, setAll] = useState([]);
   const [faceCounts, setFaceCounts] = useState({}); // employee_id -> pose count
+  const [machine, setMachine] = useState({});       // employee_id -> v_machine_staff row
   const [loading, setLoading] = useState(true);
   const [detail, setDetail] = useState(null);       // the employee being viewed
   const [uploadPreview, setUploadPreview] = useState(null); // parsed Excel awaiting confirm
@@ -1646,17 +1812,21 @@ const EmployeesPage = () => {
 
   const fetchAll = useCallback(async () => {
     if (!window.sb) return;
-    const [empRes, faceRes] = await Promise.all([
+    const [empRes, faceRes, machRes] = await Promise.all([
       window.sb.from('employees')
-        .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city, gender, employee_code, company, salary_type, monthly_salary, hra, wa, tmb_account_no, esi_no, epf_no, uan_no')
+        .select('id, name, role, section_id, user_type, is_active, joined_date, phone, city, gender, employee_code, company, salary_type, monthly_salary, hra, wa, tmb_account_no, esi_no, epf_no, uan_no, code_source, quanto_employee_id')
         .order('id'),
       window.sb.from('face_embeddings').select('employee_id'),
+      window.sb.from('v_machine_staff').select('id, pin, on_machine, last_punch, punches_30d'),
     ]);
     const counts = {};
     (faceRes.data || []).forEach(f => {
       counts[f.employee_id] = (counts[f.employee_id] || 0) + 1;
     });
     setFaceCounts(counts);
+    const m = {};
+    (machRes.data || []).forEach(r => { m[r.id] = r; });
+    setMachine(m);
     setAll(empRes.data || []);
     setLoading(false);
   }, []);
@@ -1673,9 +1843,28 @@ const EmployeesPage = () => {
     return () => { window.sb.removeChannel(ch); };
   }, [fetchAll]);
 
+  // PROBABLE match from the Quanto sync: the name matched but not exactly.
+  // Confirm keeps the code and files it as a real Quanto code; Wrong code
+  // clears it so HR can type the right one.
+  const confirmCode = async (row) => {
+    if (!can('employees', 'edit')) return;
+    const { error } = await window.sb.from('employees')
+      .update({ code_source: 'quanto' }).eq('id', row.id);
+    if (error) { toast(error.message || 'Could not confirm'); return; }
+    toast(`${row.employee_code} confirmed for ${row.name}`);
+  };
+  const rejectCode = async (row) => {
+    if (!can('employees', 'edit')) return;
+    if (!window.confirm(`Clear code ${row.employee_code} from ${row.name}? The machine will stop recognising them until the right code is typed.`)) return;
+    const { error } = await window.sb.from('employees')
+      .update({ employee_code: null, code_source: null }).eq('id', row.id);
+    if (error) { toast(error.message || 'Could not clear'); return; }
+    toast('Type the correct code');
+  };
+
   const clearFace = async (row) => {
     if (!can('employees', 'edit')) return;
-    if (!window.confirm(`Delete face data for ${row.name}? They'll need to re-enroll before the kiosk can recognise them.`)) return;
+    if (!window.confirm(`Delete ${row.name}'s tablet face data? This only affects the old tablet — attendance now comes from the machine.`)) return;
     await window.sb.from('face_embeddings').delete().eq('employee_id', row.id);
     toast(`Face data cleared for ${row.name}`);
   };
@@ -1705,13 +1894,16 @@ const EmployeesPage = () => {
       owner: all.filter(e => e.user_type === 'owner').length,
       hr:    all.filter(e => e.user_type === 'hr').length,
       staff: all.filter(e => e.user_type === 'staff').length,
+      onMachine: all.filter(e => e.is_active && machine[e.id]?.on_machine).length,
+      enrolled:  all.filter(e => e.is_active && machine[e.id]?.on_machine && Number(machine[e.id]?.punches_30d) > 0).length,
+      noCode:    all.filter(e => e.is_active && e.user_type === 'staff' && !e.employee_code).length,
       bySection: {},
     };
     all.forEach(e => {
       if (e.section_id) c.bySection[e.section_id] = (c.bySection[e.section_id] || 0) + 1;
     });
     return c;
-  }, [all]);
+  }, [all, machine]);
 
   const clickSort = (col) => {
     if (sortBy === col) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -1730,14 +1922,14 @@ const EmployeesPage = () => {
   };
 
   const startNew = () => setEditing({
-    id: '', name: '', role: '', section_id: 'fancy',
+    id: '', name: '', role: '', section_id: 'fancy', employee_code: '',
     user_type: 'staff', is_active: true, joined_date: todayISO(),
     phone: '', city: '',
     salary_type: 'new_joined', monthly_salary: '', hra: '', wa: '',
     tmb_account_no: '', esi_no: '', epf_no: '', uan_no: '',
     _new: true, _suggestedId: nextId(),
   });
-  const startEdit = (row) => setEditing({ ...row, _new: false });
+  const startEdit = (row) => setEditing({ ...row, _new: false, _origCode: (row.employee_code || '').trim().toUpperCase() });
   const close = () => setEditing(null);
 
   const save = async () => {
@@ -1769,6 +1961,26 @@ const EmployeesPage = () => {
     if (!payload.name) { toast('Name is required'); return; }
     if (!payload.role) { toast('Role is required'); return; }
 
+    // Employee code = the machine ID. Required for staff, SA/SS shape,
+    // always stored upper-case. Non-staff (HR, owner) may leave it blank.
+    const code = (editing.employee_code || '').trim().toUpperCase();
+    if (payload.user_type === 'staff' && !code) { toast('Employee code is required for staff (e.g. SA455)'); return; }
+    if (code && payload.user_type === 'staff' && !STAFF_CODE_RE.test(code)) {
+      toast('Code must be SA or SS followed by digits, e.g. SA455 (trainee: TSA455)'); return;
+    }
+    payload.employee_code = code || null;
+    // A code typed by HR is an HR code; keep Quanto's provenance untouched
+    // when the code itself did not change.
+    if (editing._new) payload.code_source = code ? 'hr' : null;
+    else if (code !== (editing._origCode || '')) payload.code_source = code ? 'hr' : null;
+
+    const explainError = (error) => {
+      if (!error) return 'Could not save';
+      if (isCodeUniqueError(error)) return 'This code already belongs to another employee';
+      if (/duplicate/i.test(error.message || '')) return 'Employee ID already exists';
+      return error.message ? `Could not save: ${error.message}` : 'Could not save';
+    };
+
     setSaving(true);
     try {
       if (editing._new) {
@@ -1776,7 +1988,8 @@ const EmployeesPage = () => {
         if (!id) { toast('Employee ID is required'); setSaving(false); return; }
         const { error } = await window.sb.from('employees').insert({ id, ...payload });
         if (error) {
-          toast(error.message.includes('duplicate') ? 'Employee ID already exists' : 'Could not save');
+          console.error(error);
+          toast(explainError(error));
         } else {
           toast(`Added ${payload.name}`);
           close();
@@ -1784,7 +1997,7 @@ const EmployeesPage = () => {
       } else {
         const { error } = await window.sb.from('employees')
           .update(payload).eq('id', editing.id);
-        if (error) toast('Could not save');
+        if (error) { console.error(error); toast(explainError(error)); }
         else { toast('Saved'); close(); }
       }
     } finally { setSaving(false); }
@@ -2078,13 +2291,17 @@ const EmployeesPage = () => {
     toast('Sample downloaded');
   };
 
+  // Delete is Owner-only (the DB policy enforces it too). A deleted person
+  // who still exists in Quanto comes back from the sync with a new id and
+  // no history — so Deactivate is the normal leaver action.
+  const canDelete = role === 'owner' && can('employees', 'delete');
   const del = async (row) => {
-    if (!can('employees', 'delete')) return;
+    if (!canDelete) return;
     if (!window.confirm(
-      `Permanently delete ${row.name}?\n\nThis will also delete their attendance records, leave requests, and payslips. This cannot be undone.\n\nIf you just want to archive them, use Deactivate instead.`
+      `Permanently delete ${row.name}?\n\nThis will also delete their attendance records, leave requests, and payslips. This cannot be undone.\n\nIf they still exist in Quanto the sync will re-create them with a new ID and no history. If you just want to archive them, use Deactivate instead.`
     )) return;
     const { error } = await window.sb.from('employees').delete().eq('id', row.id);
-    if (error) toast('Could not delete (see console)');
+    if (error) { console.error(error); toast(error.message ? `Could not delete: ${error.message}` : 'Could not delete (see console)'); }
     else toast(`${row.name} deleted`);
   };
 
@@ -2100,7 +2317,9 @@ const EmployeesPage = () => {
         <div className="stat"><div className="k">Owners</div><div className="v">{counts.owner}</div></div>
         <div className="stat"><div className="k">HR</div><div className="v">{counts.hr}</div></div>
         <div className="stat"><div className="k">Staff</div><div className="v">{counts.staff}</div></div>
-        <div className="stat present"><div className="k">Face-enrolled</div><div className="v">{Object.keys(faceCounts).length}</div></div>
+        <div className="stat present"><div className="k">Enrolled on machine</div><div className="v">{counts.enrolled}</div><div className="sub" style={{ fontSize: 10.5, color: 'var(--inkMuted)' }}>of {counts.onMachine} on machine</div></div>
+        <div className={`stat ${counts.noCode ? 'absent' : ''}`}><div className="k">Staff without code</div><div className="v">{counts.noCode}</div></div>
+        <div className="stat"><div className="k">Tablet face (old)</div><div className="v">{Object.keys(faceCounts).length}</div></div>
       </div>
 
       <div className="toolbar">
@@ -2163,8 +2382,9 @@ const EmployeesPage = () => {
             </>
           )}
           {can('employees', 'create') && (
-            <button className="btn primary" onClick={startNew}>
-              + New employee
+            <button className="btn primary" onClick={startNew}
+              title="Salesmen come from Quanto automatically. Use this only for security, drivers and office staff.">
+              Add non-Quanto staff
             </button>
           )}
         </div>
@@ -2183,8 +2403,9 @@ const EmployeesPage = () => {
               <th onClick={() => clickSort('user_type')} style={{ cursor: 'pointer', width: 100 }}>Type{arrow('user_type')}</th>
               <th onClick={() => clickSort('joined_date')} style={{ cursor: 'pointer', width: 130 }}>Joined{arrow('joined_date')}</th>
               <th style={{ width: 80 }}>Status</th>
-              <th style={{ width: 110 }}>Face</th>
-              {(can('employees', 'edit') || can('employees', 'delete')) && (
+              <th style={{ width: 150 }}>Machine</th>
+              <th style={{ width: 90 }} title="Old tablet face data">Face</th>
+              {(can('employees', 'edit') || canDelete) && (
                 <th style={{ width: 280 }}>Actions</th>
               )}
             </tr>
@@ -2192,7 +2413,7 @@ const EmployeesPage = () => {
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={11} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
+                <td colSpan={12} style={{ textAlign: 'center', padding: 40, color: 'var(--inkMuted)' }}>
                   {loading ? 'Loading…' : 'No employees match these filters.'}
                 </td>
               </tr>
@@ -2211,7 +2432,31 @@ const EmployeesPage = () => {
                 <td className="id">{r.id}</td>
                 <td className="id">{r.employee_code || <span className="muted">—</span>}</td>
                 <td>{r.company || <span className="muted">—</span>}</td>
-                <td className="name">{r.name}</td>
+                <td className="name">
+                  {r.name}
+                  {String(r.code_source || '').startsWith('quanto') && r.monthly_salary == null && (
+                    <span className="status-pill leave" style={{ marginLeft: 6, fontSize: 9.5, padding: '1px 6px' }}
+                      title="Created by the Quanto sync — salary, phone and bank details still need filling in here">
+                      From Quanto — details pending
+                    </span>
+                  )}
+                  {r.code_source === 'quanto_probable' && (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, marginLeft: 6 }}>
+                      <span className="status-pill late" style={{ fontSize: 9.5, padding: '1px 6px' }}
+                        title="The Quanto sync matched this person by a similar name, not an exact one — confirm the code is theirs">
+                        PROBABLE match — confirm
+                      </span>
+                      {can('employees', 'edit') && (
+                        <>
+                          <button className="btn" style={{ height: 22, padding: '0 7px', fontSize: 11 }}
+                            onClick={() => confirmCode(r)} title="Yes, this code belongs to this person">Confirm</button>
+                          <button className="btn" style={{ height: 22, padding: '0 7px', fontSize: 11 }}
+                            onClick={() => rejectCode(r)} title="No — clear the code so the right one can be typed">Wrong code</button>
+                        </>
+                      )}
+                    </span>
+                  )}
+                </td>
                 <td>{r.role}</td>
                 <td>{SECTION_META[r.section_id]?.label || <span className="muted">—</span>}</td>
                 <td>
@@ -2226,15 +2471,16 @@ const EmployeesPage = () => {
                     ? <span className="status-pill present">Active</span>
                     : <span className="status-pill absent">Inactive</span>}
                 </td>
+                <td>{machineCell(machine[r.id])}</td>
                 <td>
                   {(() => {
                     const n = faceCounts[r.id] || 0;
-                    if (n >= 3) return <span className="status-pill present" title={`${n} poses enrolled`}>✓ {n}/3</span>;
-                    if (n > 0)  return <span className="status-pill late" title={`${n} of 3 poses — needs re-enrollment`}>{n}/3</span>;
+                    if (n >= 3) return <span className="status-pill unmarked" title={`${n} poses on the old tablet`}>{n}/3</span>;
+                    if (n > 0)  return <span className="status-pill unmarked" title={`${n} of 3 poses on the old tablet`}>{n}/3</span>;
                     return <span className="status-pill unmarked">—</span>;
                   })()}
                 </td>
-                {(can('employees', 'edit') || can('employees', 'delete')) && (
+                {(can('employees', 'edit') || canDelete) && (
                   <td>
                     {can('employees', 'edit') && (
                       <>
@@ -2247,15 +2493,15 @@ const EmployeesPage = () => {
                         {(faceCounts[r.id] || 0) > 0 && (
                           <button className="btn" style={{ height: 28, padding: '0 10px', marginRight: 6 }}
                             onClick={() => clearFace(r)}
-                            title="Delete face embeddings so the kiosk no longer recognises them">
+                            title="Delete the old tablet's face data (attendance comes from the machine)">
                             Clear face
                           </button>
                         )}
                       </>
                     )}
-                    {can('employees', 'delete') && (
+                    {canDelete && (
                       <button className="btn danger" style={{ height: 28, padding: '0 10px' }}
-                        onClick={() => del(r)}>Delete</button>
+                        onClick={() => del(r)} title="Owner only — prefer Deactivate">Delete</button>
                     )}
                   </td>
                 )}
@@ -2268,19 +2514,28 @@ const EmployeesPage = () => {
       {/* Add / Edit modal */}
       <Modal
         open={!!editing}
-        title={editing?._new ? 'Add employee' : `Edit ${editing?.name || ''}`}
+        title={editing?._new ? 'Add non-Quanto staff' : `Edit ${editing?.name || ''}`}
         onClose={close}
         footer={
           <>
             <button className="btn" onClick={close} disabled={saving}>Cancel</button>
             <button className="btn primary" onClick={save} disabled={saving}>
-              {saving ? 'Saving…' : editing?._new ? 'Add employee' : 'Save changes'}
+              {saving ? 'Saving…' : editing?._new ? 'Add staff' : 'Save changes'}
             </button>
           </>
         }
       >
         {editing && (
           <>
+            {editing._new && (
+              <div style={{
+                fontSize: 12.5, color: 'var(--inkSoft)', background: 'var(--infoSoft)',
+                border: '1px solid var(--border)', borderRadius: 10, padding: '8px 12px', marginBottom: 12,
+              }}>
+                Salesmen are created in Quanto and appear here automatically within 30 minutes.
+                Add here only security, drivers and office staff — with their code.
+              </div>
+            )}
             <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: 12 }}>
               <div>
                 <label>Employee ID</label>
@@ -2307,12 +2562,18 @@ const EmployeesPage = () => {
 
             <div className="field-row" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
               <div>
-                <label>Employee code</label>
+                <label>Employee code (machine ID){editing.user_type === 'staff' ? ' *' : ''}</label>
                 <input
                   value={editing.employee_code || ''}
-                  onChange={e => setEditing({ ...editing, employee_code: e.target.value })}
-                  placeholder="e.g. E001"
+                  onChange={e => setEditing({ ...editing, employee_code: e.target.value.toUpperCase() })}
+                  placeholder="SA455"
                   style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }} />
+                <div style={{ fontSize: 11, color: 'var(--inkMuted)', marginTop: 4 }}>
+                  {editing.user_type === 'staff'
+                    ? 'Required. SA or SS + digits, same as Quanto. The machine user is created from it.'
+                    : 'Optional for HR / owner accounts.'}
+                  {editing.code_source && editing.code_source !== 'hr' ? ` Source: ${editing.code_source}.` : ''}
+                </div>
               </div>
               <div>
                 <label>Company</label>
@@ -2396,7 +2657,7 @@ const EmployeesPage = () => {
                   <option value="female">Female</option>
                 </select>
                 <div style={{ fontSize: 11, color: 'var(--inkMuted)', marginTop: 4 }}>
-                  Sets the kiosk late cutoff (ladies 9:30, men 10:00; Sundays 10:30 for everyone).
+                  Sets the late cutoff on machine punches (ladies 9:30, men 10:00; Sundays 10:30 for everyone).
                 </div>
               </div>
             </div>
@@ -2728,7 +2989,7 @@ const EmployeeDetailModal = ({ employee, faceCount, onClose, onEdit, onCleared }
   const sectionLabel = SECTION_META[employee.section_id]?.full || SECTION_META[employee.section_id]?.label || '—';
 
   const clearFace = async () => {
-    if (!window.confirm(`Delete face data for ${employee.name}? They'll need to re-enroll before the kiosk recognises them.`)) return;
+    if (!window.confirm(`Delete ${employee.name}'s tablet face data? This only affects the old tablet — attendance now comes from the machine.`)) return;
     await window.sb.from('face_embeddings').delete().eq('employee_id', employee.id);
     toast('Face data cleared');
     if (onCleared) onCleared();
@@ -6661,6 +6922,135 @@ const fetchAllPaged = async (makeQuery) => {
   return out;
 };
 
+// Same paging for an RPC that returns a set (PostgREST honours Range on
+// RPCs too). Unlike fetchAllPaged this THROWS on error so the caller can
+// show the database's own message.
+const rpcAllPaged = async (fn, params) => {
+  let out = [];
+  for (let from = 0; ; from += REPORT_PAGE) {
+    const { data, error } = await window.sb.rpc(fn, params).range(from, from + REPORT_PAGE - 1);
+    if (error) throw new Error(error.message || `${fn} failed`);
+    if (!data || !data.length) break;
+    out = out.concat(data);
+    if (data.length < REPORT_PAGE) break;
+  }
+  return out;
+};
+
+// Range presets shared by the staff attendance reports. "Last 3/6 months"
+// run from the first of that month to today (rolling), so a report pulled
+// mid-month still shows the current month.
+const RANGE_PRESETS = [
+  { id: 'this_month', label: 'This month' },
+  { id: 'last_month', label: 'Last month' },
+  { id: 'last_3',     label: 'Last 3 months' },
+  { id: 'last_6',     label: 'Last 6 months' },
+  { id: 'custom',     label: 'Custom' },
+];
+const presetRange = (id) => {
+  const ist = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  const y = ist.getFullYear(), m = ist.getMonth();
+  const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const today = iso(ist);
+  if (id === 'this_month') return { from: iso(new Date(y, m, 1)), to: today };
+  if (id === 'last_month') return { from: iso(new Date(y, m - 1, 1)), to: iso(new Date(y, m, 0)) };
+  if (id === 'last_3')     return { from: iso(new Date(y, m - 2, 1)), to: today };
+  if (id === 'last_6')     return { from: iso(new Date(y, m - 5, 1)), to: today };
+  return null;
+};
+const useRange = (initial = 'this_month') => {
+  const init = presetRange(initial);
+  const [preset, setPresetRaw] = useState(initial);
+  const [from, setFromRaw] = useState(init.from);
+  const [to, setToRaw] = useState(init.to);
+  const setPreset = (id) => {
+    setPresetRaw(id);
+    const r = presetRange(id);
+    if (r) { setFromRaw(r.from); setToRaw(r.to); }
+  };
+  const setFrom = (v) => { setFromRaw(v); setPresetRaw('custom'); };
+  const setTo   = (v) => { setToRaw(v);   setPresetRaw('custom'); };
+  return { preset, setPreset, from, to, setFrom, setTo };
+};
+const RangePicker = ({ range }) => (
+  <>
+    <div className="seg">
+      {RANGE_PRESETS.map(r => (
+        <button key={r.id} className={range.preset === r.id ? 'active' : ''}
+          onClick={() => range.setPreset(r.id)}>{r.label}</button>
+      ))}
+    </div>
+    <span style={{ fontSize: 12, color: 'var(--inkMuted)' }}>From</span>
+    <input type="date" value={range.from} onChange={e => range.setFrom(e.target.value)} />
+    <span style={{ fontSize: 12, color: 'var(--inkMuted)' }}>to</span>
+    <input type="date" value={range.to} onChange={e => range.setTo(e.target.value)} />
+  </>
+);
+
+// Column defs are shared by the CSV, the XLSX and the preview table.
+const cellValue = (c, r) => typeof c.value === 'function' ? c.value(r) : r[c.value];
+const rowsToAoa = (rows, columns) => [
+  columns.map(c => c.label),
+  ...rows.map(r => columns.map(c => { const v = cellValue(c, r); return v == null ? '' : v; })),
+];
+const PreviewTable = ({ columns, rows, limit }) => (
+  <div className="table-wrap" style={{ marginTop: 14, maxHeight: 420, overflow: 'auto' }}>
+    <table className="data" style={{ fontSize: 12 }}>
+      <thead>
+        <tr>{columns.map(c => <th key={c.label} style={c.width ? { width: c.width } : undefined}>{c.label}</th>)}</tr>
+      </thead>
+      <tbody>
+        {(limit ? rows.slice(0, limit) : rows).map((r, i) => (
+          <tr key={i}>
+            {columns.map(c => {
+              const v = cellValue(c, r);
+              return <td key={c.label} className={c.mono ? 'id' : undefined}>{v == null || v === '' ? <span className="muted">—</span> : String(v)}</td>;
+            })}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+);
+
+const ATT_STATUS_LABEL = { present: 'Present', late: 'Late', absent: 'Absent', on_leave: 'Leave' };
+const hm = (t) => t ? String(t).slice(0, 5) : '';
+const hoursOf = (mins) => mins == null ? '' : (Math.round(mins / 6) / 10).toFixed(1);
+const sectionLabelOf = (id) => SECTION_META[id]?.label || id || '';
+const TIMING_COLUMNS = [
+  { label: 'Date',         value: 'date', mono: true, width: 100 },
+  { label: 'Code',         value: r => r.employee_code || '', mono: true, width: 70 },
+  { label: 'Name',         value: 'name' },
+  { label: 'Section',      value: r => sectionLabelOf(r.section_id) },
+  { label: 'Status',       value: r => ATT_STATUS_LABEL[r.status] || r.status || '' },
+  { label: 'In',           value: r => hm(r.punch_in), mono: true, width: 60 },
+  { label: 'Out',          value: r => hm(r.punch_out), mono: true, width: 60 },
+  { label: 'Late (min)',   value: r => r.late_minutes ?? '', mono: true, width: 70 },
+  { label: 'Left early',   value: r => r.early_leave ? 'Yes' : '', width: 70 },
+  { label: 'Outpasses',    value: r => r.outpasses ?? 0, mono: true, width: 70 },
+  { label: 'Outpass min',  value: r => r.outpass_minutes ?? 0, mono: true, width: 80 },
+  { label: 'Hours inside', value: r => hoursOf(r.inside_minutes), mono: true, width: 80 },
+  { label: 'Source',       value: r => sourceLabel(r.source), width: 70 },
+];
+const SUMMARY_COLUMNS = [
+  { label: 'Code',             value: r => r.employee_code || '', mono: true, width: 70 },
+  { label: 'Name',             value: 'name' },
+  { label: 'Section',          value: r => sectionLabelOf(r.section_id) },
+  { label: 'Days',             value: 'days_in_range', mono: true, width: 50 },
+  { label: 'Present',          value: 'present', mono: true, width: 60 },
+  { label: 'Late',             value: 'late', mono: true, width: 50 },
+  { label: 'Leave',            value: 'on_leave', mono: true, width: 50 },
+  { label: 'Absent',           value: 'absent', mono: true, width: 60 },
+  { label: 'Late min',         value: 'late_minutes_total', mono: true, width: 70 },
+  { label: 'Early leaves',     value: 'early_leaves', mono: true, width: 70 },
+  { label: 'Outpasses',        value: 'outpasses', mono: true, width: 70 },
+  { label: 'Outpass min',      value: 'outpass_minutes', mono: true, width: 80 },
+  { label: 'Avg in',           value: r => hm(r.avg_in), mono: true, width: 60 },
+  { label: 'Avg out',          value: r => hm(r.avg_out), mono: true, width: 60 },
+  { label: 'Hours',            value: r => r.hours_inside ?? '', mono: true, width: 60 },
+  { label: 'Days without out', value: 'days_without_out', mono: true, width: 80 },
+];
+
 const ReportsPage = () => {
   const toast = useToast();
   const sectionsList = useLiveSections();
@@ -6673,12 +7063,149 @@ const ReportsPage = () => {
     let cancelled = false;
     (async () => {
       const { data } = await window.sb.from('employees')
-        .select('id, name, role, section_id, user_type, is_active, joined_date, phone')
+        .select('id, name, role, section_id, user_type, is_active, joined_date, phone, employee_code, company')
         .order('id');
       if (!cancelled) setEmployees(data || []);
     })();
     return () => { cancelled = true; };
   }, []);
+  const empById = useMemo(() => {
+    const m = {}; employees.forEach(e => { m[e.id] = e; }); return m;
+  }, [employees]);
+  const pickable = useMemo(() => employees.filter(e => e.user_type !== 'owner'), [employees]);
+
+  // ─ Staff attendance & timing (machine report, per person per day) ─
+  const tmRange = useRange('this_month');
+  const [tmEmp, setTmEmp] = useState('');
+  const [tmSection, setTmSection] = useState('all');
+  const [tmPreview, setTmPreview] = useState(null);
+  const [tmBusy, setTmBusy] = useState(false);
+
+  const fetchTiming = useCallback(async () => rpcAllPaged('attendance_timing_report', {
+    p_from: tmRange.from, p_to: tmRange.to,
+    p_employee_id: tmEmp || null,
+    p_section_id: tmSection === 'all' ? null : tmSection,
+  }), [tmRange.from, tmRange.to, tmEmp, tmSection]);
+  const fetchSummaryFor = useCallback(async (employeeId) => {
+    const rows = await rpcAllPaged('attendance_summary_report', {
+      p_from: tmRange.from, p_to: tmRange.to, p_section_id: null,
+    });
+    return rows.filter(r => r.employee_id === employeeId);
+  }, [tmRange.from, tmRange.to]);
+
+  const tmPreviewRun = async () => {
+    setTmBusy(true);
+    try {
+      const rows = await fetchTiming();
+      const people = new Set(rows.map(r => r.employee_id)).size;
+      const late = rows.filter(r => r.status === 'late').length;
+      const early = rows.filter(r => r.early_leave).length;
+      setTmPreview({ rows, people, late, early });
+    } catch (e) { toast(e.message || 'Could not run the report'); }
+    finally { setTmBusy(false); }
+  };
+  const tmName = () => `staff_timing_${tmRange.from}_to_${tmRange.to}${tmEmp ? '_' + tmEmp : ''}`;
+  const tmDownloadCsv = async () => {
+    setTmBusy(true);
+    try {
+      const rows = tmPreview?.rows || await fetchTiming();
+      if (!rows.length) { toast('No attendance in this range'); return; }
+      downloadCSV(`${tmName()}.csv`, toCSV(rows, TIMING_COLUMNS));
+      toast(`Downloaded ${rows.length} rows`);
+    } catch (e) { toast(e.message || 'Could not download'); }
+    finally { setTmBusy(false); }
+  };
+  const tmDownloadXlsx = async () => {
+    if (typeof window.XLSX === 'undefined') { toast('Excel library still loading, try again in a second'); return; }
+    setTmBusy(true);
+    try {
+      const rows = tmPreview?.rows || await fetchTiming();
+      if (!rows.length) { toast('No attendance in this range'); return; }
+      const wb = window.XLSX.utils.book_new();
+      window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.aoa_to_sheet(rowsToAoa(rows, TIMING_COLUMNS)), 'Timing');
+      if (tmEmp) {
+        const sum = await fetchSummaryFor(tmEmp);
+        if (sum.length) window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.aoa_to_sheet(rowsToAoa(sum, SUMMARY_COLUMNS)), 'Summary');
+      }
+      await downloadWorkbook(`${tmName()}.xlsx`, wb);
+      toast(`Downloaded ${rows.length} rows`);
+    } catch (e) { toast(e.message || 'Could not download'); }
+    finally { setTmBusy(false); }
+  };
+
+  // ─ Attendance summary (one row per staff member) ─────────────────
+  const smRange = useRange('this_month');
+  const [smSection, setSmSection] = useState('all');
+  const [smPreview, setSmPreview] = useState(null);
+  const [smBusy, setSmBusy] = useState(false);
+
+  const fetchSummary = useCallback(async () => rpcAllPaged('attendance_summary_report', {
+    p_from: smRange.from, p_to: smRange.to,
+    p_section_id: smSection === 'all' ? null : smSection,
+  }), [smRange.from, smRange.to, smSection]);
+  const smPreviewRun = async () => {
+    setSmBusy(true);
+    try {
+      const rows = await fetchSummary();
+      const sum = (k) => rows.reduce((a, r) => a + (Number(r[k]) || 0), 0);
+      setSmPreview({ rows, present: sum('present'), late: sum('late'), absent: sum('absent'), leave: sum('on_leave') });
+    } catch (e) { toast(e.message || 'Could not run the report'); }
+    finally { setSmBusy(false); }
+  };
+  const smName = () => `staff_summary_${smRange.from}_to_${smRange.to}`;
+  const smDownloadCsv = async () => {
+    setSmBusy(true);
+    try {
+      const rows = smPreview?.rows || await fetchSummary();
+      if (!rows.length) { toast('No staff in this range'); return; }
+      downloadCSV(`${smName()}.csv`, toCSV(rows, SUMMARY_COLUMNS));
+      toast(`Downloaded ${rows.length} staff`);
+    } catch (e) { toast(e.message || 'Could not download'); }
+    finally { setSmBusy(false); }
+  };
+  const smDownloadXlsx = async () => {
+    if (typeof window.XLSX === 'undefined') { toast('Excel library still loading, try again in a second'); return; }
+    setSmBusy(true);
+    try {
+      const rows = smPreview?.rows || await fetchSummary();
+      if (!rows.length) { toast('No staff in this range'); return; }
+      const wb = window.XLSX.utils.book_new();
+      window.XLSX.utils.book_append_sheet(wb, window.XLSX.utils.aoa_to_sheet(rowsToAoa(rows, SUMMARY_COLUMNS)), 'Summary');
+      await downloadWorkbook(`${smName()}.xlsx`, wb);
+      toast(`Downloaded ${rows.length} staff`);
+    } catch (e) { toast(e.message || 'Could not download'); }
+    finally { setSmBusy(false); }
+  };
+
+  // ─ Machine punch log (raw punches, for disputes) ─────────────────
+  const plRange = useRange('this_month');
+  const [plEmp, setPlEmp] = useState('');
+  const [plBusy, setPlBusy] = useState(false);
+  const plDownload = async () => {
+    setPlBusy(true);
+    try {
+      const rows = await fetchAllPaged((from, to) => {
+        let q = window.sb.from('adms_punches')
+          .select('punched_at, device_user_id, employee_id, outcome, sn')
+          .gte('punched_at', `${plRange.from} 00:00:00`)
+          .lte('punched_at', `${plRange.to} 23:59:59`)
+          .order('punched_at');
+        if (plEmp) q = q.eq('employee_id', plEmp);
+        return q.range(from, to);
+      });
+      if (!rows.length) { toast('No machine punches in this range'); return; }
+      const csv = toCSV(rows, [
+        { label: 'Time',       value: r => String(r.punched_at || '').replace('T', ' ').slice(0, 19) },
+        { label: 'Code',       value: r => empById[r.employee_id]?.employee_code || '' },
+        { label: 'Machine ID', value: 'device_user_id' },
+        { label: 'Name',       value: r => empById[r.employee_id]?.name || (r.employee_id ? r.employee_id : '(unknown)') },
+        { label: 'Outcome',    value: 'outcome' },
+        { label: 'Device',     value: 'sn' },
+      ]);
+      downloadCSV(`machine_punches_${plRange.from}_to_${plRange.to}${plEmp ? '_' + plEmp : ''}.csv`, csv);
+      toast(`Downloaded ${rows.length} punches`);
+    } finally { setPlBusy(false); }
+  };
 
   // ─ Attendance export ──────────────────────────
   const [attFrom, setAttFrom] = useState(() => fmtDateISO(new Date()));
@@ -6722,7 +7249,7 @@ const ReportsPage = () => {
       { label: 'Status',        value: 'status' },
       { label: 'Punch in',      value: 'punch_in_time' },
       { label: 'Punch out',     value: 'punch_out_time' },
-      { label: 'Source',        value: 'source' },
+      { label: 'Source',        value: r => sourceLabel(r.source) },
     ]);
     downloadCSV(`attendance_${attFrom}_to_${attTo}.csv`, csv);
     toast(`Downloaded ${rows.length} attendance rows`);
@@ -6857,6 +7384,73 @@ const ReportsPage = () => {
 
   return (
     <div>
+      <ReportCard
+        title="Staff attendance & timing"
+        description="From the machine: one row per person per day — in/out, late minutes, early leaving, outpasses and hours inside. Pick a month or six, one person or everyone."
+      >
+        <div className="toolbar" style={{ margin: 0 }}>
+          <RangePicker range={tmRange} />
+          <div style={{ minWidth: 260, flex: '1 1 260px' }}>
+            <EmployeePicker employees={pickable} value={tmEmp} onChange={setTmEmp}
+              allowClear clearLabel="All employees" placeholder="All employees — or search one…" />
+          </div>
+          <SectionDropdown value={tmSection} onChange={setTmSection} sectionsList={sectionsList} />
+          <button className="btn" onClick={tmPreviewRun} disabled={tmBusy}>{tmBusy ? 'Working…' : 'Preview'}</button>
+          <button className="btn" onClick={tmDownloadCsv} disabled={tmBusy}>Download CSV</button>
+          <button className="btn primary" onClick={tmDownloadXlsx} disabled={tmBusy}>Download XLSX</button>
+        </div>
+        {tmPreview && (
+          <>
+            <div style={{ marginTop: 14, fontSize: 13, color: 'var(--inkSoft)' }}>
+              <strong>{tmPreview.rows.length}</strong> rows · {tmPreview.people} {tmPreview.people === 1 ? 'person' : 'people'}
+              {' · '}<span style={{ color: 'var(--warning)' }}>{tmPreview.late} late</span>
+              {' · '}<span style={{ color: 'var(--danger)' }}>{tmPreview.early} left early</span>
+              {tmPreview.rows.length > 200 ? ' · showing the first 200 — the download has all rows' : ''}
+            </div>
+            {tmPreview.rows.length > 0 && <PreviewTable columns={TIMING_COLUMNS} rows={tmPreview.rows} limit={200} />}
+          </>
+        )}
+      </ReportCard>
+
+      <ReportCard
+        title="Attendance summary (per staff)"
+        description="One line per active staff member for the range: days present, late, on leave, absent, total late minutes, early leaves, outpasses, average in/out and hours inside."
+      >
+        <div className="toolbar" style={{ margin: 0 }}>
+          <RangePicker range={smRange} />
+          <SectionDropdown value={smSection} onChange={setSmSection} sectionsList={sectionsList} />
+          <button className="btn" onClick={smPreviewRun} disabled={smBusy}>{smBusy ? 'Working…' : 'Preview'}</button>
+          <button className="btn" onClick={smDownloadCsv} disabled={smBusy}>Download CSV</button>
+          <button className="btn primary" onClick={smDownloadXlsx} disabled={smBusy}>Download XLSX</button>
+        </div>
+        {smPreview && (
+          <>
+            <div style={{ marginTop: 14, fontSize: 13, color: 'var(--inkSoft)' }}>
+              <strong>{smPreview.rows.length}</strong> staff
+              {' · '}<span style={{ color: 'var(--success)' }}>{smPreview.present} present-days</span>
+              {' · '}<span style={{ color: 'var(--warning)' }}>{smPreview.late} late-days</span>
+              {' · '}<span style={{ color: 'var(--info)' }}>{smPreview.leave} leave-days</span>
+              {' · '}<span style={{ color: 'var(--danger)' }}>{smPreview.absent} absent-days</span>
+            </div>
+            {smPreview.rows.length > 0 && <PreviewTable columns={SUMMARY_COLUMNS} rows={smPreview.rows} />}
+          </>
+        )}
+      </ReportCard>
+
+      <ReportCard
+        title="Machine punch log"
+        description="Every raw scan the machine sent, with what the app did with it (check in, check out, outpass, duplicate, unknown). For disputes — 'I did punch'."
+      >
+        <div className="toolbar" style={{ margin: 0 }}>
+          <RangePicker range={plRange} />
+          <div style={{ minWidth: 260, flex: '1 1 260px' }}>
+            <EmployeePicker employees={pickable} value={plEmp} onChange={setPlEmp}
+              allowClear clearLabel="Everyone" placeholder="Everyone — or search one person…" />
+          </div>
+          <button className="btn primary" onClick={plDownload} disabled={plBusy}>{plBusy ? 'Working…' : 'Download CSV'}</button>
+        </div>
+      </ReportCard>
+
       <ReportCard
         title="Attendance export"
         description="Daily attendance roster as CSV. One row per employee per day in the selected range."
@@ -7145,6 +7739,61 @@ const SettingsPage = () => {
     })();
   }, []);
 
+  // ── Attendance machine + shift timings (the `settings` table) ────
+  const TIMING_DEFAULTS = {
+    checkin_start: '08:00', late_cutoff_men: '10:00', late_cutoff_women: '09:30',
+    late_cutoff_sunday: '10:30', early_cutoff_men: '22:00', early_cutoff_women: '20:00',
+  };
+  const [mach, setMach] = useState({ kiosk_enabled: 'true', adms_go_live_at: '', ...TIMING_DEFAULTS });
+  const [machLoaded, setMachLoaded] = useState(false);
+  const [machBusy, setMachBusy] = useState(null);
+  const { devices, tick: devTick } = useMachineDevices();
+  const loadMach = useCallback(async () => {
+    if (!window.sb) return;
+    const { data } = await window.sb.from('settings').select('key, value')
+      .in('key', ['kiosk_enabled', 'adms_go_live_at', ...Object.keys(TIMING_DEFAULTS)]);
+    const m = { kiosk_enabled: 'true', adms_go_live_at: '', ...TIMING_DEFAULTS };
+    (data || []).forEach(r => { if (r.value != null) m[r.key] = r.value; });
+    setMach(m);
+    setMachLoaded(true);
+  }, []);
+  useEffect(() => { loadMach(); }, [loadMach]);
+
+  // Update the existing row; insert only if it does not exist yet.
+  const writeSetting = async (key, value) => {
+    const { data, error } = await window.sb.from('settings')
+      .update({ value, updated_at: new Date().toISOString() }).eq('key', key).select('key');
+    if (error) return error;
+    if (data && data.length) return null;
+    const { error: insErr } = await window.sb.from('settings').insert({ key, value });
+    return insErr || null;
+  };
+  const toggleKiosk = async () => {
+    if (!isAdmin || machBusy) return;
+    const turningOff = mach.kiosk_enabled === 'true';
+    if (turningOff && !window.confirm('Staff will have to use the machine.\n\nSwitch the tablet kiosk off?')) return;
+    setMachBusy('kiosk');
+    try {
+      const err = await writeSetting('kiosk_enabled', turningOff ? 'false' : 'true');
+      if (err) { console.error(err); toast(err.message ? `Could not save: ${err.message}` : 'Could not save'); return; }
+      setMach(m => ({ ...m, kiosk_enabled: turningOff ? 'false' : 'true' }));
+      toast(turningOff ? 'Tablet kiosk switched off — the machine is the only way in' : 'Tablet kiosk accepts scans again');
+    } finally { setMachBusy(null); }
+  };
+  const saveTimings = async () => {
+    if (!isAdmin || machBusy) return;
+    setMachBusy('timings');
+    try {
+      for (const k of Object.keys(TIMING_DEFAULTS)) {
+        const err = await writeSetting(k, mach[k] || TIMING_DEFAULTS[k]);
+        if (err) { console.error(err); toast(err.message ? `Could not save ${k}: ${err.message}` : 'Could not save'); return; }
+      }
+      toast('Shift timings saved');
+    } finally { setMachBusy(null); }
+  };
+  const goLive = mach.adms_go_live_at || '';
+  const goLiveOff = !goLive || goLive.startsWith('2099');
+
   const saveDa = async (e) => {
     e.preventDefault();
     if (daBusy) return;
@@ -7193,13 +7842,79 @@ const SettingsPage = () => {
       </div>
 
       <div className="card" style={{ padding: 20, marginBottom: 16 }}>
-        <h2 style={{ marginTop: 0, marginBottom: 6 }}>Kiosk &amp; face</h2>
+        <h2 style={{ marginTop: 0, marginBottom: 6 }}>Attendance machine</h2>
         <p style={{ color: 'var(--inkMuted)', marginTop: 0, fontSize: 12.5 }}>
-          Late cutoff, face match threshold, exit PIN and enrolled faces live
-          on their own page for now.
+          Attendance comes from the eSSL machine at the staff entrance. Enrolment,
+          missing codes and today's punches are on the <strong>Attendance machine</strong> page.
         </p>
-        <button className="btn" onClick={() => { location.hash = '#kiosk'; }}>
-          Open Kiosk &amp; face settings
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, marginBottom: 14 }}>
+          <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 10, padding: 12 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase', color: 'var(--inkMuted)', marginBottom: 6 }}>Machine last seen</div>
+            {devices.length === 0 ? (
+              <div style={{ fontSize: 13, color: 'var(--inkMuted)' }}>No machine has reported yet.</div>
+            ) : devices.map(d => {
+              const age = ageMinutes(d.last_seen);
+              const bad = d.enabled === false || age == null || age >= MACHINE_STALE_MIN;
+              return (
+                <div key={d.sn} style={{ fontSize: 13, display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                  <strong>{d.name || d.sn}</strong>
+                  <span style={{ color: bad ? 'var(--danger)' : 'var(--success)', fontWeight: 600 }}>{fmtAgo(age)}</span>
+                  {d.enabled === false && <span className="status-pill absent">disabled</span>}
+                  {d.name && <span className="muted" style={{ fontSize: 11 }}>{d.sn}</span>}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 10, padding: 12 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase', color: 'var(--inkMuted)', marginBottom: 6 }}>Machine go-live</div>
+            <div style={{ fontSize: 13 }}>
+              {!machLoaded ? 'Loading…' : goLiveOff
+                ? <span style={{ color: 'var(--warning)', fontWeight: 600 }}>Off — punches are archived, not counted</span>
+                : <span><strong style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{goLive}</strong> <span className="muted">IST · punches from then on count</span></span>}
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--inkFaint)', marginTop: 4 }}>Set from the M1 (settings.adms_go_live_at).</div>
+          </div>
+          <div style={{ background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 10, padding: 12 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase', color: 'var(--inkMuted)', marginBottom: 6 }}>Tablet kiosk (old)</div>
+            <label className="checkbox-row" style={{ cursor: isAdmin ? 'pointer' : 'default' }}>
+              <input type="checkbox"
+                checked={mach.kiosk_enabled === 'true'}
+                disabled={!isAdmin || !machLoaded || machBusy === 'kiosk'}
+                onChange={toggleKiosk} />
+              <div>
+                <div className="label-text">Tablet kiosk accepts scans</div>
+                <div className="sub">{mach.kiosk_enabled === 'true' ? 'On — the tablet still records attendance beside the machine.' : 'Off — the tablet says "use the machine".'}</div>
+              </div>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div className="card" style={{ padding: 20, marginBottom: 16 }}>
+        <h2 style={{ marginTop: 0, marginBottom: 6 }}>Shift timings</h2>
+        <p style={{ color: 'var(--inkMuted)', marginTop: 0, fontSize: 12.5 }}>
+          Applied to every machine punch and manual mark. Punches before <strong>check-in start</strong> belong to the previous day (after-midnight close).
+          A check-in at/after the cutoff is <strong>Late</strong>; a check-out before the closing time is <strong>Left early</strong>. Sundays use one late cutoff for everyone.
+        </p>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginBottom: 12 }}>
+          {[
+            ['checkin_start',      'Check-in starts'],
+            ['late_cutoff_sunday', 'Sunday — late after (everyone)'],
+            ['late_cutoff_men',    'Men — late after'],
+            ['late_cutoff_women',  'Ladies — late after'],
+            ['early_cutoff_men',   'Men — left early before'],
+            ['early_cutoff_women', 'Ladies — left early before'],
+          ].map(([k, label]) => (
+            <div key={k}>
+              <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>{label}</label>
+              <input type="time" value={mach[k] || ''} disabled={!isAdmin || !machLoaded}
+                onChange={e => setMach(m => ({ ...m, [k]: e.target.value }))}
+                style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 15, height: 40, width: '100%', boxSizing: 'border-box' }} />
+            </div>
+          ))}
+        </div>
+        <button className="btn primary" onClick={saveTimings} disabled={!isAdmin || !machLoaded || machBusy === 'timings'}>
+          {machBusy === 'timings' ? 'Saving…' : 'Save timings'}
         </button>
       </div>
 
@@ -7228,391 +7943,332 @@ const SettingsPage = () => {
 };
 
 // ──────────────────────────────────────────────────────────
-// Kiosk & face settings — late cutoff, match threshold, enrolled faces.
+// Attendance machine — the eSSL device, the Quanto→app→machine staff
+// flow, and everything that needs a human: missing codes, staff not yet
+// on the machine, unknown IDs punching, PIN conflicts, duplicate codes
+// in Quanto, and today's punches. Reads only; the one write is
+// "Resolve" on a PIN conflict.
 // ──────────────────────────────────────────────────────────
-const KioskSettingsPage = () => {
+const fmtIstTs = (ts) => {
+  if (!ts) return '—';
+  const str = String(ts);
+  // Naive IST timestamps (adms_punches) come back without a zone; tz ones
+  // (adms_devices, sync state) carry Z / +00:00 and need converting.
+  if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(str)) {
+    return new Date(str).toLocaleString('en-GB', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
+  }
+  return str.replace('T', ' ').slice(0, 16);
+};
+const MachineTable = ({ title, hint, rows, columns, empty, tone, action }) => {
+  const [q, setQ] = useState('');
+  const shown = useMemo(() => {
+    const needle = q.trim();
+    if (!needle) return rows;
+    return rows.filter(r => matchesQuery(needle, ...columns.map(c => cellValue(c, r))));
+  }, [rows, q, columns]);
+  return (
+    <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 20, marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap', marginBottom: 4 }}>
+        <div style={{ fontFamily: 'Fraunces, Georgia, serif', fontSize: 18, fontWeight: 500, letterSpacing: -0.3 }}>{title}</div>
+        <span className={`status-pill ${rows.length ? (tone || 'late') : 'unmarked'}`}>{rows.length}</span>
+        <input type="search" placeholder="Search…" value={q} onChange={e => setQ(e.target.value)}
+          style={{ marginLeft: 'auto', height: 30, fontSize: 12.5, minWidth: 180 }} />
+      </div>
+      {hint && <div style={{ fontSize: 12.5, color: 'var(--inkMuted)', marginBottom: 10 }}>{hint}</div>}
+      {shown.length === 0 ? (
+        <div style={{ fontSize: 13, color: 'var(--inkMuted)', padding: '6px 0' }}>{rows.length === 0 ? (empty || 'Nothing here.') : 'No match.'}</div>
+      ) : (
+        <div className="table-wrap" style={{ maxHeight: 360, overflow: 'auto' }}>
+          <table className="data" style={{ fontSize: 12.5 }}>
+            <thead>
+              <tr>
+                {columns.map(c => <th key={c.label} style={c.width ? { width: c.width } : undefined}>{c.label}</th>)}
+                {action && <th style={{ width: 110 }}></th>}
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((r, i) => (
+                <tr key={r.__key || i}>
+                  {columns.map(c => {
+                    const v = cellValue(c, r);
+                    return <td key={c.label} className={c.mono ? 'id' : (c.name ? 'name' : undefined)}>{v == null || v === '' ? <span className="muted">—</span> : v}</td>;
+                  })}
+                  {action && <td>{action(r)}</td>}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const MachinePage = () => {
   const toast = useToast();
-  const { can } = useContext(AppCtx);
+  const { role } = useContext(AppCtx);
+  const canResolve = ['owner', 'admin', 'hr'].includes(role);
+  const { devices, newest, newestAge, stale, tick: devTick } = useMachineDevices();
 
-  const [settings, setSettings] = useState({ late_cutoff: '10:00', match_threshold: '0.55', kiosk_pin: '0000', checkin_start: '08:00', late_cutoff_men: '10:00', late_cutoff_women: '09:30', late_cutoff_sunday: '10:30', early_cutoff_men: '22:00', early_cutoff_women: '20:00' });
   const [loading, setLoading] = useState(true);
-  const [savingKey, setSavingKey] = useState(null);
+  const [settings, setSettings] = useState({});
+  const [sync, setSync] = useState(null);
+  const [staff, setStaff] = useState([]);           // v_machine_staff
+  const [emps, setEmps] = useState([]);             // employees (for user_type / section / role)
+  const [unknown, setUnknown] = useState([]);       // v_machine_unknown_pins
+  const [conflicts, setConflicts] = useState([]);   // adms_pin_conflicts (unresolved)
+  const [dupCodes, setDupCodes] = useState([]);     // quanto_code_conflicts
+  const [punches, setPunches] = useState([]);       // adms_punches today
+  const [refreshedAt, setRefreshedAt] = useState(null);
 
-  const [faceStats, setFaceStats] = useState({ totalStaff: 0, enrolled: 0, partials: 0 });
-  const [partialList, setPartialList] = useState([]);
-
-  const fetchAll = useCallback(async () => {
+  const load = useCallback(async (silent = false) => {
     if (!window.sb) return;
-    const [setRes, staffRes, facesRes] = await Promise.all([
-      window.sb.from('settings').select('*').in('key', ['late_cutoff', 'match_threshold', 'kiosk_pin', 'checkin_start', 'late_cutoff_men', 'late_cutoff_women', 'late_cutoff_sunday', 'early_cutoff_men', 'early_cutoff_women']),
-      window.sb.from('employees').select('id, name, role, section_id')
-        .neq('user_type', 'owner').eq('is_active', true),
-      window.sb.from('face_embeddings').select('employee_id'),
+    if (!silent) setLoading(true);
+    const today = todayISO();
+    const [setRes, syncRes, staffRes, empRes, unkRes, confRes, dupRes, punchRes] = await Promise.all([
+      window.sb.from('settings').select('key, value').in('key', ['kiosk_enabled', 'adms_go_live_at']),
+      window.sb.from('staff_sync_state').select('*').eq('id', 1).maybeSingle(),
+      window.sb.from('v_machine_staff').select('*'),
+      window.sb.from('employees').select('id, name, user_type, section_id, role, is_active'),
+      window.sb.from('v_machine_unknown_pins').select('*'),
+      window.sb.from('adms_pin_conflicts').select('*').is('resolved_at', null).order('created_at', { ascending: false }),
+      window.sb.from('quanto_code_conflicts').select('*').order('code'),
+      window.sb.from('adms_punches').select('punched_at, device_user_id, employee_id, outcome, sn')
+        .gte('punched_at', `${today} 00:00:00`).lte('punched_at', `${today} 23:59:59`)
+        .order('punched_at', { ascending: false }).limit(1000),
     ]);
-    const s = { late_cutoff: '10:00', match_threshold: '0.55', kiosk_pin: '0000', checkin_start: '08:00', late_cutoff_men: '10:00', late_cutoff_women: '09:30', late_cutoff_sunday: '10:30', early_cutoff_men: '22:00', early_cutoff_women: '20:00' };
-    (setRes.data || []).forEach(r => { s[r.key] = r.value; });
-    setSettings(s);
-
-    const counts = {};
-    (facesRes.data || []).forEach(f => {
-      counts[f.employee_id] = (counts[f.employee_id] || 0) + 1;
-    });
-    const staff = staffRes.data || [];
-    const enrolled = staff.filter(e => (counts[e.id] || 0) >= 3).length;
-    const partials = staff.filter(e => (counts[e.id] || 0) > 0 && (counts[e.id] || 0) < 3);
-    setFaceStats({ totalStaff: staff.length, enrolled, partials: partials.length });
-    setPartialList(partials.map(e => ({ ...e, count: counts[e.id] })));
+    const st = {}; (setRes.data || []).forEach(r => { st[r.key] = r.value; });
+    setSettings(st);
+    setSync(syncRes.data || null);
+    setStaff(staffRes.data || []);
+    setEmps(empRes.data || []);
+    setUnknown(unkRes.data || []);
+    setConflicts(confRes.data || []);
+    setDupCodes(dupRes.data || []);
+    setPunches(punchRes.data || []);
+    setRefreshedAt(new Date());
     setLoading(false);
   }, []);
-
+  useEffect(() => { load(); }, [load]);
   useEffect(() => {
     if (!window.sb) return;
-    fetchAll();
-    const ch = window.sb.channel('dash-kiosk')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'settings' },        () => fetchAll())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'face_embeddings' }, () => fetchAll())
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'employees' },       () => fetchAll())
+    let t = null;
+    const refresh = () => { clearTimeout(t); t = setTimeout(() => load(true), 600); };
+    const ch = window.sb.channel('machine-page-live')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'adms_punches' }, refresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'employees' }, refresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'adms_pin_conflicts' }, refresh)
       .subscribe();
-    return () => { window.sb.removeChannel(ch); };
-  }, [fetchAll]);
+    const iv = setInterval(() => load(true), 60000);
+    return () => { clearTimeout(t); clearInterval(iv); window.sb.removeChannel(ch); };
+  }, [load]);
 
-  const writeSetting = async (key, value) => {
-    if (!can('attendance', 'edit')) return;
-    setSavingKey(key);
-    try {
-      const { error } = await window.sb.from('settings').upsert({
-        key, value, updated_at: new Date().toISOString(),
-      }, { onConflict: 'key' });
-      if (error) toast('Could not save');
-      else {
-        setSettings(s => ({ ...s, [key]: value }));
-        toast('Saved');
-      }
-    } finally { setSavingKey(null); }
+  const empById = useMemo(() => { const m = {}; emps.forEach(e => { m[e.id] = e; }); return m; }, [emps]);
+  const withEmp = (r) => ({ ...r, __key: r.id, user_type: empById[r.id]?.user_type, role: empById[r.id]?.role });
+  const activeStaffRows = useMemo(() =>
+    staff.filter(r => r.is_active !== false && (empById[r.id]?.user_type || 'staff') === 'staff').map(withEmp),
+    [staff, empById]);
+
+  const noCode      = useMemo(() => activeStaffRows.filter(r => !r.pin), [activeStaffRows]);
+  const notOnMach   = useMemo(() => activeStaffRows.filter(r => r.pin && !r.on_machine), [activeStaffRows]);
+  const notEnrolled = useMemo(() => activeStaffRows.filter(r => r.on_machine && Number(r.punches_30d) === 0), [activeStaffRows]);
+  const enrolled    = useMemo(() => activeStaffRows.filter(r => r.on_machine && Number(r.punches_30d) > 0).length, [activeStaffRows]);
+  const probable    = useMemo(() => activeStaffRows.filter(r => r.code_source === 'quanto_probable'), [activeStaffRows]);
+  const punchRows   = useMemo(() => punches.map((p, i) => ({
+    ...p, __key: `${p.sn}-${p.device_user_id}-${p.punched_at}-${i}`,
+    code: empById[p.employee_id]?.employee_code || staff.find(s => s.id === p.employee_id)?.employee_code || '',
+    name: empById[p.employee_id]?.name || '',
+  })), [punches, empById, staff]);
+
+  const resolveConflict = async (row) => {
+    if (!canResolve) return;
+    if (!window.confirm(`Mark PIN ${row.pin} conflict as resolved?\n\nDo this after the code has been fixed in Quanto or the app — the next sync will re-file it if it is still wrong.`)) return;
+    const { error } = await window.sb.from('adms_pin_conflicts')
+      .update({ resolved_at: new Date().toISOString() }).eq('id', row.id);
+    if (error) { console.error(error); toast(error.message ? `Could not resolve: ${error.message}` : 'Could not resolve'); return; }
+    toast('Resolved');
+    load(true);
   };
 
-  const saveTimings = async () => {
-    if (!can('attendance', 'edit')) return;
-    setSavingKey('timings');
-    try {
-      const rows = [
-        { key: 'checkin_start',      value: settings.checkin_start },
-        { key: 'late_cutoff_men',    value: settings.late_cutoff_men },
-        { key: 'late_cutoff_women',  value: settings.late_cutoff_women },
-        { key: 'late_cutoff_sunday', value: settings.late_cutoff_sunday },
-        { key: 'early_cutoff_men',   value: settings.early_cutoff_men },
-        { key: 'early_cutoff_women', value: settings.early_cutoff_women },
-      ].map(r => ({ ...r, updated_at: new Date().toISOString() }));
-      const { error } = await window.sb.from('settings').upsert(rows, { onConflict: 'key' });
-      toast(error ? 'Could not save' : 'Saved');
-    } finally { setSavingKey(null); }
+  const goLive = settings.adms_go_live_at || '';
+  const goLiveOff = !goLive || goLive.startsWith('2099');
+  const outcomePill = (o) => {
+    const v = String(o || '');
+    const tone = v === 'check_in' || v === 'check_out' ? 'present'
+      : v === 'outpass_out' || v === 'outpass_in' ? 'leave'
+      : v === 'duplicate' || v === 'replay' || v === 'archived' ? 'unmarked'
+      : 'absent';
+    const label = { check_in: 'Check in', check_out: 'Check out', outpass_out: 'Outpass out', outpass_in: 'Outpass in',
+      duplicate: 'Duplicate', replay: 'Replay', archived: 'Archived (before go-live)', unknown_user: 'Unknown ID',
+      inactive: 'Inactive staff', device_disabled: 'Device disabled' }[v] || v || 'pending';
+    return <span className={`status-pill ${tone}`}>{label}</span>;
   };
-  const saveThreshold = () => writeSetting('match_threshold',
-    String(Math.max(0.30, Math.min(0.80, parseFloat(settings.match_threshold) || 0.55)).toFixed(2)));
-
-  const clearAllFaces = async () => {
-    if (!can('attendance', 'delete')) return;
-    if (!window.confirm('Delete ALL face embeddings across every employee?\n\nYou will need to re-enroll everyone via the mobile app. This cannot be undone.')) return;
-    const { error } = await window.sb.from('face_embeddings').delete().not('id', 'is', null);
-    if (error) toast('Could not delete');
-    else toast('All face data cleared');
-  };
-
-  const readOnly = !can('attendance', 'edit');
-  const thresholdPct = Math.round(parseFloat(settings.match_threshold) * 100);
-  const kioskHealth = useKioskHealth();
+  const card = (label, body, sub) => (
+    <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 14, padding: '14px 16px', minWidth: 0 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase', color: 'var(--inkMuted)', marginBottom: 6 }}>{label}</div>
+      <div style={{ fontSize: 14, fontWeight: 600 }}>{body}</div>
+      {sub && <div style={{ fontSize: 11.5, color: 'var(--inkMuted)', marginTop: 4 }}>{sub}</div>}
+    </div>
+  );
+  const sectionOf = (id) => SECTION_META[id]?.label || id || '';
 
   return (
     <div>
-      <KioskHealthBanner />
-      <div className="stat-strip">
-        <div className="stat present"><div className="k">Enrolled</div><div className="v">{faceStats.enrolled}</div></div>
-        <div className="stat late"><div className="k">Partial</div><div className="v">{faceStats.partials}</div></div>
-        <div className="stat"><div className="k">Active staff</div><div className="v">{faceStats.totalStaff}</div></div>
-        <div className="stat leave"><div className="k">Coverage</div><div className="v">{faceStats.totalStaff ? Math.round((faceStats.enrolled / faceStats.totalStaff) * 100) : 0}%</div></div>
-        <div className="stat"><div className="k">Threshold</div><div className="v">{thresholdPct}%</div></div>
+      <MachineHealthBanner />
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: 12, marginBottom: 16 }}>
+        {card('Machine',
+          devices.length === 0 ? <span className="muted">No device has reported yet</span> : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {devices.map(d => {
+                const age = ageMinutes(d.last_seen);
+                const bad = d.enabled === false || age == null || age >= MACHINE_STALE_MIN;
+                return (
+                  <div key={d.sn} style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                    <span>{d.name || d.sn}</span>
+                    <span style={{ color: bad ? 'var(--danger)' : 'var(--success)' }}>{fmtAgo(age)}</span>
+                    <span className={`status-pill ${d.enabled === false ? 'absent' : 'present'}`}>{d.enabled === false ? 'disabled' : 'enabled'}</span>
+                  </div>
+                );
+              })}
+            </div>
+          ),
+          devices.length ? devices.map(d => d.sn).join(' · ') : 'It reports every few seconds while powered and online.')}
+        {card('Go-live',
+          goLiveOff ? <span style={{ color: 'var(--warning)' }}>Off — punches archived</span>
+            : <span style={{ fontFamily: 'JetBrains Mono, Menlo, monospace' }}>{goLive}</span>,
+          goLiveOff ? 'Machine punches are stored but do not mark attendance yet.' : 'Punches from this moment mark attendance.')}
+        {card('Last staff sync (Quanto → app)',
+          !sync ? <span className="muted">Never run</span>
+            : sync.last_error ? <span style={{ color: 'var(--danger)' }}>Failed {fmtAgo(ageMinutes(sync.last_run_at))}</span>
+            : <span style={{ color: 'var(--success)' }}>OK {fmtAgo(ageMinutes(sync.last_success_at || sync.last_run_at))}</span>,
+          sync ? (sync.last_error ? String(sync.last_error).slice(0, 140) : (sync.last_summary ? String(sync.last_summary).slice(0, 140) : `ran ${fmtIstTs(sync.last_run_at)}`)) : 'Runs on the M1 every 30 minutes.')}
+        {card('Counts',
+          <span>{enrolled} enrolled · {notEnrolled.length} not yet · {notOnMach.length} not on machine · {noCode.length} no code</span>,
+          `${activeStaffRows.length} active staff · ${unknown.length} unknown IDs · ${conflicts.length} PIN conflicts · ${dupCodes.length} duplicate codes · ${punches.length} punches today`)}
       </div>
 
-      {/* Kiosk device health — one row per tablet that has ever pinged */}
-      <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 24, marginBottom: 16 }}>
-        <div style={{
-          fontFamily: 'Fraunces, Georgia, serif', fontSize: 20, fontWeight: 500,
-          letterSpacing: -0.3, marginBottom: 4,
-        }}>Kiosk health</div>
-        <div style={{ fontSize: 13, color: 'var(--inkMuted)', marginBottom: 14 }}>
-          The tablet pings every minute while the kiosk is open. It also refreshes
-          itself once a day (after 4:00 AM) so the browser never runs stale for weeks.
-          If a device stops pinging during store hours, a red warning appears here and
-          on the Attendance / Daily report pages.
-        </div>
-        {kioskHealth.beats.length === 0 ? (
-          <div style={{ fontSize: 13, color: 'var(--inkMuted)' }}>
-            No pings yet — the kiosk sends its first heartbeat within a minute of
-            opening the scanner on the updated app.
-          </div>
-        ) : kioskHealth.beats.map(b => {
-          const mins = kioskHealth.ageMin(b.last_seen);
-          const online = mins < KIOSK_STALE_MIN;
-          return (
-            <div key={b.device_id} style={{
-              display: 'flex', alignItems: 'center', gap: 12,
-              padding: '8px 0', borderTop: '1px solid var(--borderSoft)',
-              fontSize: 13,
-            }}>
-              <span className={`status-pill ${online ? 'present' : 'absent'}`}>
-                {online ? 'Online' : 'Not responding'}
-              </span>
-              <span style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 12, color: 'var(--inkMuted)' }}>
-                {b.device_id}
-              </span>
-              <span style={{ color: 'var(--inkSoft)' }}>
-                Last seen {fmtKioskAge(mins)}
-              </span>
-              {b.loaded_at && (
-                <span style={{ color: 'var(--inkMuted)', marginLeft: 'auto', fontSize: 12 }}>
-                  Page running since {new Date(b.loaded_at).toLocaleString('en-GB', {
-                    timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short',
-                    hour: '2-digit', minute: '2-digit',
-                  })}
-                </span>
-              )}
-            </div>
-          );
-        })}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, fontSize: 12, color: 'var(--inkMuted)' }}>
+        <button className="btn" onClick={() => load()} disabled={loading}>{loading ? 'Loading…' : 'Refresh'}</button>
+        <span>{refreshedAt ? `Updated ${refreshedAt.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} · refreshes on its own every minute` : ''}</span>
+        <span style={{ marginLeft: 'auto' }}>
+          Tablet kiosk: <strong>{settings.kiosk_enabled === 'false' ? 'off' : 'on'}</strong> (Settings)
+        </span>
       </div>
 
-      {/* Late cutoff + threshold in a two-column layout */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
-        <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 24 }}>
-          <div style={{
-            fontFamily: 'Fraunces, Georgia, serif', fontSize: 20, fontWeight: 500,
-            letterSpacing: -0.3, marginBottom: 4,
-          }}>Shift timings</div>
-          <div style={{ fontSize: 13, color: 'var(--inkMuted)', marginBottom: 16 }}>
-            Scans before <strong>check-in start</strong> count as check-out (handles after-midnight). A check-in at/after the gender cutoff is marked <strong>Late</strong>; a check-out <em>before</em> the gender closing time is flagged as <strong>Left early</strong>. On <strong>Sundays</strong> a single late cutoff applies to everyone, regardless of gender.
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
-            <div>
-              <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Check-in starts</label>
-              <input type="time" value={settings.checkin_start} disabled={readOnly}
-                onChange={e => setSettings(s => ({ ...s, checkin_start: e.target.value }))}
-                style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 16, height: 42, width: '100%', boxSizing: 'border-box' }} />
-            </div>
-            <div>
-              <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Sunday — late after (everyone)</label>
-              <input type="time" value={settings.late_cutoff_sunday} disabled={readOnly}
-                onChange={e => setSettings(s => ({ ...s, late_cutoff_sunday: e.target.value }))}
-                style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 16, height: 42, width: '100%', boxSizing: 'border-box' }} />
-            </div>
-            <div>
-              <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Men — late after</label>
-              <input type="time" value={settings.late_cutoff_men} disabled={readOnly}
-                onChange={e => setSettings(s => ({ ...s, late_cutoff_men: e.target.value }))}
-                style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 16, height: 42, width: '100%', boxSizing: 'border-box' }} />
-            </div>
-            <div>
-              <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Ladies — late after</label>
-              <input type="time" value={settings.late_cutoff_women} disabled={readOnly}
-                onChange={e => setSettings(s => ({ ...s, late_cutoff_women: e.target.value }))}
-                style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 16, height: 42, width: '100%', boxSizing: 'border-box' }} />
-            </div>
-            <div>
-              <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Men — left early before</label>
-              <input type="time" value={settings.early_cutoff_men} disabled={readOnly}
-                onChange={e => setSettings(s => ({ ...s, early_cutoff_men: e.target.value }))}
-                style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 16, height: 42, width: '100%', boxSizing: 'border-box' }} />
-            </div>
-            <div>
-              <label style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Ladies — left early before</label>
-              <input type="time" value={settings.early_cutoff_women} disabled={readOnly}
-                onChange={e => setSettings(s => ({ ...s, early_cutoff_women: e.target.value }))}
-                style={{ fontFamily: 'JetBrains Mono, Menlo, monospace', fontSize: 16, height: 42, width: '100%', boxSizing: 'border-box' }} />
-            </div>
-          </div>
-          {!readOnly && (
-            <button className="btn primary" onClick={saveTimings} disabled={savingKey === 'timings'}>
-              {savingKey === 'timings' ? 'Saving…' : 'Save timings'}
-            </button>
-          )}
-        </div>
+      <MachineTable
+        title="No code"
+        tone="absent"
+        hint="Active staff without an SA/SS code. The machine cannot know them until the code is typed on the Employees page (or the person is created in Quanto)."
+        empty="Every active staff member has a code."
+        rows={noCode}
+        columns={[
+          { label: 'ID', value: 'id', mono: true, width: 80 },
+          { label: 'Name', value: 'name', name: true },
+          { label: 'Role', value: 'role' },
+          { label: 'Section', value: r => sectionOf(r.section_id), width: 120 },
+          { label: 'Code source', value: r => r.code_source || '', width: 110 },
+        ]} />
 
-        <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 24 }}>
-          <div style={{
-            fontFamily: 'Fraunces, Georgia, serif', fontSize: 20, fontWeight: 500,
-            letterSpacing: -0.3, marginBottom: 4,
-          }}>Face match threshold</div>
-          <div style={{ fontSize: 13, color: 'var(--inkMuted)', marginBottom: 16 }}>
-            Minimum similarity required to accept a match. <strong>Higher = stricter</strong> (fewer wrong-person mistakes, more "try again" prompts). Lower = more lenient. The kiosk also requires 2 consecutive agreeing frames and an ambiguity gap on every match, so this is one of several safety layers. Recommended: 0.55.
-          </div>
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-            <input type="range" min="0.35" max="0.75" step="0.01"
-              value={settings.match_threshold}
-              disabled={readOnly}
-              onChange={e => setSettings(s => ({ ...s, match_threshold: e.target.value }))}
-              style={{ flex: 1 }} />
-            <input type="number" min="0.35" max="0.75" step="0.01"
-              value={settings.match_threshold}
-              disabled={readOnly}
-              onChange={e => setSettings(s => ({ ...s, match_threshold: e.target.value }))}
-              style={{ width: 90, fontFamily: 'JetBrains Mono, Menlo, monospace' }} />
-            {!readOnly && (
-              <button className="btn primary" onClick={saveThreshold} disabled={savingKey === 'match_threshold'}>
-                {savingKey === 'match_threshold' ? 'Saving…' : 'Save'}
-              </button>
-            )}
-          </div>
-          <div style={{ marginTop: 10, fontSize: 11.5, color: 'var(--inkFaint)' }}>
-            0.45 lenient · 0.55 balanced (default) · 0.65 strict · 0.70 very strict
-          </div>
-        </div>
-      </div>
+      <MachineTable
+        title="Not on machine"
+        tone="absent"
+        hint="Has a code, but the machine has no user for it. The trigger pushes new codes automatically — if a row sits here for more than a few minutes, check the machine is online, then the PIN conflicts below."
+        empty="Everyone with a code exists on the machine."
+        rows={notOnMach}
+        columns={[
+          { label: 'Code', value: r => r.employee_code || '', mono: true, width: 80 },
+          { label: 'Machine ID', value: 'pin', mono: true, width: 90 },
+          { label: 'Name', value: 'name', name: true },
+          { label: 'Section', value: r => sectionOf(r.section_id), width: 120 },
+          { label: 'Source', value: r => r.code_source || '', width: 110 },
+        ]} />
 
-      {/* Kiosk PIN */}
-      <div style={{
-        background: 'var(--surface)', border: '1px solid var(--border)',
-        borderRadius: 16, padding: 24, marginBottom: 16,
-      }}>
-        <div style={{
-          fontFamily: 'Fraunces, Georgia, serif', fontSize: 20, fontWeight: 500,
-          letterSpacing: -0.3, marginBottom: 4,
-        }}>Kiosk PIN</div>
-        <div style={{ fontSize: 13, color: 'var(--inkMuted)', marginBottom: 16 }}>
-          Needed to <strong>launch</strong> the kiosk from the app's login screen and to <strong>exit</strong> kiosk mode.
-          Keep it short so staff can remember it, but not something easy to guess.
-        </div>
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-          <input type="text" inputMode="numeric"
-            value={settings.kiosk_pin}
-            disabled={readOnly}
-            onChange={e => setSettings(s => ({ ...s, kiosk_pin: e.target.value }))}
-            placeholder="0000"
-            maxLength={12}
-            style={{
-              fontFamily: 'JetBrains Mono, Menlo, monospace',
-              fontSize: 18, height: 44, flex: 1, letterSpacing: 4, textAlign: 'center',
-            }} />
-          {!readOnly && (
-            <button className="btn primary"
-              onClick={() => writeSetting('kiosk_pin', (settings.kiosk_pin || '').trim() || '0000')}
-              disabled={savingKey === 'kiosk_pin'}>
-              {savingKey === 'kiosk_pin' ? 'Saving…' : 'Save'}
-            </button>
-          )}
-        </div>
-      </div>
+      <MachineTable
+        title="On machine, not enrolled yet"
+        tone="late"
+        hint="The machine knows the user but they have never punched in 30 days — their face or finger has not been enrolled at the machine (or they have not been in). Enrol them at the device under this machine ID."
+        empty="Everyone on the machine has punched in the last 30 days."
+        rows={notEnrolled}
+        columns={[
+          { label: 'Code', value: r => r.employee_code || '', mono: true, width: 80 },
+          { label: 'Machine ID', value: 'pin', mono: true, width: 90 },
+          { label: 'Name', value: 'name', name: true },
+          { label: 'Role', value: 'role' },
+          { label: 'Section', value: r => sectionOf(r.section_id), width: 120 },
+          { label: 'Last punch', value: r => fmtIstTs(r.last_punch), mono: true, width: 130 },
+        ]} />
 
-      {/* Dedicated kiosk phone — setup guide */}
-      <div style={{
-        background: 'var(--surface)', border: '1px solid var(--border)',
-        borderRadius: 16, padding: 24, marginBottom: 16,
-      }}>
-        <div style={{
-          fontFamily: 'Fraunces, Georgia, serif', fontSize: 20, fontWeight: 500,
-          letterSpacing: -0.3, marginBottom: 4,
-        }}>Set up a dedicated kiosk phone</div>
-        <div style={{ fontSize: 13, color: 'var(--inkMuted)', marginBottom: 16 }}>
-          Turn any phone or tablet into the attendance kiosk at the staff entrance. Once the phone enters kiosk mode, it stays in kiosk mode even after reboot — only someone with the PIN above can exit it.
-        </div>
-
-        <ol style={{ fontSize: 13.5, lineHeight: 1.65, color: 'var(--inkSoft)', paddingLeft: 20, margin: 0 }}>
-          <li style={{ marginBottom: 10 }}>
-            On the kiosk phone, open a browser (Safari on iPhone, Chrome on Android) and go to the <strong>staff app URL</strong> — the same link you use on your own phone.
-          </li>
-          <li style={{ marginBottom: 10 }}>
-            <strong>Install to home screen</strong> so it looks like an app (no browser bar):
-            <ul style={{ marginTop: 4, paddingLeft: 18 }}>
-              <li><em>iPhone</em>: tap Share → "Add to Home Screen".</li>
-              <li><em>Android</em>: tap menu (⋮) → "Install app" or "Add to Home screen".</li>
-            </ul>
-          </li>
-          <li style={{ marginBottom: 10 }}>
-            Open the new app icon. Log in with an <strong>Owner</strong> or <strong>HR</strong> account, then go to <strong>HR Tools → Kiosk scanner</strong>, enter the Kiosk PIN, and the kiosk screen opens.
-          </li>
-          <li style={{ marginBottom: 10 }}>
-            Allow the camera when the phone asks. The kiosk will remember the permission from here on.
-          </li>
-          <li style={{ marginBottom: 10 }}>
-            The phone is now "locked" to the kiosk — if staff close the app or the phone reboots, opening the app takes them straight back to the kiosk screen. The only way out is the Exit kiosk button + PIN.
-          </li>
-          <li style={{ marginBottom: 10 }}>
-            To stop staff from leaving the kiosk app entirely (swiping home, opening other apps), turn on the phone's built-in kiosk mode:
-            <ul style={{ marginTop: 4, paddingLeft: 18 }}>
-              <li><em>iPhone</em>: Settings → Accessibility → <strong>Guided Access</strong> → turn on. Then open the kiosk app and triple-click the side button to lock it.</li>
-              <li><em>Android</em>: Settings → Security → <strong>Screen pinning</strong> (or "App pinning") → turn on. Open the kiosk app, open Recents, and pin it.</li>
-            </ul>
-          </li>
-        </ol>
-
-        <div style={{
-          marginTop: 16, padding: 12, borderRadius: 10,
-          background: 'var(--surfaceAlt)', border: '1px solid var(--border)',
-          fontSize: 12.5, color: 'var(--inkSoft)',
-        }}>
-          <strong>Tip</strong>: Plug the kiosk phone into a charger at the entrance so it never runs out of battery. Set Auto-Lock to "Never" (iPhone: Settings → Display & Brightness; Android: Settings → Display → Screen timeout) so the screen stays on.
-        </div>
-      </div>
-
-      {/* Partials list + danger zone */}
-      <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 16, padding: 24, marginBottom: 16 }}>
-        <div style={{
-          fontFamily: 'Fraunces, Georgia, serif', fontSize: 20, fontWeight: 500,
-          letterSpacing: -0.3, marginBottom: 4,
-        }}>Partial enrollments</div>
-        <div style={{ fontSize: 13, color: 'var(--inkMuted)', marginBottom: 16 }}>
-          Staff with fewer than 3 face embeddings — they may not match reliably. Ask them to re-enroll from the mobile app.
-        </div>
-        {partialList.length === 0 ? (
-          <div style={{ fontSize: 13, color: 'var(--inkMuted)' }}>
-            {loading ? 'Loading…' : 'None — every enrolled employee has all 3 poses.'}
-          </div>
-        ) : (
-          <div className="table-wrap">
-            <table className="data">
-              <thead>
-                <tr>
-                  <th style={{ width: 80 }}>ID</th>
-                  <th>Name</th>
-                  <th>Role</th>
-                  <th style={{ width: 100 }}>Section</th>
-                  <th style={{ width: 80 }}>Poses</th>
-                </tr>
-              </thead>
-              <tbody>
-                {partialList.map(p => (
-                  <tr key={p.id}>
-                    <td className="id">{p.id}</td>
-                    <td className="name">{p.name}</td>
-                    <td>{p.role}</td>
-                    <td>{SECTION_META[p.section_id]?.label || '—'}</td>
-                    <td>
-                      <span className="status-pill late">{p.count}/3</span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* Danger zone — owner only */}
-      {can('attendance', 'delete') && (
-        <div style={{
-          background: 'var(--dangerSoft)', border: '1px solid rgba(179, 38, 30, 0.2)',
-          borderRadius: 16, padding: 24,
-        }}>
-          <div style={{
-            fontFamily: 'Fraunces, Georgia, serif', fontSize: 18, fontWeight: 500,
-            letterSpacing: -0.3, marginBottom: 4, color: 'var(--danger)',
-          }}>Danger zone</div>
-          <div style={{ fontSize: 13, color: 'var(--inkSoft)', marginBottom: 16 }}>
-            Delete all face embeddings for every employee. Use this if you want to retrain the kiosk from scratch. Staff will need to re-enroll on the mobile app.
-          </div>
-          <button className="btn danger" onClick={clearAllFaces}>
-            Clear all face data
-          </button>
-        </div>
+      {probable.length > 0 && (
+        <MachineTable
+          title="Probable matches to confirm"
+          tone="late"
+          hint="The Quanto sync matched these by a similar name. Confirm or clear each one on the Employees page (the badge next to the name)."
+          rows={probable}
+          columns={[
+            { label: 'Code', value: r => r.employee_code || '', mono: true, width: 80 },
+            { label: 'Name', value: 'name', name: true },
+            { label: 'Quanto id', value: r => r.quanto_employee_id ?? '', mono: true, width: 90 },
+            { label: 'Section', value: r => sectionOf(r.section_id), width: 120 },
+          ]} />
       )}
+
+      <MachineTable
+        title="Unknown machine IDs punching"
+        tone="absent"
+        hint="Punches in the last 30 days from a machine user no employee is linked to. Either the person has no code in the app, or the machine user was created by hand with the wrong ID."
+        empty="Every punch in the last 30 days belonged to a known employee."
+        rows={unknown.map(u => ({ ...u, __key: u.pin }))}
+        columns={[
+          { label: 'Machine ID', value: 'pin', mono: true, width: 100 },
+          { label: 'Name on machine', value: r => r.device_name || '' },
+          { label: 'Punches (30d)', value: 'punches_30d', mono: true, width: 110 },
+          { label: 'Last punch', value: r => fmtIstTs(r.last_punch), mono: true, width: 130 },
+        ]} />
+
+      <MachineTable
+        title="PIN conflicts"
+        tone="absent"
+        hint="Two people would share one machine ID, or the machine already holds a different name under that ID. Fix the code in Quanto or the app, then Resolve."
+        empty="No unresolved conflicts."
+        rows={conflicts.map(c => ({ ...c, __key: c.id }))}
+        columns={[
+          { label: 'Machine ID', value: 'pin', mono: true, width: 90 },
+          { label: 'Employee', value: r => `${r.app_name || ''}${r.employee_id ? ` (${r.employee_id})` : ''}` },
+          { label: 'Name on machine', value: r => r.device_name || '' },
+          { label: 'Reason', value: r => r.reason || '' },
+          { label: 'Since', value: r => fmtIstTs(r.created_at), mono: true, width: 120 },
+        ]}
+        action={canResolve ? (r) => (
+          <button className="btn" style={{ height: 26, padding: '0 10px', fontSize: 12 }} onClick={() => resolveConflict(r)}>Resolve</button>
+        ) : null} />
+
+      <MachineTable
+        title="Codes duplicated in Quanto"
+        tone="absent"
+        hint="One SA/SS code on more than one Quanto salesman. The sync cannot tell them apart, so neither reaches the machine until HR gives one of them a fresh code in Quanto."
+        empty="No duplicate codes in Quanto."
+        rows={dupCodes.map(d => ({ ...d, __key: d.code }))}
+        columns={[
+          { label: 'Code', value: 'code', mono: true, width: 80 },
+          { label: 'Holders', value: r => r.holders || '' },
+          { label: 'Active', value: 'active_n', mono: true, width: 70 },
+          { label: 'Seen', value: r => fmtIstTs(r.seen_at), mono: true, width: 120 },
+        ]} />
+
+      <MachineTable
+        title="Today's punches"
+        tone="present"
+        hint="Every scan the machine sent today, newest first, and what the app did with it."
+        empty="No punches yet today."
+        rows={punchRows}
+        columns={[
+          { label: 'Time', value: r => fmtIstTs(r.punched_at).slice(-5), mono: true, width: 70 },
+          { label: 'Code', value: r => r.code || '', mono: true, width: 80 },
+          { label: 'Machine ID', value: 'device_user_id', mono: true, width: 90 },
+          { label: 'Name', value: r => r.name || (r.employee_id ? r.employee_id : ''), name: true },
+          { label: 'Outcome', value: r => outcomePill(r.outcome), width: 170 },
+        ]} />
     </div>
   );
 };
@@ -10731,7 +11387,7 @@ const DailyReportPage = () => {
     const [eRes, aRes, lRes, fRes, sRes, evRes] = await Promise.all([
       window.sb.from('employees').select('id, name, role, section_id, user_type, gender')
         .eq('is_active', true).order('name'),
-      window.sb.from('attendance').select('employee_id, status, punch_in_time, punch_out_time')
+      window.sb.from('attendance').select('employee_id, status, punch_in_time, punch_out_time, source')
         .eq('date', date),
       window.sb.from('leave_requests').select('employee_id, from_date, days, type, status')
         .eq('status', 'approved').lte('from_date', date).gte('from_date', addDaysISO(date, -60)),
@@ -10816,7 +11472,7 @@ const DailyReportPage = () => {
       const insideMins = (hasIn && inT && outT && !openFlag) ? Math.max(0, toMin(outT) - toMin(inT) - outpassMins) : null;
       return {
         id: e.id, name: e.name, role: e.role, section_id: e.section_id, status,
-        in: a?.punch_in_time || null, out: a?.punch_out_time || null,
+        in: a?.punch_in_time || null, out: a?.punch_out_time || null, source: a?.source || null,
         leaveType, early, ops, outpassMins, insideMins, incomplete, hasIn,
       };
     });
@@ -10855,6 +11511,7 @@ const DailyReportPage = () => {
       section: sec.label, name: r.name, id: r.id, role: r.role || '',
       status: DR_STATUS[r.status].label, in: fmtT(r.in), out: fmtT(r.out),
       early: r.early ? 'Yes' : '',
+      source: sourceLabel(r.source),
       outpass_n: r.ops ? r.ops.length : 0,
       outpass_total: r.outpassMins ? fmtDur(r.outpassMins) : '',
       outpass_times: opsText(r.ops),
@@ -10867,6 +11524,7 @@ const DailyReportPage = () => {
       { label: 'ID', value: 'id' }, { label: 'Role', value: 'role' },
       { label: 'Status', value: 'status' }, { label: 'In', value: 'in' },
       { label: 'Out', value: 'out' }, { label: 'Left early', value: 'early' },
+      { label: 'Source', value: 'source' },
       { label: 'Outpasses', value: 'outpass_n' }, { label: 'Outpass total', value: 'outpass_total' },
       { label: 'Outpass times', value: 'outpass_times' }, { label: 'Time inside', value: 'inside' },
       { label: 'Leave type', value: 'leave' },
@@ -10889,7 +11547,7 @@ const DailyReportPage = () => {
         .dr-section { break-inside: avoid; }
       }`}</style>
 
-      <div data-print-hide><KioskHealthBanner /></div>
+      <div data-print-hide><MachineHealthBanner /></div>
 
       <div className="toolbar" style={{ margin: '0 0 16px', display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }} data-print-hide>
         <span style={{ fontSize: 12, color: 'var(--inkMuted)' }}>Date</span>
@@ -10947,7 +11605,7 @@ const DailyReportPage = () => {
                 <tr style={{ borderTop: '1px solid var(--borderSoft, var(--border))' }}>
                   <td style={{ padding: '5px 8px' }}>{r.name} <span style={{ fontSize: 11, color: 'var(--inkMuted)' }}>{r.id}</span></td>
                   <td style={{ padding: '5px 8px' }}>{chip(r.status, r.leaveType)}</td>
-                  <td style={{ padding: '5px 8px', fontFamily: 'JetBrains Mono, Menlo, monospace', color: r.status === 'late' ? '#C0392B' : 'inherit', fontWeight: r.status === 'late' ? 700 : 400 }}>{fmtT(r.in)}</td>
+                  <td style={{ padding: '5px 8px', fontFamily: 'JetBrains Mono, Menlo, monospace', color: r.status === 'late' ? '#C0392B' : 'inherit', fontWeight: r.status === 'late' ? 700 : 400, whiteSpace: 'nowrap' }}>{fmtT(r.in)}{r.source && (r.in || r.out) ? <span style={{ marginLeft: 5, fontFamily: 'system-ui, sans-serif' }}><SourceBadge source={r.source} /></span> : null}</td>
                   <td style={{ padding: '5px 8px', fontFamily: 'JetBrains Mono, Menlo, monospace', color: r.early ? '#C0392B' : 'inherit', fontWeight: r.early ? 700 : 400 }}>{fmtT(r.out)}{r.early ? <span style={{ fontFamily: 'system-ui, sans-serif', fontSize: 10, fontWeight: 700, marginLeft: 5 }}>EARLY</span> : null}</td>
                   <td style={{ padding: '5px 8px', color: '#C97A1A', cursor: hasOps ? 'pointer' : 'default' }}
                     onClick={hasOps ? () => toggleExpand(r.id) : undefined} data-print-hide={false}>
@@ -11240,7 +11898,7 @@ const Page = ({ name }) => {
   if (name === 'bonus')         return <BonusPlannerPage />;
   if (name === 'advances')      return <AdvancesPage />;
   if (name === 'reports')       return <ReportsPage />;
-  if (name === 'kiosk')         return <KioskSettingsPage />;
+  if (name === 'machine')       return <MachinePage />;
   if (name === 'team_access')   return <TeamAccessPage />;
   if (name === 'profile')       return <ProfilePage />;
   if (name === 'automations')   return <AutomationsPage />;
